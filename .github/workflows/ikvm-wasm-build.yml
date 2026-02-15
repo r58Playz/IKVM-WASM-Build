@@ -1,0 +1,166 @@
+name: IKVM WASM Build
+
+env:
+  EMSDK_VERSION: 3.1.56
+  DOTNET_SDK_VERSION: 8.0.x
+  IKVM_REF: 8.14.0
+
+on:
+  push:
+    branches:
+      - master 
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        pthread_enabled: [true, false]
+    runs-on: ubuntu-latest
+    name: Build IKVM artifacts (pthread=${{ matrix.pthread_enabled }})
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt -y update
+          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git unzip zip
+
+      - name: Get IKVM DLLs and Image from NuGet
+        run: |
+          # Create a temp project to restore all IKVM packages
+          cat > /tmp/ikvm-restore.csproj << 'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="IKVM" Version="8.14.0" />
+              <PackageReference Include="IKVM.ByteCode" Version="9.3.4" />
+              <PackageReference Include="IKVM.Image.JRE" Version="8.14.0" />
+            </ItemGroup>
+          </Project>
+          EOF
+          dotnet restore /tmp/ikvm-restore.csproj --source https://api.nuget.org/v3/index.json
+          
+          # Copy DLLs
+          mkdir -p out/managed/dll out/bundle/dll out/bundle/native out/native/tmp out/release out/bundle/image
+          cp ~/.nuget/packages/ikvm/8.14.0/runtimes/linux/lib/net8.0/IKVM.Runtime.dll out/managed/dll/
+          cp ~/.nuget/packages/ikvm/8.14.0/runtimes/linux/lib/net8.0/IKVM.CoreLib.dll out/managed/dll/
+          cp ~/.nuget/packages/ikvm/8.14.0/runtimes/linux/lib/net8.0/IKVM.Java.dll out/managed/dll/
+          cp ~/.nuget/packages/ikvm.bytecode/9.3.4/lib/net8.0/IKVM.ByteCode.dll out/managed/dll/
+          
+          # Copy image
+          cp -r ~/.nuget/packages/ikvm.image.runtime.linux-x64/8.14.0/ikvm/any/linux-x64/* out/bundle/image/ 2>/dev/null || true
+
+      - name: Checkout IKVM source for native build
+        uses: actions/checkout@v4
+        with:
+          repository: ikvmnet/ikvm
+          path: ikvm
+          ref: ${{ env.IKVM_REF }}
+          submodules: recursive
+
+      - name: Build WASM native artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PREFIX=""
+          PTHREAD_FLAGS=()
+
+          if [ "${{ matrix.pthread_enabled }}" = "false" ]; then
+            PREFIX="ST-"
+          else
+            PTHREAD_FLAGS=( -pthread )
+          fi
+
+          LIBJVM_SRC="ikvm/src/libjvm"
+          LIBIKVM_SRC="ikvm/src/libikvm"
+          OPENJDK_DIR="ikvm/ext/openjdk"
+
+          COMMON_DEFS=( -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux -DLINUX -D__int64='long long' )
+          COMMON_INCLUDES=(
+            -I"$LIBJVM_SRC"
+            -I"$OPENJDK_DIR/hotspot/src/share/vm"
+            -I"$OPENJDK_DIR/hotspot/src/share/vm/prims"
+            -I"$OPENJDK_DIR/hotspot/src/cpu/x86/vm"
+            -I"$OPENJDK_DIR/hotspot/src/os/linux/vm"
+            -I"$OPENJDK_DIR/jdk/src/share/javavm/export"
+            -I"$OPENJDK_DIR/jdk/src/solaris/javavm/export"
+            -I"$OPENJDK_DIR/jdk/src/linux/javavm/export"
+          )
+
+          emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni.c" -o out/native/tmp/jni.o "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+          emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni_vargs.c" -o out/native/tmp/jni_vargs.o "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+          em++ -O2 -fPIC -std=c++11 -Wno-error -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm.cpp" -o out/native/tmp/jvm.o "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+          emar rcs "out/native/${PREFIX}libjvm.a" out/native/tmp/jni.o out/native/tmp/jni_vargs.o out/native/tmp/jvm.o
+
+          emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c" -o out/native/tmp/dl.o
+          emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o out/native/tmp/sig.o
+          emar rcs "out/native/${PREFIX}libikvm.a" out/native/tmp/dl.o out/native/tmp/sig.o
+
+      - name: Bundle artifacts
+        run: |
+          PREFIX=""
+          if [ "${{ matrix.pthread_enabled }}" = "false" ]; then
+            PREFIX="ST-"
+          fi
+
+          cp out/managed/dll/IKVM.CoreLib.dll out/bundle/dll/
+          cp out/managed/dll/IKVM.Java.dll out/bundle/dll/
+          cp out/managed/dll/IKVM.Runtime.dll out/bundle/dll/
+          cp out/managed/dll/IKVM.ByteCode.dll out/bundle/dll/
+          cp "out/native/${PREFIX}libjvm.a" out/bundle/native/
+          cp "out/native/${PREFIX}libikvm.a" out/bundle/native/
+
+          ZIP_NAME="ikvm-wasm-${PREFIX}bundle.zip"
+          zip -j "out/release/$ZIP_NAME" out/bundle/dll/*.dll out/bundle/native/*.a
+          if [ -d "out/bundle/image" ]; then
+            (cd out/bundle && zip -r -u ../release/$ZIP_NAME image)
+          fi
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikvm-wasm-build-pthread-${{ matrix.pthread_enabled }}
+          path: out/release/*.zip
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: write
+    name: Create Release
+    steps:
+      - name: Generate release id
+        run: echo RELEASE_NAME=$(uuidgen) >> $GITHUB_ENV
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Organize release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release_assets
+          find artifacts/ -type f -name "*.zip" -exec cp {} release_assets/ \;
+
+      - name: Create release
+        uses: ncipollo/release-action@v1
+        with:
+          name: "IKVM WASM ${{ env.RELEASE_NAME }}"
+          body: "These are the IKVM libs build for WASM (Emscripten)"
+          commit: ${{ github.ref_name }}
+          tag: ${{ env.RELEASE_NAME }}
+          removeArtifacts: true
+          artifacts: "release_assets/*.zip"
+          token: ${{ secrets.GITHUB_TOKEN }}
