@@ -1,0 +1,2168 @@
+diff --git a/src/IKVM.Java/IKVM.Java.runtime.targets b/src/IKVM.Java/IKVM.Java.runtime.targets
+index bfef3bb82..21221ff72 100644
+--- a/src/IKVM.Java/IKVM.Java.runtime.targets
++++ b/src/IKVM.Java/IKVM.Java.runtime.targets
+@@ -16,10 +16,15 @@
+     <Import Project="$(MSBuildThisFileDirectory)..\..\targets\openjdk.buildtools.targets" />
+ 
+     <Target Name="FindJdk">
+-        <FindJdk Family="8">
++        <!-- If JAVA_HOME is explicitly set (e.g., from GitHub Actions setup-java), use it directly -->
++        <PropertyGroup>
++            <JdkPath Condition=" '$(JAVA_HOME)' != '' ">$(JAVA_HOME)</JdkPath>
++        </PropertyGroup>
++        <!-- Otherwise, fall back to searching for JDK 8 -->
++        <FindJdk Family="8" Condition=" '$(JdkPath)' == '' ">
+             <Output TaskParameter="JdkPath" PropertyName="JdkPath" />
+         </FindJdk>
+-        <Error Condition=" '$(JdkPath)' == '' " Text="Failed to locate JDK. IKVM.Java requires JDK version 8 available on the system." />
++        <Error Condition=" '$(JdkPath)' == '' " Text="Failed to locate JDK. IKVM.Java requires JDK version 8 or higher available on the system." />
+     </Target>
+ 
+     <Target Name="ResolveJava" DependsOnTargets="FindJdk" Condition=" '$(JavaPath)' == '' ">
+diff --git a/src/IKVM.Runtime/JNI/JNIEnv.cs b/src/IKVM.Runtime/JNI/JNIEnv.cs
+index 87f4359c1..0f5b2c856 100644
+--- a/src/IKVM.Runtime/JNI/JNIEnv.cs
++++ b/src/IKVM.Runtime/JNI/JNIEnv.cs
+@@ -1,4 +1,4 @@
+-﻿/*
++/*
+   Copyright (C) 2002-2014 Jeroen Frijters
+ 
+   This software is provided 'as-is', without any express or implied
+@@ -34,6 +34,8 @@ Jeroen Frijters
+ using IKVM.CoreLib.Diagnostics;
+ using IKVM.Runtime.Extensions;
+ 
++using Mono.Interop;
++
+ namespace IKVM.Runtime.JNI
+ {
+ 
+@@ -161,6 +163,7 @@ internal static string DecodeMUTF8(byte* psz)
+         /// <param name="methodID"></param>
+         /// <param name="sig"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetMethodArgsDelegateType))]
+         internal static int GetMethodArgs(JNIEnv* pEnv, nint methodID, byte* sig)
+         {
+             var args = RuntimeJavaMethod.FromCookie(methodID).GetParameters();
+@@ -170,11 +173,13 @@ internal static int GetMethodArgs(JNIEnv* pEnv, nint methodID, byte* sig)
+             return args.Length;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetVersionDelegateType))]
+         internal static int GetVersion(JNIEnv* pEnv)
+         {
+             return JNI_VERSION_1_8;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.DefineClassDelegateType))]
+         internal static nint DefineClass(JNIEnv* pEnv, byte* name, nint loader, jbyte* pbuf, jint length)
+         {
+             try
+@@ -204,6 +209,7 @@ static RuntimeClassLoader FindNativeMethodClassLoader(JNIEnv* pEnv)
+                 return env.context.ClassLoaderFactory.GetClassLoaderWrapper(java.lang.ClassLoader.getSystemClassLoader());
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.FindClassDelegateType))]
+         internal static nint FindClass(JNIEnv* pEnv, byte* name)
+         {
+             try
+@@ -241,6 +247,7 @@ internal static nint FindClass(JNIEnv* pEnv, byte* name)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.FromReflectedMethodDelegateType))]
+         internal static nint FromReflectedMethod(JNIEnv* pEnv, nint method)
+         {
+             try
+@@ -254,6 +261,7 @@ internal static nint FromReflectedMethod(JNIEnv* pEnv, nint method)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.FromReflectedFieldDelegateType))]
+         internal static nint FromReflectedField(JNIEnv* pEnv, nint field)
+         {
+             try
+@@ -267,6 +275,7 @@ internal static nint FromReflectedField(JNIEnv* pEnv, nint field)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ToReflectedMethodDelegateType))]
+         internal static nint ToReflectedMethod(JNIEnv* pEnv, nint clazz_ignored, nint method, sbyte isStatic)
+         {
+             try
+@@ -280,6 +289,7 @@ internal static nint ToReflectedMethod(JNIEnv* pEnv, nint clazz_ignored, nint me
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetSuperclassDelegateType))]
+         internal static nint GetSuperclass(JNIEnv* pEnv, nint sub)
+         {
+             try
+@@ -294,6 +304,7 @@ internal static nint GetSuperclass(JNIEnv* pEnv, nint sub)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.IsAssignableFromDelegateType))]
+         internal static sbyte IsAssignableFrom(JNIEnv* pEnv, nint sub, nint super)
+         {
+             try
+@@ -309,6 +320,7 @@ internal static sbyte IsAssignableFrom(JNIEnv* pEnv, nint sub, nint super)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ToReflectedFieldDelegateType))]
+         internal static nint ToReflectedField(JNIEnv* pEnv, nint clazz_ignored, nint field, jboolean isStatic)
+         {
+             try
+@@ -322,6 +334,7 @@ internal static nint ToReflectedField(JNIEnv* pEnv, nint clazz_ignored, nint fie
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ThrowDelegateType))]
+         internal static jint Throw(JNIEnv* pEnv, nint throwable)
+         {
+             try
+@@ -340,6 +353,7 @@ internal static jint Throw(JNIEnv* pEnv, nint throwable)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ThrowNewDelegateType))]
+         internal static jint ThrowNew(JNIEnv* pEnv, nint clazz, byte* msg)
+         {
+             try
+@@ -379,6 +393,7 @@ internal static jint ThrowNew(JNIEnv* pEnv, nint clazz, byte* msg)
+         /// </summary>
+         /// <param name="pEnv"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ExceptionOccurredDelegateType))]
+         internal static nint ExceptionOccurred(JNIEnv* pEnv)
+         {
+             try
+@@ -396,6 +411,7 @@ internal static nint ExceptionOccurred(JNIEnv* pEnv)
+         /// Implements the JNI 'ExceptionDescribe' function.
+         /// </summary>
+         /// <param name="pEnv"></param>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ExceptionDescribeDelegateType))]
+         internal static void ExceptionDescribe(JNIEnv* pEnv)
+         {
+             try
+@@ -425,6 +441,7 @@ internal static void ExceptionDescribe(JNIEnv* pEnv)
+         /// Implements the JNI 'ExceptionClear' function.
+         /// </summary>
+         /// <param name="pEnv"></param>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ExceptionClearDelegateType))]
+         internal static void ExceptionClear(JNIEnv* pEnv)
+         {
+             try
+@@ -442,6 +459,7 @@ internal static void ExceptionClear(JNIEnv* pEnv)
+         /// </summary>
+         /// <param name="pEnv"></param>
+         /// <param name="msg"></param>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.FatalErrorDelegateType))]
+         internal static void FatalError(JNIEnv* pEnv, byte* msg)
+         {
+             Console.Error.WriteLine("FATAL ERROR in native method: {0}", msg == null ? "(null)" : DecodeMUTF8Argument(msg, nameof(msg)));
+@@ -455,6 +473,7 @@ internal static void FatalError(JNIEnv* pEnv, byte* msg)
+         /// <param name="pEnv"></param>
+         /// <param name="capacity"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.PushLocalFrameDelegateType))]
+         internal static jint PushLocalFrame(JNIEnv* pEnv, jint capacity)
+         {
+             try
+@@ -474,6 +493,7 @@ internal static jint PushLocalFrame(JNIEnv* pEnv, jint capacity)
+         /// <param name="pEnv"></param>
+         /// <param name="result"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.PopLocalFrameDelegateType))]
+         internal static nint PopLocalFrame(JNIEnv* pEnv, nint result)
+         {
+             try
+@@ -494,6 +514,7 @@ internal static nint PopLocalFrame(JNIEnv* pEnv, nint result)
+         /// <param name="pEnv"></param>
+         /// <param name="obj"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewGlobalRefDelegateType))]
+         internal static nint NewGlobalRef(JNIEnv* pEnv, nint obj)
+         {
+             try
+@@ -513,6 +534,7 @@ internal static nint NewGlobalRef(JNIEnv* pEnv, nint obj)
+         /// </summary>
+         /// <param name="pEnv"></param>
+         /// <param name="obj"></param>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.DeleteGlobalRefDelegateType))]
+         internal static void DeleteGlobalRef(JNIEnv* pEnv, nint obj)
+         {
+             try
+@@ -537,6 +559,7 @@ internal static void DeleteGlobalRef(JNIEnv* pEnv, nint obj)
+         /// </summary>
+         /// <param name="pEnv"></param>
+         /// <param name="obj"></param>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.DeleteLocalRefDelegateType))]
+         internal static void DeleteLocalRef(JNIEnv* pEnv, nint obj)
+         {
+             try
+@@ -556,6 +579,7 @@ internal static void DeleteLocalRef(JNIEnv* pEnv, nint obj)
+         /// <param name="obj1"></param>
+         /// <param name="obj2"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.IsSameObjectDelegateType))]
+         internal static jboolean IsSameObject(JNIEnv* pEnv, nint obj1, nint obj2)
+         {
+             try
+@@ -575,6 +599,7 @@ internal static jboolean IsSameObject(JNIEnv* pEnv, nint obj1, nint obj2)
+         /// <param name="pEnv"></param>
+         /// <param name="obj"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewLocalRefDelegateType))]
+         internal static nint NewLocalRef(JNIEnv* pEnv, nint obj)
+         {
+             try
+@@ -594,6 +619,7 @@ internal static nint NewLocalRef(JNIEnv* pEnv, nint obj)
+         /// <param name="pEnv"></param>
+         /// <param name="capacity"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.EnsureLocalCapacityDelegateType))]
+         internal static jint EnsureLocalCapacity(JNIEnv* pEnv, jint capacity)
+         {
+             // since we can dynamically grow the local ref table, we'll just return success for any number
+@@ -606,6 +632,7 @@ internal static jint EnsureLocalCapacity(JNIEnv* pEnv, jint capacity)
+         /// <param name="pEnv"></param>
+         /// <param name="clazz"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.AllocObjectDelegateType))]
+         internal static nint AllocObject(JNIEnv* pEnv, nint clazz)
+         {
+             try
+@@ -749,6 +776,7 @@ static object InvokeNonVirtual(JNIEnvContext env, RuntimeJavaMethod mw, object o
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewObjectADelegateType))]
+         public static nint NewObjectA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -778,6 +806,7 @@ public static nint NewObjectA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* a
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetObjectClassDelegateType))]
+         internal static nint GetObjectClass(JNIEnv* pEnv, nint obj)
+         {
+             try
+@@ -791,6 +820,7 @@ internal static nint GetObjectClass(JNIEnv* pEnv, nint obj)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.IsInstanceOfDelegateType))]
+         internal static jboolean IsInstanceOf(JNIEnv* pEnv, nint obj, nint clazz)
+         {
+             try
+@@ -897,6 +927,7 @@ static nint FindMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig, bool i
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetMethodIDDelegateType))]
+         internal static nint GetMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig)
+         {
+             try
+@@ -910,6 +941,7 @@ internal static nint GetMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallObjectMethodADelegateType))]
+         internal static nint CallObjectMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -923,6 +955,7 @@ internal static nint CallObjectMethodA(JNIEnv* pEnv, nint obj, nint methodID, JV
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallBooleanMethodADelegateType))]
+         internal static jboolean CallBooleanMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -940,6 +973,7 @@ internal static jboolean CallBooleanMethodA(JNIEnv* pEnv, nint obj, nint methodI
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallByteMethodADelegateType))]
+         internal static jbyte CallByteMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -957,6 +991,7 @@ internal static jbyte CallByteMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallCharMethodADelegateType))]
+         internal static jchar CallCharMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -974,6 +1009,7 @@ internal static jchar CallCharMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallShortMethodADelegateType))]
+         internal static jshort CallShortMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -991,6 +1027,7 @@ internal static jshort CallShortMethodA(JNIEnv* pEnv, nint obj, nint methodID, J
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallIntMethodADelegateType))]
+         internal static jint CallIntMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -1008,6 +1045,7 @@ internal static jint CallIntMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValu
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallLongMethodADelegateType))]
+         internal static jlong CallLongMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -1025,6 +1063,7 @@ internal static jlong CallLongMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallFloatMethodADelegateType))]
+         internal static jfloat CallFloatMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -1042,6 +1081,7 @@ internal static jfloat CallFloatMethodA(JNIEnv* pEnv, nint obj, nint methodID, J
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallDoubleMethodADelegateType))]
+         internal static jdouble CallDoubleMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -1059,6 +1099,7 @@ internal static jdouble CallDoubleMethodA(JNIEnv* pEnv, nint obj, nint methodID,
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallVoidMethodADelegateType))]
+         internal static void CallVoidMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
+         {
+             try
+@@ -1071,6 +1112,7 @@ internal static void CallVoidMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVal
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualObjectMethodADelegateType))]
+         internal static nint CallNonvirtualObjectMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1084,6 +1126,7 @@ internal static nint CallNonvirtualObjectMethodA(JNIEnv* pEnv, nint obj, nint cl
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualBooleanMethodADelegateType))]
+         internal static jboolean CallNonvirtualBooleanMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1101,6 +1144,7 @@ internal static jboolean CallNonvirtualBooleanMethodA(JNIEnv* pEnv, nint obj, ni
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualByteMethodADelegateType))]
+         internal static jbyte CallNonvirtualByteMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1118,6 +1162,7 @@ internal static jbyte CallNonvirtualByteMethodA(JNIEnv* pEnv, nint obj, nint cla
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualCharMethodADelegateType))]
+         internal static jchar CallNonvirtualCharMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1135,6 +1180,7 @@ internal static jchar CallNonvirtualCharMethodA(JNIEnv* pEnv, nint obj, nint cla
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualShortMethodADelegateType))]
+         internal static jshort CallNonvirtualShortMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1152,6 +1198,7 @@ internal static jshort CallNonvirtualShortMethodA(JNIEnv* pEnv, nint obj, nint c
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualIntMethodADelegateType))]
+         internal static jint CallNonvirtualIntMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1169,6 +1216,7 @@ internal static jint CallNonvirtualIntMethodA(JNIEnv* pEnv, nint obj, nint clazz
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualLongMethodADelegateType))]
+         internal static jlong CallNonvirtualLongMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1186,6 +1234,7 @@ internal static jlong CallNonvirtualLongMethodA(JNIEnv* pEnv, nint obj, nint cla
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualFloatMethodADelegateType))]
+         internal static jfloat CallNonvirtualFloatMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1203,6 +1252,7 @@ internal static jfloat CallNonvirtualFloatMethodA(JNIEnv* pEnv, nint obj, nint c
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualDoubleMethodADelegateType))]
+         internal static jdouble CallNonvirtualDoubleMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1220,6 +1270,7 @@ internal static jdouble CallNonvirtualDoubleMethodA(JNIEnv* pEnv, nint obj, nint
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallNonvirtualVoidMethodADelegateType))]
+         internal static void CallNonvirtualVoidMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1274,6 +1325,7 @@ static nint FindFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig, bool is
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetFieldIDDelegateType))]
+         internal static nint GetFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig)
+         {
+             try
+@@ -1292,6 +1344,7 @@ static RuntimeJavaField GetFieldWrapper(nint cookie)
+             return RuntimeJavaField.FromCookie(cookie);
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetObjectFieldDelegateType))]
+         internal static nint GetObjectField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1309,6 +1362,7 @@ internal static nint GetObjectField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetBooleanFieldDelegateType))]
+         internal static jboolean GetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1326,6 +1380,7 @@ internal static jboolean GetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetByteFieldDelegateType))]
+         internal static jbyte GetByteField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1343,6 +1398,7 @@ internal static jbyte GetByteField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetCharFieldDelegateType))]
+         internal static jchar GetCharField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1360,6 +1416,7 @@ internal static jchar GetCharField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetShortFieldDelegateType))]
+         internal static jshort GetShortField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1377,6 +1434,7 @@ internal static jshort GetShortField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetIntFieldDelegateType))]
+         internal static jint GetIntField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1394,6 +1452,7 @@ internal static jint GetIntField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetLongFieldDelegateType))]
+         internal static jlong GetLongField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1411,6 +1470,7 @@ internal static jlong GetLongField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetFloatFieldDelegateType))]
+         internal static jfloat GetFloatField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1428,6 +1488,7 @@ internal static jfloat GetFloatField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetDoubleFieldDelegateType))]
+         internal static jdouble GetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1445,6 +1506,7 @@ internal static jdouble GetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetObjectFieldDelegateType))]
+         internal static void SetObjectField(JNIEnv* pEnv, nint obj, nint fieldID, nint val)
+         {
+ #if FIRST_PASS
+@@ -1461,6 +1523,7 @@ internal static void SetObjectField(JNIEnv* pEnv, nint obj, nint fieldID, nint v
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetBooleanFieldDelegateType))]
+         internal static void SetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID, jboolean val)
+         {
+ #if FIRST_PASS
+@@ -1477,6 +1540,7 @@ internal static void SetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID, jbool
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetByteFieldDelegateType))]
+         internal static void SetByteField(JNIEnv* pEnv, nint obj, nint fieldID, jbyte val)
+         {
+ #if FIRST_PASS
+@@ -1493,6 +1557,7 @@ internal static void SetByteField(JNIEnv* pEnv, nint obj, nint fieldID, jbyte va
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetCharFieldDelegateType))]
+         internal static void SetCharField(JNIEnv* pEnv, nint obj, nint fieldID, jchar val)
+         {
+ #if FIRST_PASS
+@@ -1509,6 +1574,7 @@ internal static void SetCharField(JNIEnv* pEnv, nint obj, nint fieldID, jchar va
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetShortFieldDelegateType))]
+         internal static void SetShortField(JNIEnv* pEnv, nint obj, nint fieldID, jshort val)
+         {
+ #if FIRST_PASS
+@@ -1525,6 +1591,7 @@ internal static void SetShortField(JNIEnv* pEnv, nint obj, nint fieldID, jshort
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetIntFieldDelegateType))]
+         internal static void SetIntField(JNIEnv* pEnv, nint obj, nint fieldID, jint val)
+         {
+ #if FIRST_PASS
+@@ -1541,6 +1608,7 @@ internal static void SetIntField(JNIEnv* pEnv, nint obj, nint fieldID, jint val)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetLongFieldDelegateType))]
+         internal static void SetLongField(JNIEnv* pEnv, nint obj, nint fieldID, jlong val)
+         {
+ #if FIRST_PASS
+@@ -1557,6 +1625,7 @@ internal static void SetLongField(JNIEnv* pEnv, nint obj, nint fieldID, jlong va
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetFloatFieldDelegateType))]
+         internal static void SetFloatField(JNIEnv* pEnv, nint obj, nint fieldID, jfloat val)
+         {
+ #if FIRST_PASS
+@@ -1573,6 +1642,7 @@ internal static void SetFloatField(JNIEnv* pEnv, nint obj, nint fieldID, jfloat
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetDoubleFieldDelegateType))]
+         internal static void SetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID, jdouble val)
+         {
+ #if FIRST_PASS
+@@ -1589,11 +1659,13 @@ internal static void SetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID, jdoubl
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticMethodIDDelegateType))]
+         internal static nint GetStaticMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig)
+         {
+             return FindMethodID(pEnv, clazz, name, sig, true);
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticObjectMethodADelegateType))]
+         internal static nint CallStaticObjectMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1607,6 +1679,7 @@ internal static nint CallStaticObjectMethodA(JNIEnv* pEnv, nint clazz, nint meth
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticBooleanMethodADelegateType))]
+         internal static jboolean CallStaticBooleanMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1621,6 +1694,7 @@ internal static jboolean CallStaticBooleanMethodA(JNIEnv* pEnv, nint clazz, nint
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticByteMethodADelegateType))]
+         internal static jbyte CallStaticByteMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1635,6 +1709,7 @@ internal static jbyte CallStaticByteMethodA(JNIEnv* pEnv, nint clazz, nint metho
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticCharMethodADelegateType))]
+         internal static jchar CallStaticCharMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1649,6 +1724,7 @@ internal static jchar CallStaticCharMethodA(JNIEnv* pEnv, nint clazz, nint metho
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticShortMethodADelegateType))]
+         internal static jshort CallStaticShortMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1663,6 +1739,7 @@ internal static jshort CallStaticShortMethodA(JNIEnv* pEnv, nint clazz, nint met
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticIntMethodADelegateType))]
+         internal static jint CallStaticIntMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1677,6 +1754,7 @@ internal static jint CallStaticIntMethodA(JNIEnv* pEnv, nint clazz, nint methodI
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticLongMethodADelegateType))]
+         internal static jlong CallStaticLongMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1691,6 +1769,7 @@ internal static jlong CallStaticLongMethodA(JNIEnv* pEnv, nint clazz, nint metho
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticFloatMethodADelegateType))]
+         internal static jfloat CallStaticFloatMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1705,6 +1784,7 @@ internal static jfloat CallStaticFloatMethodA(JNIEnv* pEnv, nint clazz, nint met
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticDoubleMethodADelegateType))]
+         internal static jdouble CallStaticDoubleMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
+         {
+             try
+@@ -1719,6 +1799,7 @@ internal static jdouble CallStaticDoubleMethodA(JNIEnv* pEnv, nint clazz, nint m
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.CallStaticVoidMethodADelegateType))]
+         internal static void CallStaticVoidMethodA(JNIEnv* pEnv, nint cls, nint methodID, JValue* args)
+         {
+             try
+@@ -1731,6 +1812,7 @@ internal static void CallStaticVoidMethodA(JNIEnv* pEnv, nint cls, nint methodID
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticFieldIDDelegateType))]
+         internal static nint GetStaticFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig)
+         {
+             try
+@@ -1744,6 +1826,7 @@ internal static nint GetStaticFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticObjectFieldDelegateType))]
+         internal static nint GetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1761,6 +1844,7 @@ internal static nint GetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticBooleanFieldDelegateType))]
+         internal static jboolean GetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1778,6 +1862,7 @@ internal static jboolean GetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fi
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticByteFieldDelegateType))]
+         internal static jbyte GetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1795,6 +1880,7 @@ internal static jbyte GetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticCharFieldDelegateType))]
+         internal static jchar GetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1812,6 +1898,7 @@ internal static jchar GetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticShortFieldDelegateType))]
+         internal static jshort GetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1829,6 +1916,7 @@ internal static jshort GetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldI
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticIntFieldDelegateType))]
+         internal static jint GetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1846,6 +1934,7 @@ internal static jint GetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticLongFieldDelegateType))]
+         internal static jlong GetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1863,6 +1952,7 @@ internal static jlong GetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID)
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticFloatFieldDelegateType))]
+         internal static jfloat GetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1880,6 +1970,7 @@ internal static jfloat GetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldI
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStaticDoubleFieldDelegateType))]
+         internal static jdouble GetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fieldID)
+         {
+ #if FIRST_PASS
+@@ -1897,6 +1988,7 @@ internal static jdouble GetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fiel
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticObjectFieldDelegateType))]
+         internal static void SetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID, nint val)
+         {
+ #if FIRST_PASS
+@@ -1913,6 +2005,7 @@ internal static void SetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticBooleanFieldDelegateType))]
+         internal static void SetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fieldID, jboolean val)
+         {
+ #if FIRST_PASS
+@@ -1929,6 +2022,7 @@ internal static void SetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fieldI
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticByteFieldDelegateType))]
+         internal static void SetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID, jbyte val)
+         {
+ #if FIRST_PASS
+@@ -1945,6 +2039,7 @@ internal static void SetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID,
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticCharFieldDelegateType))]
+         internal static void SetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID, jchar val)
+         {
+ #if FIRST_PASS
+@@ -1961,6 +2056,7 @@ internal static void SetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID,
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticShortFieldDelegateType))]
+         internal static void SetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldID, jshort val)
+         {
+ #if FIRST_PASS
+@@ -1977,6 +2073,7 @@ internal static void SetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldID,
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticIntFieldDelegateType))]
+         internal static void SetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID, jint val)
+         {
+ #if FIRST_PASS
+@@ -1993,6 +2090,7 @@ internal static void SetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID, j
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticLongFieldDelegateType))]
+         internal static void SetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID, jlong val)
+         {
+ #if FIRST_PASS
+@@ -2009,6 +2107,7 @@ internal static void SetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID,
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticFloatFieldDelegateType))]
+         internal static void SetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldID, jfloat val)
+         {
+ #if FIRST_PASS
+@@ -2025,6 +2124,7 @@ internal static void SetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldID,
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetStaticDoubleFieldDelegateType))]
+         internal static void SetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fieldID, jdouble val)
+         {
+ #if FIRST_PASS
+@@ -2034,16 +2134,19 @@ internal static void SetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fieldID
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewStringDelegateType))]
+         internal static nint NewString(JNIEnv* pEnv, jchar* unicode, int len)
+         {
+             return pEnv->MakeLocalRef(new String((char*)unicode, 0, len));
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStringLengthDelegateType))]
+         internal static jint GetStringLength(JNIEnv* pEnv, nint str)
+         {
+             return ((string)pEnv->UnwrapRef(str)).Length;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStringCharsDelegateType))]
+         internal static jchar* GetStringChars(JNIEnv* pEnv, nint str, jboolean* isCopy)
+         {
+             try
+@@ -2061,6 +2164,7 @@ internal static jint GetStringLength(JNIEnv* pEnv, nint str)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseStringCharsDelegateType))]
+         internal static void ReleaseStringChars(JNIEnv* pEnv, nint str, jchar* chars)
+         {
+             try
+@@ -2074,6 +2178,7 @@ internal static void ReleaseStringChars(JNIEnv* pEnv, nint str, jchar* chars)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewStringUTFDelegateType))]
+         internal static nint NewStringUTF(JNIEnv* pEnv, byte* bytes)
+         {
+             try
+@@ -2087,6 +2192,7 @@ internal static nint NewStringUTF(JNIEnv* pEnv, byte* bytes)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStringUTFLengthDelegateType))]
+         internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
+         {
+             try
+@@ -2100,6 +2206,7 @@ internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStringUTFCharsDelegateType))]
+         internal static byte* GetStringUTFChars(JNIEnv* pEnv, nint @string, jboolean* isCopy)
+         {
+             try
+@@ -2142,16 +2249,19 @@ internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseStringUTFCharsDelegateType))]
+         internal static void ReleaseStringUTFChars(JNIEnv* pEnv, nint @string, byte* utf)
+         {
+             JNIMemory.Free((IntPtr)(void*)utf);
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetArrayLengthDelegateType))]
+         internal static jsize GetArrayLength(JNIEnv* pEnv, nint array)
+         {
+             return ((Array)pEnv->UnwrapRef(array)).Length;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewObjectArrayDelegateType))]
+         internal static nint NewObjectArray(JNIEnv* pEnv, jsize len, nint clazz, nint init)
+         {
+             try
+@@ -2177,6 +2287,7 @@ internal static nint NewObjectArray(JNIEnv* pEnv, jsize len, nint clazz, nint in
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetObjectArrayElementDelegateType))]
+         internal static nint GetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index)
+         {
+             try
+@@ -2191,6 +2302,7 @@ internal static nint GetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetObjectArrayElementDelegateType))]
+         internal static void SetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index, nint val)
+         {
+             try
+@@ -2216,6 +2328,7 @@ internal static void SetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewBooleanArrayDelegateType))]
+         internal static nint NewBooleanArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2229,6 +2342,7 @@ internal static nint NewBooleanArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewByteArrayDelegateType))]
+         internal static nint NewByteArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2242,6 +2356,7 @@ internal static nint NewByteArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewCharArrayDelegateType))]
+         internal static nint NewCharArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2255,6 +2370,7 @@ internal static nint NewCharArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewShortArrayDelegateType))]
+         internal static nint NewShortArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2268,6 +2384,7 @@ internal static nint NewShortArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewIntArrayDelegateType))]
+         internal static nint NewIntArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2281,6 +2398,7 @@ internal static nint NewIntArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewLongArrayDelegateType))]
+         internal static nint NewLongArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2294,6 +2412,7 @@ internal static nint NewLongArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewFloatArrayDelegateType))]
+         internal static nint NewFloatArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2307,6 +2426,7 @@ internal static nint NewFloatArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewDoubleArrayDelegateType))]
+         internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+         {
+             try
+@@ -2320,6 +2440,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetBooleanArrayElementsDelegateType))]
+         internal static jboolean* GetBooleanArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             var b = (bool[])pEnv->UnwrapRef(array);
+@@ -2333,6 +2454,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return p;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetByteArrayElementsDelegateType))]
+         internal static jbyte* GetByteArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             byte[] b = (byte[])pEnv->UnwrapRef(array);
+@@ -2346,6 +2468,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return p;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetCharArrayElementsDelegateType))]
+         internal static jchar* GetCharArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             char[] b = (char[])pEnv->UnwrapRef(array);
+@@ -2358,6 +2481,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return (jchar*)(void*)buf;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetShortArrayElementsDelegateType))]
+         internal static jshort* GetShortArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             short[] b = (short[])pEnv->UnwrapRef(array);
+@@ -2370,6 +2494,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return (jshort*)(void*)buf;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetIntArrayElementsDelegateType))]
+         internal static jint* GetIntArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             int[] b = (int[])pEnv->UnwrapRef(array);
+@@ -2382,6 +2507,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return (jint*)(void*)buf;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetLongArrayElementsDelegateType))]
+         internal static jlong* GetLongArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             long[] b = (long[])pEnv->UnwrapRef(array);
+@@ -2394,6 +2520,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return (jlong*)(void*)buf;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetFloatArrayElementsDelegateType))]
+         internal static jfloat* GetFloatArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             float[] b = (float[])pEnv->UnwrapRef(array);
+@@ -2406,6 +2533,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return (jfloat*)(void*)buf;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetDoubleArrayElementsDelegateType))]
+         internal static jdouble* GetDoubleArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             double[] b = (double[])pEnv->UnwrapRef(array);
+@@ -2418,6 +2546,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+             return (jdouble*)(void*)buf;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseBooleanArrayElementsDelegateType))]
+         internal static void ReleaseBooleanArrayElements(JNIEnv* pEnv, nint array, jboolean* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2434,6 +2563,7 @@ internal static void ReleaseBooleanArrayElements(JNIEnv* pEnv, nint array, jbool
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseByteArrayElementsDelegateType))]
+         internal static void ReleaseByteArrayElements(JNIEnv* pEnv, nint array, jbyte* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2450,6 +2580,7 @@ internal static void ReleaseByteArrayElements(JNIEnv* pEnv, nint array, jbyte* e
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseCharArrayElementsDelegateType))]
+         internal static void ReleaseCharArrayElements(JNIEnv* pEnv, nint array, jchar* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2463,6 +2594,7 @@ internal static void ReleaseCharArrayElements(JNIEnv* pEnv, nint array, jchar* e
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseShortArrayElementsDelegateType))]
+         internal static void ReleaseShortArrayElements(JNIEnv* pEnv, nint array, jshort* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2476,6 +2608,7 @@ internal static void ReleaseShortArrayElements(JNIEnv* pEnv, nint array, jshort*
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseIntArrayElementsDelegateType))]
+         internal static void ReleaseIntArrayElements(JNIEnv* pEnv, nint array, jint* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2489,6 +2622,7 @@ internal static void ReleaseIntArrayElements(JNIEnv* pEnv, nint array, jint* ele
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseLongArrayElementsDelegateType))]
+         internal static void ReleaseLongArrayElements(JNIEnv* pEnv, nint array, jlong* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2502,6 +2636,7 @@ internal static void ReleaseLongArrayElements(JNIEnv* pEnv, nint array, jlong* e
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseFloatArrayElementsDelegateType))]
+         internal static void ReleaseFloatArrayElements(JNIEnv* pEnv, nint array, jfloat* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2515,6 +2650,7 @@ internal static void ReleaseFloatArrayElements(JNIEnv* pEnv, nint array, jfloat*
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseDoubleArrayElementsDelegateType))]
+         internal static void ReleaseDoubleArrayElements(JNIEnv* pEnv, nint array, jdouble* elems, jint mode)
+         {
+             if (mode == 0 || mode == JNI_COMMIT)
+@@ -2528,6 +2664,7 @@ internal static void ReleaseDoubleArrayElements(JNIEnv* pEnv, nint array, jdoubl
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetBooleanArrayRegionDelegateType))]
+         internal static void GetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jboolean* buf)
+         {
+             try
+@@ -2545,6 +2682,7 @@ internal static void GetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start,
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetByteArrayRegionDelegateType))]
+         internal static void GetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jbyte* buf)
+         {
+             try
+@@ -2562,6 +2700,7 @@ internal static void GetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetCharArrayRegionDelegateType))]
+         internal static void GetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jchar* buf)
+         {
+             try
+@@ -2575,6 +2714,7 @@ internal static void GetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetShortArrayRegionDelegateType))]
+         internal static void GetShortArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jshort* buf)
+         {
+             try
+@@ -2588,6 +2728,7 @@ internal static void GetShortArrayRegion(JNIEnv* pEnv, nint array, int start, in
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetIntArrayRegionDelegateType))]
+         internal static void GetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jint* buf)
+         {
+             try
+@@ -2601,6 +2742,7 @@ internal static void GetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetLongArrayRegionDelegateType))]
+         internal static void GetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jlong* buf)
+         {
+             try
+@@ -2614,6 +2756,7 @@ internal static void GetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetFloatArrayRegionDelegateType))]
+         internal static void GetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jfloat* buf)
+         {
+             try
+@@ -2627,6 +2770,7 @@ internal static void GetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, in
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetDoubleArrayRegionDelegateType))]
+         internal static void GetDoubleArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jdouble* buf)
+         {
+             try
+@@ -2640,6 +2784,7 @@ internal static void GetDoubleArrayRegion(JNIEnv* pEnv, nint array, int start, i
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetBooleanArrayRegionDelegateType))]
+         internal static void SetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jboolean* buf)
+         {
+             try
+@@ -2657,6 +2802,7 @@ internal static void SetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start,
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetByteArrayRegionDelegateType))]
+         internal static void SetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jbyte* buf)
+         {
+             try
+@@ -2674,6 +2820,7 @@ internal static void SetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetCharArrayRegionDelegateType))]
+         internal static void SetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jchar* buf)
+         {
+             try
+@@ -2687,6 +2834,7 @@ internal static void SetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetShortArrayRegionDelegateType))]
+         internal static void SetShortArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jshort* buf)
+         {
+             try
+@@ -2700,6 +2848,7 @@ internal static void SetShortArrayRegion(JNIEnv* pEnv, nint array, int start, in
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetIntArrayRegionDelegateType))]
+         internal static void SetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jint* buf)
+         {
+             try
+@@ -2713,6 +2862,7 @@ internal static void SetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetLongArrayRegionDelegateType))]
+         internal static void SetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jlong* buf)
+         {
+             try
+@@ -2726,6 +2876,7 @@ internal static void SetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetFloatArrayRegionDelegateType))]
+         internal static void SetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jfloat* buf)
+         {
+             try
+@@ -2739,6 +2890,7 @@ internal static void SetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, in
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.SetDoubleArrayRegionDelegateType))]
+         internal static void SetDoubleArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jdouble* buf)
+         {
+             try
+@@ -2760,6 +2912,7 @@ unsafe internal struct JNINativeMethod
+             public void* fnPtr;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.RegisterNativesDelegateType))]
+         internal static jint RegisterNatives(JNIEnv* pEnv, nint clazz, JNINativeMethod* methods, jint nMethods)
+         {
+             try
+@@ -2800,6 +2953,7 @@ internal static jint RegisterNatives(JNIEnv* pEnv, nint clazz, JNINativeMethod*
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.UnregisterNativesDelegateType))]
+         internal static jint UnregisterNatives(JNIEnv* pEnv, nint clazz)
+         {
+             try
+@@ -2830,6 +2984,7 @@ internal static jint UnregisterNatives(JNIEnv* pEnv, nint clazz)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.MonitorEnterDelegateType))]
+         internal static jint MonitorEnter(JNIEnv* pEnv, nint obj)
+         {
+             try
+@@ -2848,6 +3003,7 @@ internal static jint MonitorEnter(JNIEnv* pEnv, nint obj)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.MonitorExitDelegateType))]
+         internal static jint MonitorExit(JNIEnv* pEnv, nint obj)
+         {
+             try
+@@ -2862,12 +3018,14 @@ internal static jint MonitorExit(JNIEnv* pEnv, nint obj)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetJavaVMDelegateType))]
+         internal static jint GetJavaVM(JNIEnv* pEnv, JavaVM** ppJavaVM)
+         {
+             *ppJavaVM = JavaVM.pJavaVM;
+             return JNI_OK;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStringRegionDelegateType))]
+         internal static void GetStringRegion(JNIEnv* pEnv, nint str, jsize start, jsize len, jchar* buf)
+         {
+             string s = (string)pEnv->UnwrapRef(str);
+@@ -2895,6 +3053,7 @@ internal static void GetStringRegion(JNIEnv* pEnv, nint str, jsize start, jsize
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStringUTFRegionDelegateType))]
+         internal static void GetStringUTFRegion(JNIEnv* pEnv, nint str, jsize start, jsize len, byte* buf)
+         {
+             string s = (string)pEnv->UnwrapRef(str);
+@@ -2974,6 +3133,7 @@ void UnpinObject(object obj)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetPrimitiveArrayCriticalDelegateType))]
+         internal static void* GetPrimitiveArrayCritical(JNIEnv* pEnv, nint array, jboolean* isCopy)
+         {
+             if (isCopy != null)
+@@ -2982,6 +3142,7 @@ void UnpinObject(object obj)
+             return pEnv->PinObject(pEnv->UnwrapRef(array));
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleasePrimitiveArrayCriticalDelegateType))]
+         internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, void* carray, jint mode)
+         {
+             pEnv->UnpinObject(pEnv->UnwrapRef(array));
+@@ -2994,6 +3155,7 @@ internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, voi
+         /// <param name="str"></param>
+         /// <param name="isCopy"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetStringCriticalDelegateType))]
+         internal static jchar* GetStringCritical(JNIEnv* pEnv, nint str, jboolean* isCopy)
+         {
+             if (isCopy != null)
+@@ -3008,6 +3170,7 @@ internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, voi
+         /// <param name="pEnv"></param>
+         /// <param name="str"></param>
+         /// <param name="cstring"></param>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ReleaseStringCriticalDelegateType))]
+         internal static void ReleaseStringCritical(JNIEnv* pEnv, nint str, jchar* cstring)
+         {
+             pEnv->UnpinObject(pEnv->UnwrapRef(str));
+@@ -3019,6 +3182,7 @@ internal static void ReleaseStringCritical(JNIEnv* pEnv, nint str, jchar* cstrin
+         /// <param name="pEnv"></param>
+         /// <param name="obj"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewWeakGlobalRefDelegateType))]
+         internal static nint NewWeakGlobalRef(JNIEnv* pEnv, nint obj)
+         {
+             var o = pEnv->UnwrapRef(obj);
+@@ -3030,6 +3194,7 @@ internal static nint NewWeakGlobalRef(JNIEnv* pEnv, nint obj)
+         /// </summary>
+         /// <param name="pEnv"></param>
+         /// <param name="obj"></param>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.DeleteWeakGlobalRefDelegateType))]
+         internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
+         {
+             if (IsGlobalRef(obj))
+@@ -3047,11 +3212,13 @@ internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
+         /// </summary>
+         /// <param name="pEnv"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(JNINativeInterface.ExceptionCheckDelegateType))]
+         internal static jboolean ExceptionCheck(JNIEnv* pEnv)
+         {
+             return JVM.GetPendingException() != null ? JNI_TRUE : JNI_FALSE;
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.NewDirectByteBufferDelegateType))]
+         internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong capacity)
+         {
+ #if FIRST_PASS
+@@ -3075,6 +3242,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+ #endif
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetDirectBufferAddressDelegateType))]
+         internal static void* GetDirectBufferAddress(JNIEnv* pEnv, nint buf)
+         {
+             try
+@@ -3088,6 +3256,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetDirectBufferCapacityDelegateType))]
+         internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
+         {
+             try
+@@ -3101,6 +3270,7 @@ internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
+             }
+         }
+ 
++        [MonoPInvokeCallback(typeof(JNINativeInterface.GetObjectRefTypeDelegateType))]
+         internal static JObjectRefType GetObjectRefType(JNIEnv* pEnv, nint obj)
+         {
+             int i = ((IntPtr)obj).ToInt32();
+diff --git a/src/IKVM.Runtime/JNI/JNINativeInterface.cs b/src/IKVM.Runtime/JNI/JNINativeInterface.cs
+index 3b0ab9e1c..acbdbd12d 100644
+--- a/src/IKVM.Runtime/JNI/JNINativeInterface.cs
++++ b/src/IKVM.Runtime/JNI/JNINativeInterface.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Runtime.InteropServices;
+ 
+ using Microsoft.Win32.SafeHandles;
+@@ -82,214 +82,214 @@ protected override bool ReleaseHandle()
+         #region Delegates
+ 
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+-        delegate int GetMethodArgsDelegateType(JNIEnv* pEnv, jmethodID methodID, byte* sig);
+-
+-        delegate jint GetVersionDelegateType(JNIEnv* pEnv);
+-        delegate jclass DefineClassDelegateType(JNIEnv* pEnv, byte* name, jobject loader, jbyte* pbuf, jint length);
+-        delegate jclass FindClassDelegateType(JNIEnv* pEnv, byte* name);
+-
+-        delegate jmethodID FromReflectedMethodDelegateType(JNIEnv* pEnv, jmethodID methodID);
+-        delegate jfieldID FromReflectedFieldDelegateType(JNIEnv* pEnv, jfieldID fieldID);
+-
+-        delegate jobject ToReflectedMethodDelegateType(JNIEnv* pEnv, jclass clazz_ignored, jmethodID method, jboolean isStatic);
+-
+-        delegate jclass GetSuperclassDelegateType(JNIEnv* pEnv, jclass sub);
+-        delegate jboolean IsAssignableFromDelegateType(JNIEnv* pEnv, jclass sub, jclass super);
+-
+-        delegate jobject ToReflectedFieldDelegateType(JNIEnv* pEnv, jclass clazz_ignored, jfieldID field, jboolean isStatic);
+-
+-        delegate jint ThrowDelegateType(JNIEnv* pEnv, jthrowable throwable);
+-        delegate jint ThrowNewDelegateType(JNIEnv* pEnv, jclass clazz, byte* msg);
+-        delegate jthrowable ExceptionOccurredDelegateType(JNIEnv* pEnv);
+-        delegate void ExceptionDescribeDelegateType(JNIEnv* pEnv);
+-        delegate void ExceptionClearDelegateType(JNIEnv* pEnv);
+-        delegate void FatalErrorDelegateType(JNIEnv* pEnv, byte* msg);
+-
+-        delegate jint PushLocalFrameDelegateType(JNIEnv* pEnv, jint capacity);
+-        delegate jobject PopLocalFrameDelegateType(JNIEnv* pEnv, jobject result);
+-
+-        delegate jobject NewGlobalRefDelegateType(JNIEnv* pEnv, jobject obj);
+-        delegate void DeleteGlobalRefDelegateType(JNIEnv* pEnv, jobject obj);
+-        delegate void DeleteLocalRefDelegateType(JNIEnv* pEnv, jobject obj);
+-        delegate jboolean IsSameObjectDelegateType(JNIEnv* pEnv, jobject obj1, jobject obj2);
+-        delegate jobject NewLocalRefDelegateType(JNIEnv* pEnv, jobject obj);
+-        delegate jint EnsureLocalCapacityDelegateType(JNIEnv* pEnv, jint capacity);
+-
+-        delegate jobject AllocObjectDelegateType(JNIEnv* pEnv, jclass clazz);
+-        delegate jobject NewObjectADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-
+-        delegate jclass GetObjectClassDelegateType(JNIEnv* pEnv, jobject obj);
+-        delegate jboolean IsInstanceOfDelegateType(JNIEnv* pEnv, jobject obj, jclass clazz);
+-
+-        delegate jmethodID GetMethodIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
+-
+-        delegate jobject CallObjectMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jboolean CallBooleanMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jbyte CallByteMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jchar CallCharMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jshort CallShortMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jint CallIntMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jlong CallLongMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jfloat CallFloatMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate jdouble CallDoubleMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-        delegate void CallVoidMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
+-
+-        delegate jobject CallNonvirtualObjectMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jboolean CallNonvirtualBooleanMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jbyte CallNonvirtualByteMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jchar CallNonvirtualCharMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jshort CallNonvirtualShortMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jint CallNonvirtualIntMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jlong CallNonvirtualLongMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jfloat CallNonvirtualFloatMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jdouble CallNonvirtualDoubleMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate void CallNonvirtualVoidMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
+-
+-        delegate jfieldID GetFieldIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
+-
+-        delegate jobject GetObjectFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jboolean GetBooleanFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jbyte GetByteFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jchar GetCharFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jshort GetShortFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jint GetIntFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jlong GetLongFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jfloat GetFloatFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-        delegate jdouble GetDoubleFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
+-
+-        delegate void SetObjectFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jobject val);
+-        delegate void SetBooleanFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jboolean val);
+-        delegate void SetByteFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jbyte val);
+-        delegate void SetCharFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jchar val);
+-        delegate void SetShortFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jshort val);
+-        delegate void SetIntFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jint val);
+-        delegate void SetLongFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jlong val);
+-        delegate void SetFloatFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jfloat val);
+-        delegate void SetDoubleFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jdouble val);
+-
+-        delegate jmethodID GetStaticMethodIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
+-
+-        delegate jobject CallStaticObjectMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jboolean CallStaticBooleanMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jbyte CallStaticByteMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jchar CallStaticCharMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jshort CallStaticShortMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jint CallStaticIntMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jlong CallStaticLongMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jfloat CallStaticFloatMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate jdouble CallStaticDoubleMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-        delegate void CallStaticVoidMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
+-
+-        delegate jfieldID GetStaticFieldIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
+-
+-        delegate jobject GetStaticObjectFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jboolean GetStaticBooleanFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jbyte GetStaticByteFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jchar GetStaticCharFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jshort GetStaticShortFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jint GetStaticIntFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jlong GetStaticLongFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jfloat GetStaticFloatFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-        delegate jdouble GetStaticDoubleFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
+-
+-        delegate void SetStaticObjectFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jobject val);
+-        delegate void SetStaticBooleanFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jboolean val);
+-        delegate void SetStaticByteFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jbyte val);
+-        delegate void SetStaticCharFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jchar val);
+-        delegate void SetStaticShortFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jshort val);
+-        delegate void SetStaticIntFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jint val);
+-        delegate void SetStaticLongFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jlong val);
+-        delegate void SetStaticFloatFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jfloat val);
+-        delegate void SetStaticDoubleFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jdouble val);
+-
+-        delegate jstring NewStringDelegateType(JNIEnv* pEnv, jchar* unicode, int len);
+-        delegate jint GetStringLengthDelegateType(JNIEnv* pEnv, jstring str);
+-        delegate jchar* GetStringCharsDelegateType(JNIEnv* pEnv, jstring str, jboolean* isCopy);
+-        delegate void ReleaseStringCharsDelegateType(JNIEnv* pEnv, jstring str, jchar* chars);
+-
+-        delegate jobject NewStringUTFDelegateType(JNIEnv* pEnv, byte* bytes);
+-        delegate jint GetStringUTFLengthDelegateType(JNIEnv* pEnv, jstring str);
+-        delegate byte* GetStringUTFCharsDelegateType(JNIEnv* pEnv, jstring @string, jboolean* isCopy);
+-        delegate void ReleaseStringUTFCharsDelegateType(JNIEnv* pEnv, jstring @string, byte* utf);
+-
+-        delegate jsize GetArrayLengthDelegateType(JNIEnv* pEnv, jarray array);
+-
+-        delegate jobjectArray NewObjectArrayDelegateType(JNIEnv* pEnv, jsize len, jclass clazz, jobject init);
+-        delegate jobject GetObjectArrayElementDelegateType(JNIEnv* pEnv, jarray array, jsize index);
+-        delegate void SetObjectArrayElementDelegateType(JNIEnv* pEnv, jarray array, jsize index, jobject val);
+-
+-        delegate jbooleanArray NewBooleanArrayDelegateType(JNIEnv* pEnv, jsize len);
+-        delegate jbyteArray NewByteArrayDelegateType(JNIEnv* pEnv, jsize len);
+-        delegate jcharArray NewCharArrayDelegateType(JNIEnv* pEnv, jsize len);
+-        delegate jshortArray NewShortArrayDelegateType(JNIEnv* pEnv, jsize len);
+-        delegate jintArray NewIntArrayDelegateType(JNIEnv* pEnv, jsize len);
+-        delegate jlongArray NewLongArrayDelegateType(JNIEnv* pEnv, jsize len);
+-        delegate jfloatArray NewFloatArrayDelegateType(JNIEnv* pEnv, jsize len);
+-        delegate jdoubleArray NewDoubleArrayDelegateType(JNIEnv* pEnv, jsize len);
+-
+-        delegate jboolean* GetBooleanArrayElementsDelegateType(JNIEnv* pEnv, jbooleanArray array, jboolean* isCopy);
+-        delegate jbyte* GetByteArrayElementsDelegateType(JNIEnv* pEnv, jbyteArray array, jboolean* isCopy);
+-        delegate jchar* GetCharArrayElementsDelegateType(JNIEnv* pEnv, jcharArray array, jboolean* isCopy);
+-        delegate jshort* GetShortArrayElementsDelegateType(JNIEnv* pEnv, jshortArray array, jboolean* isCopy);
+-        delegate jint* GetIntArrayElementsDelegateType(JNIEnv* pEnv, jintArray array, jboolean* isCopy);
+-        delegate jlong* GetLongArrayElementsDelegateType(JNIEnv* pEnv, jlongArray array, jboolean* isCopy);
+-        delegate jfloat* GetFloatArrayElementsDelegateType(JNIEnv* pEnv, jfloatArray array, jboolean* isCopy);
+-        delegate jdouble* GetDoubleArrayElementsDelegateType(JNIEnv* pEnv, jdoubleArray array, jboolean* isCopy);
+-
+-        delegate void ReleaseBooleanArrayElementsDelegateType(JNIEnv* pEnv, jbooleanArray array, jboolean* elems, jint mode);
+-        delegate void ReleaseByteArrayElementsDelegateType(JNIEnv* pEnv, jbyteArray array, jbyte* elems, jint mode);
+-        delegate void ReleaseCharArrayElementsDelegateType(JNIEnv* pEnv, jcharArray array, jchar* elems, jint mode);
+-        delegate void ReleaseShortArrayElementsDelegateType(JNIEnv* pEnv, jshortArray array, jshort* elems, jint mode);
+-        delegate void ReleaseIntArrayElementsDelegateType(JNIEnv* pEnv, jintArray array, jint* elems, jint mode);
+-        delegate void ReleaseLongArrayElementsDelegateType(JNIEnv* pEnv, jlongArray array, jlong* elems, jint mode);
+-        delegate void ReleaseFloatArrayElementsDelegateType(JNIEnv* pEnv, jfloatArray array, jfloat* elems, jint mode);
+-        delegate void ReleaseDoubleArrayElementsDelegateType(JNIEnv* pEnv, jdoubleArray array, jdouble* elems, jint mode);
+-
+-        delegate void GetBooleanArrayRegionDelegateType(JNIEnv* pEnv, jbooleanArray array, jsize start, jsize len, jboolean* buf);
+-        delegate void GetByteArrayRegionDelegateType(JNIEnv* pEnv, jbyteArray array, jsize start, jsize len, jbyte* buf);
+-        delegate void GetCharArrayRegionDelegateType(JNIEnv* pEnv, jcharArray array, jsize start, jsize len, jchar* buf);
+-        delegate void GetShortArrayRegionDelegateType(JNIEnv* pEnv, jshortArray array, jsize start, jsize len, jshort* buf);
+-        delegate void GetIntArrayRegionDelegateType(JNIEnv* pEnv, jintArray array, jsize start, jsize len, jint* buf);
+-        delegate void GetLongArrayRegionDelegateType(JNIEnv* pEnv, jlongArray array, jsize start, jsize len, jlong* buf);
+-        delegate void GetFloatArrayRegionDelegateType(JNIEnv* pEnv, jfloatArray array, jsize start, jsize len, jfloat* buf);
+-        delegate void GetDoubleArrayRegionDelegateType(JNIEnv* pEnv, jdoubleArray array, jsize start, jsize len, jdouble* buf);
+-
+-        delegate void SetBooleanArrayRegionDelegateType(JNIEnv* pEnv, jbooleanArray array, jsize start, jsize len, jboolean* buf);
+-        delegate void SetByteArrayRegionDelegateType(JNIEnv* pEnv, jbyteArray array, jsize start, jsize len, jbyte* buf);
+-        delegate void SetCharArrayRegionDelegateType(JNIEnv* pEnv, jcharArray array, jsize start, jsize len, jchar* buf);
+-        delegate void SetShortArrayRegionDelegateType(JNIEnv* pEnv, jshortArray array, jsize start, jsize len, jshort* buf);
+-        delegate void SetIntArrayRegionDelegateType(JNIEnv* pEnv, jintArray array, jsize start, jsize len, jint* buf);
+-        delegate void SetLongArrayRegionDelegateType(JNIEnv* pEnv, jlongArray array, jsize start, jsize len, jlong* buf);
+-        delegate void SetFloatArrayRegionDelegateType(JNIEnv* pEnv, jfloatArray array, jsize start, jsize len, jfloat* buf);
+-        delegate void SetDoubleArrayRegionDelegateType(JNIEnv* pEnv, jdoubleArray array, jsize start, jsize len, jdouble* buf);
+-
+-        delegate jint RegisterNativesDelegateType(JNIEnv* pEnv, jclass clazz, JNIEnv.JNINativeMethod* methods, jint nMethods);
+-        delegate jint UnregisterNativesDelegateType(JNIEnv* pEnv, jclass clazz);
+-
+-        delegate jint MonitorEnterDelegateType(JNIEnv* pEnv, jobject obj);
+-        delegate jint MonitorExitDelegateType(JNIEnv* pEnv, jobject obj);
+-
+-        delegate jint GetJavaVMDelegateType(JNIEnv* pEnv, JavaVM** ppJavaVM);
+-
+-        delegate void GetStringRegionDelegateType(JNIEnv* pEnv, jstring str, jsize start, jsize len, jchar* buf);
+-        delegate void GetStringUTFRegionDelegateType(JNIEnv* pEnv, jstring str, jsize start, jsize len, byte* buf);
+-
+-        delegate void* GetPrimitiveArrayCriticalDelegateType(JNIEnv* pEnv, jarray array, jboolean* isCopy);
+-        delegate void ReleasePrimitiveArrayCriticalDelegateType(JNIEnv* pEnv, jarray array, void* carray, jint mode);
+-
+-        delegate jchar* GetStringCriticalDelegateType(JNIEnv* pEnv, jstring str, jboolean* isCopy);
+-        delegate void ReleaseStringCriticalDelegateType(JNIEnv* pEnv, jstring str, jchar* cstring);
+-
+-        delegate jweak NewWeakGlobalRefDelegateType(JNIEnv* pEnv, jobject obj);
+-        delegate void DeleteWeakGlobalRefDelegateType(JNIEnv* pEnv, jweak obj);
+-
+-        delegate jboolean ExceptionCheckDelegateType(JNIEnv* pEnv);
+-
+-        delegate jobject NewDirectByteBufferDelegateType(JNIEnv* pEnv, IntPtr address, jlong capacity);
+-        delegate void* GetDirectBufferAddressDelegateType(JNIEnv* pEnv, jobject buf);
+-        delegate jlong GetDirectBufferCapacityDelegateType(JNIEnv* pEnv, jobject buf);
+-
+-        delegate JObjectRefType GetObjectRefTypeDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate int GetMethodArgsDelegateType(JNIEnv* pEnv, jmethodID methodID, byte* sig);
++
++        internal delegate jint GetVersionDelegateType(JNIEnv* pEnv);
++        internal delegate jclass DefineClassDelegateType(JNIEnv* pEnv, byte* name, jobject loader, jbyte* pbuf, jint length);
++        internal delegate jclass FindClassDelegateType(JNIEnv* pEnv, byte* name);
++
++        internal delegate jmethodID FromReflectedMethodDelegateType(JNIEnv* pEnv, jmethodID methodID);
++        internal delegate jfieldID FromReflectedFieldDelegateType(JNIEnv* pEnv, jfieldID fieldID);
++
++        internal delegate jobject ToReflectedMethodDelegateType(JNIEnv* pEnv, jclass clazz_ignored, jmethodID method, jboolean isStatic);
++
++        internal delegate jclass GetSuperclassDelegateType(JNIEnv* pEnv, jclass sub);
++        internal delegate jboolean IsAssignableFromDelegateType(JNIEnv* pEnv, jclass sub, jclass super);
++
++        internal delegate jobject ToReflectedFieldDelegateType(JNIEnv* pEnv, jclass clazz_ignored, jfieldID field, jboolean isStatic);
++
++        internal delegate jint ThrowDelegateType(JNIEnv* pEnv, jthrowable throwable);
++        internal delegate jint ThrowNewDelegateType(JNIEnv* pEnv, jclass clazz, byte* msg);
++        internal delegate jthrowable ExceptionOccurredDelegateType(JNIEnv* pEnv);
++        internal delegate void ExceptionDescribeDelegateType(JNIEnv* pEnv);
++        internal delegate void ExceptionClearDelegateType(JNIEnv* pEnv);
++        internal delegate void FatalErrorDelegateType(JNIEnv* pEnv, byte* msg);
++
++        internal delegate jint PushLocalFrameDelegateType(JNIEnv* pEnv, jint capacity);
++        internal delegate jobject PopLocalFrameDelegateType(JNIEnv* pEnv, jobject result);
++
++        internal delegate jobject NewGlobalRefDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate void DeleteGlobalRefDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate void DeleteLocalRefDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate jboolean IsSameObjectDelegateType(JNIEnv* pEnv, jobject obj1, jobject obj2);
++        internal delegate jobject NewLocalRefDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate jint EnsureLocalCapacityDelegateType(JNIEnv* pEnv, jint capacity);
++
++        internal delegate jobject AllocObjectDelegateType(JNIEnv* pEnv, jclass clazz);
++        internal delegate jobject NewObjectADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++
++        internal delegate jclass GetObjectClassDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate jboolean IsInstanceOfDelegateType(JNIEnv* pEnv, jobject obj, jclass clazz);
++
++        internal delegate jmethodID GetMethodIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
++
++        internal delegate jobject CallObjectMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jboolean CallBooleanMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jbyte CallByteMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jchar CallCharMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jshort CallShortMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jint CallIntMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jlong CallLongMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jfloat CallFloatMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate jdouble CallDoubleMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++        internal delegate void CallVoidMethodADelegateType(JNIEnv* pEnv, jobject obj, jmethodID methodID, JValue* args);
++
++        internal delegate jobject CallNonvirtualObjectMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jboolean CallNonvirtualBooleanMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jbyte CallNonvirtualByteMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jchar CallNonvirtualCharMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jshort CallNonvirtualShortMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jint CallNonvirtualIntMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jlong CallNonvirtualLongMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jfloat CallNonvirtualFloatMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jdouble CallNonvirtualDoubleMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate void CallNonvirtualVoidMethodADelegateType(JNIEnv* pEnv, jobject obj, jclass clazz, jmethodID methodID, JValue* args);
++
++        internal delegate jfieldID GetFieldIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
++
++        internal delegate jobject GetObjectFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jboolean GetBooleanFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jbyte GetByteFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jchar GetCharFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jshort GetShortFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jint GetIntFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jlong GetLongFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jfloat GetFloatFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++        internal delegate jdouble GetDoubleFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID);
++
++        internal delegate void SetObjectFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jobject val);
++        internal delegate void SetBooleanFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jboolean val);
++        internal delegate void SetByteFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jbyte val);
++        internal delegate void SetCharFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jchar val);
++        internal delegate void SetShortFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jshort val);
++        internal delegate void SetIntFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jint val);
++        internal delegate void SetLongFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jlong val);
++        internal delegate void SetFloatFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jfloat val);
++        internal delegate void SetDoubleFieldDelegateType(JNIEnv* pEnv, jobject obj, jfieldID fieldID, jdouble val);
++
++        internal delegate jmethodID GetStaticMethodIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
++
++        internal delegate jobject CallStaticObjectMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jboolean CallStaticBooleanMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jbyte CallStaticByteMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jchar CallStaticCharMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jshort CallStaticShortMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jint CallStaticIntMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jlong CallStaticLongMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jfloat CallStaticFloatMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate jdouble CallStaticDoubleMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++        internal delegate void CallStaticVoidMethodADelegateType(JNIEnv* pEnv, jclass clazz, jmethodID methodID, JValue* args);
++
++        internal delegate jfieldID GetStaticFieldIDDelegateType(JNIEnv* pEnv, jclass clazz, byte* name, byte* sig);
++
++        internal delegate jobject GetStaticObjectFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jboolean GetStaticBooleanFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jbyte GetStaticByteFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jchar GetStaticCharFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jshort GetStaticShortFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jint GetStaticIntFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jlong GetStaticLongFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jfloat GetStaticFloatFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++        internal delegate jdouble GetStaticDoubleFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID);
++
++        internal delegate void SetStaticObjectFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jobject val);
++        internal delegate void SetStaticBooleanFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jboolean val);
++        internal delegate void SetStaticByteFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jbyte val);
++        internal delegate void SetStaticCharFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jchar val);
++        internal delegate void SetStaticShortFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jshort val);
++        internal delegate void SetStaticIntFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jint val);
++        internal delegate void SetStaticLongFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jlong val);
++        internal delegate void SetStaticFloatFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jfloat val);
++        internal delegate void SetStaticDoubleFieldDelegateType(JNIEnv* pEnv, jclass clazz, jfieldID fieldID, jdouble val);
++
++        internal delegate jstring NewStringDelegateType(JNIEnv* pEnv, jchar* unicode, int len);
++        internal delegate jint GetStringLengthDelegateType(JNIEnv* pEnv, jstring str);
++        internal delegate jchar* GetStringCharsDelegateType(JNIEnv* pEnv, jstring str, jboolean* isCopy);
++        internal delegate void ReleaseStringCharsDelegateType(JNIEnv* pEnv, jstring str, jchar* chars);
++
++        internal delegate jobject NewStringUTFDelegateType(JNIEnv* pEnv, byte* bytes);
++        internal delegate jint GetStringUTFLengthDelegateType(JNIEnv* pEnv, jstring str);
++        internal delegate byte* GetStringUTFCharsDelegateType(JNIEnv* pEnv, jstring @string, jboolean* isCopy);
++        internal delegate void ReleaseStringUTFCharsDelegateType(JNIEnv* pEnv, jstring @string, byte* utf);
++
++        internal delegate jsize GetArrayLengthDelegateType(JNIEnv* pEnv, jarray array);
++
++        internal delegate jobjectArray NewObjectArrayDelegateType(JNIEnv* pEnv, jsize len, jclass clazz, jobject init);
++        internal delegate jobject GetObjectArrayElementDelegateType(JNIEnv* pEnv, jarray array, jsize index);
++        internal delegate void SetObjectArrayElementDelegateType(JNIEnv* pEnv, jarray array, jsize index, jobject val);
++
++        internal delegate jbooleanArray NewBooleanArrayDelegateType(JNIEnv* pEnv, jsize len);
++        internal delegate jbyteArray NewByteArrayDelegateType(JNIEnv* pEnv, jsize len);
++        internal delegate jcharArray NewCharArrayDelegateType(JNIEnv* pEnv, jsize len);
++        internal delegate jshortArray NewShortArrayDelegateType(JNIEnv* pEnv, jsize len);
++        internal delegate jintArray NewIntArrayDelegateType(JNIEnv* pEnv, jsize len);
++        internal delegate jlongArray NewLongArrayDelegateType(JNIEnv* pEnv, jsize len);
++        internal delegate jfloatArray NewFloatArrayDelegateType(JNIEnv* pEnv, jsize len);
++        internal delegate jdoubleArray NewDoubleArrayDelegateType(JNIEnv* pEnv, jsize len);
++
++        internal delegate jboolean* GetBooleanArrayElementsDelegateType(JNIEnv* pEnv, jbooleanArray array, jboolean* isCopy);
++        internal delegate jbyte* GetByteArrayElementsDelegateType(JNIEnv* pEnv, jbyteArray array, jboolean* isCopy);
++        internal delegate jchar* GetCharArrayElementsDelegateType(JNIEnv* pEnv, jcharArray array, jboolean* isCopy);
++        internal delegate jshort* GetShortArrayElementsDelegateType(JNIEnv* pEnv, jshortArray array, jboolean* isCopy);
++        internal delegate jint* GetIntArrayElementsDelegateType(JNIEnv* pEnv, jintArray array, jboolean* isCopy);
++        internal delegate jlong* GetLongArrayElementsDelegateType(JNIEnv* pEnv, jlongArray array, jboolean* isCopy);
++        internal delegate jfloat* GetFloatArrayElementsDelegateType(JNIEnv* pEnv, jfloatArray array, jboolean* isCopy);
++        internal delegate jdouble* GetDoubleArrayElementsDelegateType(JNIEnv* pEnv, jdoubleArray array, jboolean* isCopy);
++
++        internal delegate void ReleaseBooleanArrayElementsDelegateType(JNIEnv* pEnv, jbooleanArray array, jboolean* elems, jint mode);
++        internal delegate void ReleaseByteArrayElementsDelegateType(JNIEnv* pEnv, jbyteArray array, jbyte* elems, jint mode);
++        internal delegate void ReleaseCharArrayElementsDelegateType(JNIEnv* pEnv, jcharArray array, jchar* elems, jint mode);
++        internal delegate void ReleaseShortArrayElementsDelegateType(JNIEnv* pEnv, jshortArray array, jshort* elems, jint mode);
++        internal delegate void ReleaseIntArrayElementsDelegateType(JNIEnv* pEnv, jintArray array, jint* elems, jint mode);
++        internal delegate void ReleaseLongArrayElementsDelegateType(JNIEnv* pEnv, jlongArray array, jlong* elems, jint mode);
++        internal delegate void ReleaseFloatArrayElementsDelegateType(JNIEnv* pEnv, jfloatArray array, jfloat* elems, jint mode);
++        internal delegate void ReleaseDoubleArrayElementsDelegateType(JNIEnv* pEnv, jdoubleArray array, jdouble* elems, jint mode);
++
++        internal delegate void GetBooleanArrayRegionDelegateType(JNIEnv* pEnv, jbooleanArray array, jsize start, jsize len, jboolean* buf);
++        internal delegate void GetByteArrayRegionDelegateType(JNIEnv* pEnv, jbyteArray array, jsize start, jsize len, jbyte* buf);
++        internal delegate void GetCharArrayRegionDelegateType(JNIEnv* pEnv, jcharArray array, jsize start, jsize len, jchar* buf);
++        internal delegate void GetShortArrayRegionDelegateType(JNIEnv* pEnv, jshortArray array, jsize start, jsize len, jshort* buf);
++        internal delegate void GetIntArrayRegionDelegateType(JNIEnv* pEnv, jintArray array, jsize start, jsize len, jint* buf);
++        internal delegate void GetLongArrayRegionDelegateType(JNIEnv* pEnv, jlongArray array, jsize start, jsize len, jlong* buf);
++        internal delegate void GetFloatArrayRegionDelegateType(JNIEnv* pEnv, jfloatArray array, jsize start, jsize len, jfloat* buf);
++        internal delegate void GetDoubleArrayRegionDelegateType(JNIEnv* pEnv, jdoubleArray array, jsize start, jsize len, jdouble* buf);
++
++        internal delegate void SetBooleanArrayRegionDelegateType(JNIEnv* pEnv, jbooleanArray array, jsize start, jsize len, jboolean* buf);
++        internal delegate void SetByteArrayRegionDelegateType(JNIEnv* pEnv, jbyteArray array, jsize start, jsize len, jbyte* buf);
++        internal delegate void SetCharArrayRegionDelegateType(JNIEnv* pEnv, jcharArray array, jsize start, jsize len, jchar* buf);
++        internal delegate void SetShortArrayRegionDelegateType(JNIEnv* pEnv, jshortArray array, jsize start, jsize len, jshort* buf);
++        internal delegate void SetIntArrayRegionDelegateType(JNIEnv* pEnv, jintArray array, jsize start, jsize len, jint* buf);
++        internal delegate void SetLongArrayRegionDelegateType(JNIEnv* pEnv, jlongArray array, jsize start, jsize len, jlong* buf);
++        internal delegate void SetFloatArrayRegionDelegateType(JNIEnv* pEnv, jfloatArray array, jsize start, jsize len, jfloat* buf);
++        internal delegate void SetDoubleArrayRegionDelegateType(JNIEnv* pEnv, jdoubleArray array, jsize start, jsize len, jdouble* buf);
++
++        internal delegate jint RegisterNativesDelegateType(JNIEnv* pEnv, jclass clazz, JNIEnv.JNINativeMethod* methods, jint nMethods);
++        internal delegate jint UnregisterNativesDelegateType(JNIEnv* pEnv, jclass clazz);
++
++        internal delegate jint MonitorEnterDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate jint MonitorExitDelegateType(JNIEnv* pEnv, jobject obj);
++
++        internal delegate jint GetJavaVMDelegateType(JNIEnv* pEnv, JavaVM** ppJavaVM);
++
++        internal delegate void GetStringRegionDelegateType(JNIEnv* pEnv, jstring str, jsize start, jsize len, jchar* buf);
++        internal delegate void GetStringUTFRegionDelegateType(JNIEnv* pEnv, jstring str, jsize start, jsize len, byte* buf);
++
++        internal delegate void* GetPrimitiveArrayCriticalDelegateType(JNIEnv* pEnv, jarray array, jboolean* isCopy);
++        internal delegate void ReleasePrimitiveArrayCriticalDelegateType(JNIEnv* pEnv, jarray array, void* carray, jint mode);
++
++        internal delegate jchar* GetStringCriticalDelegateType(JNIEnv* pEnv, jstring str, jboolean* isCopy);
++        internal delegate void ReleaseStringCriticalDelegateType(JNIEnv* pEnv, jstring str, jchar* cstring);
++
++        internal delegate jweak NewWeakGlobalRefDelegateType(JNIEnv* pEnv, jobject obj);
++        internal delegate void DeleteWeakGlobalRefDelegateType(JNIEnv* pEnv, jweak obj);
++
++        internal delegate jboolean ExceptionCheckDelegateType(JNIEnv* pEnv);
++
++        internal delegate jobject NewDirectByteBufferDelegateType(JNIEnv* pEnv, IntPtr address, jlong capacity);
++        internal delegate void* GetDirectBufferAddressDelegateType(JNIEnv* pEnv, jobject buf);
++        internal delegate jlong GetDirectBufferCapacityDelegateType(JNIEnv* pEnv, jobject buf);
++
++        internal delegate JObjectRefType GetObjectRefTypeDelegateType(JNIEnv* pEnv, jobject obj);
+ 
+         #endregion
+ 
+diff --git a/src/IKVM.Runtime/JNI/JNIVM.cs b/src/IKVM.Runtime/JNI/JNIVM.cs
+index fb3fd0ed5..d4e919147 100644
+--- a/src/IKVM.Runtime/JNI/JNIVM.cs
++++ b/src/IKVM.Runtime/JNI/JNIVM.cs
+@@ -28,6 +28,8 @@ Jeroen Frijters
+ using IKVM.ByteCode.Text;
+ using IKVM.Runtime.Extensions;
+ 
++using Mono.Interop;
++
+ namespace IKVM.Runtime.JNI
+ {
+ 
+@@ -77,6 +79,7 @@ static string DecodePlatformString(byte* psz)
+         /// <param name="p_env"></param>
+         /// <param name="vm_args"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(LibJvm.JNI_CreateJavaVMDelegate))]
+         public static int CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args)
+         {
+             var pInitArgs = (JavaVMInitArgs*)vm_args;
+@@ -130,6 +133,7 @@ public static int CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args)
+         /// </summary>
+         /// <param name="vm_args"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(LibJvm.JNI_GetDefaultJavaVMInitArgsDelegate))]
+         public static int GetDefaultJavaVMInitArgs(void* vm_args)
+         {
+             // This is only used for JDK 1.1 JavaVMInitArgs, and we don't support those.
+@@ -143,6 +147,7 @@ public static int GetDefaultJavaVMInitArgs(void* vm_args)
+         /// <param name="bufLen"></param>
+         /// <param name="nVMs"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(LibJvm.JNI_GetCreatedJavaVMsDelegate))]
+         public static int GetCreatedJavaVMs(JavaVM** ppvmBuf, jsize bufLen, jsize* nVMs)
+         {
+             if (jvmCreated)
+diff --git a/src/IKVM.Runtime/JNI/JavaVM.cs b/src/IKVM.Runtime/JNI/JavaVM.cs
+index 79a7c736c..468b86512 100644
+--- a/src/IKVM.Runtime/JNI/JavaVM.cs
++++ b/src/IKVM.Runtime/JNI/JavaVM.cs
+@@ -1,4 +1,4 @@
+-﻿/*
++/*
+   Copyright (C) 2002-2014 Jeroen Frijters
+ 
+   This software is provided 'as-is', without any express or implied
+@@ -24,6 +24,8 @@ Jeroen Frijters
+ using System;
+ using System.Runtime.InteropServices;
+ 
++using Mono.Interop;
++
+ using IKVM.ByteCode.Text;
+ using IKVM.Runtime.Extensions;
+ 
+@@ -43,9 +45,9 @@ unsafe struct JavaVM
+         internal static JavaVM* pJavaVM;
+         void** vtable;
+         void* firstVtableEntry;
+-        delegate int pf_int(JavaVM* pJVM);
+-        delegate int pf_int_ppvoid_pvoid(JavaVM* pJVM, void** p1, void* p2);
+-        delegate int pf_int_ppvoid_int(JavaVM* pJVM, void** p1, int p2);
++        internal delegate int pf_int(JavaVM* pJVM);
++        internal delegate int pf_int_ppvoid_pvoid(JavaVM* pJVM, void** p1, void* p2);
++        internal delegate int pf_int_ppvoid_int(JavaVM* pJVM, void** p1, int p2);
+ 
+         static Delegate[] vtableDelegates =
+         {
+@@ -78,6 +80,7 @@ static JavaVM()
+         /// </summary>
+         /// <param name="pJVM"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(pf_int))]
+         internal static jint DestroyJavaVM(JavaVM* pJVM)
+         {
+             if (JNIVM.jvmDestroyed)
+@@ -95,6 +98,7 @@ internal static jint DestroyJavaVM(JavaVM* pJVM)
+         /// <param name="penv"></param>
+         /// <param name="args"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(pf_int_ppvoid_pvoid))]
+         internal static jint AttachCurrentThread(JavaVM* pJVM, void** penv, void* args)
+         {
+             return AttachCurrentThreadImpl(pJVM, penv, (JavaVMAttachArgs*)args, false);
+@@ -161,6 +165,7 @@ internal static jint AttachCurrentThreadImpl(JavaVM* pJVM, void** penv, JavaVMAt
+         /// </summary>
+         /// <param name="pJVM"></param>
+         /// <returns></returns>
++        [MonoPInvokeCallback(typeof(pf_int))]
+         internal static jint DetachCurrentThread(JavaVM* pJVM)
+         {
+             if (JNIEnvContext.Current == null)
+@@ -175,6 +180,7 @@ internal static jint DetachCurrentThread(JavaVM* pJVM)
+             return JNIEnv.JNI_OK;
+         }
+ 
++        [MonoPInvokeCallback(typeof(pf_int_ppvoid_int))]
+         internal static jint GetEnv(JavaVM* pJVM, void** penv, jint version)
+         {
+             if (JNIVM.IsSupportedJNIVersion(version))
+@@ -194,6 +200,7 @@ internal static jint GetEnv(JavaVM* pJVM, void** penv, jint version)
+             return JNIEnv.JNI_EVERSION;
+         }
+ 
++        [MonoPInvokeCallback(typeof(pf_int_ppvoid_pvoid))]
+         internal static jint AttachCurrentThreadAsDaemon(JavaVM* pJVM, void** penv, void* args)
+         {
+             return AttachCurrentThreadImpl(pJVM, penv, (JavaVMAttachArgs*)args, true);
+diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
+index 0322f2275..c9db1de29 100644
+--- a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
++++ b/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
+@@ -31,6 +31,8 @@ Jeroen Frijters
+ 
+ using IKVM.Runtime;
+ 
++using Mono.Interop;
++
+ namespace IKVM.Java.Externs.sun.misc
+ {
+ 
+@@ -88,6 +90,7 @@ internal CriticalCtrlHandler()
+ 
+ 		private static object defaultConsoleCtrlDelegate;
+ 
++		[MonoPInvokeCallback(typeof(ConsoleCtrlDelegate))]
+ 		private static bool ConsoleCtrlCheck(CtrlTypes ctrlType)
+ 		{
+ #if !FIRST_PASS
+diff --git a/src/IKVM.Runtime/LibJVM.cs b/src/IKVM.Runtime/LibJVM.cs
+index 2fa4d5bcd..db0a84758 100644
+--- a/src/IKVM.Runtime/LibJVM.cs
++++ b/src/IKVM.Runtime/LibJVM.cs
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Buffers.Binary;
+ using System.IO;
+ using System.Runtime.CompilerServices;
+@@ -7,6 +7,8 @@
+ 
+ using IKVM.Runtime.Accessors.Java.Util;
+ 
++using Mono.Interop;
++
+ namespace IKVM.Runtime
+ {
+     using IKVM.CoreLib.Diagnostics;
+@@ -51,16 +53,16 @@ unsafe struct JVMInvokeInterface
+         }
+ 
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+-        delegate int JNI_GetDefaultJavaVMInitArgsDelegate(void* vm_args);
++        internal delegate int JNI_GetDefaultJavaVMInitArgsDelegate(void* vm_args);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+-        delegate int JNI_GetCreatedJavaVMsDelegate(JavaVM** vmBuf, int bufLen, int* nVMs);
++        internal delegate int JNI_GetCreatedJavaVMsDelegate(JavaVM** vmBuf, int bufLen, int* nVMs);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+-        delegate int JNI_CreateJavaVMDelegate(JavaVM** p_vm, void** p_env, void* vm_args);
++        internal delegate int JNI_CreateJavaVMDelegate(JavaVM** p_vm, void** p_env, void* vm_args);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+-        delegate void JVM_ThrowExceptionDelegate([MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.LPUTF8Str)] string message);
++        delegate void JVM_ThrowExceptionDelegate(IntPtr name, IntPtr message);
+ 
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+         delegate nint JVM_GetThreadInterruptEventDelegate();
+@@ -105,7 +107,7 @@ unsafe struct JVMInvokeInterface
+         /// </summary>
+         public static readonly LibJvm Instance = new();
+ 
+-        readonly ikvm.@internal.CallerID callerID = ikvm.@internal.CallerID.create(typeof(LibJvm).TypeHandle);
++        static readonly ikvm.@internal.CallerID callerID = ikvm.@internal.CallerID.create(typeof(LibJvm).TypeHandle);
+         readonly JVMInvokeInterface* jvmii;
+ 
+         readonly JVM_InitDelegate _JVM_Init;
+@@ -173,8 +175,16 @@ unsafe struct JVMInvokeInterface
+         /// <param name="name"></param>
+         /// <param name="msg"></param>
+         /// <returns></returns>
+-        void JVM_ThrowException(string name, string msg)
++        [MonoPInvokeCallback(typeof(JVM_ThrowExceptionDelegate))]
++        static void JVM_ThrowException(IntPtr _name, IntPtr _msg)
+         {
++#if NET7_0_OR_GREATER
++			string name = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(_name);
++			string msg = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(_msg);
++#else
++			string name = null;
++			string msg = null;
++#endif
+             try
+             {
+                 if (name == null)
+@@ -218,7 +228,8 @@ void JVM_ThrowException(string name, string msg)
+         /// Invoked by the native code to get an event handle to wait on for thread interruption.
+         /// </summary>
+         /// <returns></returns>
+-        nint JVM_GetThreadInterruptEvent()
++        [MonoPInvokeCallback(typeof(JVM_GetThreadInterruptEventDelegate))]
++        static nint JVM_GetThreadInterruptEvent()
+         {
+             try
+             {
+@@ -241,7 +252,8 @@ nint JVM_GetThreadInterruptEvent()
+         /// Invoked by the native code to get the active number of processors.
+         /// </summary>
+         /// <returns></returns>
+-        int JVM_ActiveProcessorCount()
++        [MonoPInvokeCallback(typeof(JVM_ActiveProcessorCountDelegate))]
++        static int JVM_ActiveProcessorCount()
+         {
+             return Environment.ProcessorCount;
+         }
+@@ -252,7 +264,8 @@ int JVM_ActiveProcessorCount()
+         /// <param name="env"></param>
+         /// <param name="handle"></param>
+         /// <returns></returns>
+-        int JVM_IHashCode(JNIEnv* env, nint handle)
++        [MonoPInvokeCallback(typeof(JVM_IHashCodeDelegate))]
++        static int JVM_IHashCode(JNIEnv* env, nint handle)
+         {
+             return handle == 0 ? 0 : RuntimeHelpers.GetHashCode(env->UnwrapRef(handle));
+         }
+@@ -267,7 +280,8 @@ int JVM_IHashCode(JNIEnv* env, nint handle)
+         /// <param name="dst"></param>
+         /// <param name="dst_pos"></param>
+         /// <param name="length"></param>
+-        void JVM_ArrayCopy(JNIEnv* env, nint ignored, nint src, int src_pos, nint dst, int dst_pos, int length)
++        [MonoPInvokeCallback(typeof(JVM_ArrayCopyDelegate))]
++        static void JVM_ArrayCopy(JNIEnv* env, nint ignored, nint src, int src_pos, nint dst, int dst_pos, int length)
+         {
+             try
+             {
+@@ -314,7 +328,8 @@ void JVM_ArrayCopy(JNIEnv* env, nint ignored, nint src, int src_pos, nint dst, i
+         /// <param name="dst"></param>
+         /// <param name="dst_pos"></param>
+         /// <param name="length"></param>
+-        nint JVM_InitProperties(JNIEnv* env, nint props)
++        [MonoPInvokeCallback(typeof(JVM_InitPropertiesDelegate))]
++        static nint JVM_InitProperties(JNIEnv* env, nint props)
+         {
+             try
+             {
+@@ -341,7 +356,8 @@ nint JVM_InitProperties(JNIEnv* env, nint props)
+         /// Invoked by the native code to create a monitor lock.
+         /// </summary>
+         /// <returns></returns>
+-        nint JVM_RawMonitorCreate()
++        [MonoPInvokeCallback(typeof(JVM_RawMonitorCreateDelegate))]
++        static nint JVM_RawMonitorCreate()
+         {
+             try
+             {
+@@ -358,7 +374,8 @@ nint JVM_RawMonitorCreate()
+         /// Invoked by the native code to destroy a monitor lock.
+         /// </summary>v
+         /// <returns></returns>
+-        void JVM_RawMonitorDestroy(nint mon)
++        [MonoPInvokeCallback(typeof(JVM_RawMonitorDestroyDelegate))]
++        static void JVM_RawMonitorDestroy(nint mon)
+         {
+             try
+             {
+@@ -375,7 +392,8 @@ void JVM_RawMonitorDestroy(nint mon)
+         /// </summary>
+         /// <param name="mon"></param>
+         /// <returns></returns>
+-        int JVM_RawMonitorEnter(nint mon)
++        [MonoPInvokeCallback(typeof(JVM_RawMonitorEnterDelegate))]
++        static int JVM_RawMonitorEnter(nint mon)
+         {
+             try
+             {
+@@ -394,7 +412,8 @@ int JVM_RawMonitorEnter(nint mon)
+         /// </summary>
+         /// <param name="mon"></param>
+         /// <returns></returns>
+-        void JVM_RawMonitorExit(nint mon)
++        [MonoPInvokeCallback(typeof(JVM_RawMonitorExitDelegate))]
++        static void JVM_RawMonitorExit(nint mon)
+         {
+             try
+             {
+@@ -416,7 +435,8 @@ void JVM_RawMonitorExit(nint mon)
+         /// <param name="dstOffset"></param>
+         /// <param name="size"></param>
+         /// <param name="elemSize"></param>
+-        unsafe void JVM_CopySwapMemory(JNIEnv* env, nint srcObj, long srcOffset, nint dstObj, long dstOffset, long size, long elemSize)
++        [MonoPInvokeCallback(typeof(JVM_CopySwapMemoryDelegate))]
++        static unsafe void JVM_CopySwapMemory(JNIEnv* env, nint srcObj, long srcOffset, nint dstObj, long dstOffset, long size, long elemSize)
+         {
+             JVM_CopySwapMemory((Array)env->UnwrapRef(srcObj), srcOffset, (Array)env->UnwrapRef(dstObj), dstOffset, size, elemSize);
+         }
+@@ -610,4 +630,4 @@ public nint JVM_FindLibraryEntry(nint handle, string name)
+ 
+ #endif
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/IKVM.Runtime/MonoPInvokeCallbackAttribute.cs b/src/IKVM.Runtime/MonoPInvokeCallbackAttribute.cs
+new file mode 100644
+index 000000000..bf21a7868
+--- /dev/null
++++ b/src/IKVM.Runtime/MonoPInvokeCallbackAttribute.cs
+@@ -0,0 +1,39 @@
++// Polyfill for Mono's MonoPInvokeCallbackAttribute, required by the Mono AOT compiler
++// (used for WebAssembly AOT) to identify managed methods that are called back from
++// native code via Marshal.GetFunctionPointerForDelegate. Without this attribute the
++// AOT compiler cannot generate the necessary trampolines and the callback will crash.
++//
++// The attribute is normally provided by Xamarin/Mono SDKs. When targeting
++// net472/net6.0/net8.0 without those SDKs we declare a local copy so that the same
++// source compiles on all target frameworks.
++
++using System;
++
++namespace Mono.Interop
++{
++
++    /// <summary>
++    /// Marks a static managed method as a callback target from native/unmanaged code.
++    /// Required by the Mono AOT compiler when building for WebAssembly.
++    /// </summary>
++    [AttributeUsage(AttributeTargets.Method)]
++    internal sealed class MonoPInvokeCallbackAttribute : Attribute
++    {
++
++        /// <summary>
++        /// Initializes a new instance.
++        /// </summary>
++        /// <param name="delegateType">The delegate type whose signature this method implements.</param>
++        public MonoPInvokeCallbackAttribute(Type delegateType)
++        {
++            DelegateType = delegateType;
++        }
++
++        /// <summary>
++        /// Gets the delegate type.
++        /// </summary>
++        public Type DelegateType { get; }
++
++    }
++
++}
+diff --git a/src/ikvmstub/ikvmstub.csproj b/src/ikvmstub/ikvmstub.csproj
+index 1d89f5a4d..40cc20902 100644
+--- a/src/ikvmstub/ikvmstub.csproj
++++ b/src/ikvmstub/ikvmstub.csproj
+@@ -12,4 +12,11 @@
+     </ItemGroup>
+ 
+     <Import Project="$(MSBuildThisFileDirectory)..\..\IKVM.deps.targets" />
++
++    <!-- Provide GetPublishProjectPath target for tool resolution during builds -->
++    <Target Name="GetPublishProjectPath" Outputs="$(OutputPath)">
++        <PropertyGroup>
++            <PublishDir Condition=" '$(PublishDir)' == '' ">$(OutputPath)</PublishDir>
++        </PropertyGroup>
++    </Target>
+ </Project>
