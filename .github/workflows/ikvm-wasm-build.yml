@@ -2,8 +2,8 @@ name: IKVM WASM Build
 
 env:
   EMSDK_VERSION: 3.1.56
-  DOTNET_SDK_VERSION: 8.0.x
   IKVM_REF: 8.14.0
+  NATIVE_SDK_VERSION: "20251124.1"
 
 on:
   push:
@@ -16,61 +16,129 @@ jobs:
     strategy:
       matrix:
         pthread_enabled: [true, false]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Build IKVM artifacts (pthread=${{ matrix.pthread_enabled }})
     steps:
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
-
-      - name: Setup emsdk
-        uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: ${{ env.EMSDK_VERSION }}
-
-      - name: Install dependencies
-        run: |
-          sudo apt -y update
-          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git unzip zip
-
-      - name: Get IKVM DLLs and Image from NuGet
-        run: |
-          # Create a temp project to restore all IKVM packages
-          cat > /tmp/ikvm-restore.csproj << 'EOF'
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
-            <ItemGroup>
-              <PackageReference Include="IKVM" Version="8.14.0" />
-              <PackageReference Include="IKVM.ByteCode" Version="9.3.4" />
-              <PackageReference Include="IKVM.Image.JRE" Version="8.14.0" />
-            </ItemGroup>
-          </Project>
-          EOF
-          dotnet restore /tmp/ikvm-restore.csproj --source https://api.nuget.org/v3/index.json
-          
-          # Copy DLLs
-          mkdir -p out/managed/dll out/bundle/dll out/bundle/native out/native/tmp out/release out/bundle/image
-          cp ~/.nuget/packages/ikvm/8.14.0/runtimes/linux/lib/net8.0/IKVM.Runtime.dll out/managed/dll/
-          cp ~/.nuget/packages/ikvm/8.14.0/runtimes/linux/lib/net8.0/IKVM.CoreLib.dll out/managed/dll/
-          cp ~/.nuget/packages/ikvm/8.14.0/runtimes/linux/lib/net8.0/IKVM.Java.dll out/managed/dll/
-          cp ~/.nuget/packages/ikvm.bytecode/9.3.4/lib/net8.0/IKVM.ByteCode.dll out/managed/dll/
-          
-          # Copy image
-          cp -r ~/.nuget/packages/ikvm.image.runtime.linux-x64/8.14.0/ikvm/any/linux-x64/* out/bundle/image/ 2>/dev/null || true
-
-      - name: Checkout IKVM source for native build
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Checkout IKVM source
         uses: actions/checkout@v4
         with:
           repository: ikvmnet/ikvm
           path: ikvm
           ref: ${{ env.IKVM_REF }}
           submodules: recursive
+      - name: Apply IKVM patch
+        shell: bash
+        run: |
+          cd ikvm
+          git apply $GITHUB_WORKSPACE/ikvm.patch
 
+      # -- same steps as IKVM.yml build-ikvm --
+      - name: Uninstall Packages
+        run: |
+          sudo apt-get remove --purge -y \
+            temurin-\* \
+            mono-complete \
+            unixodbc-dev \
+            nginx \
+            php\* \
+            postgresql\* \
+            python3-dev python3-pip python3-venv \
+            ruby-full \
+            firefox \
+            apache2 \
+            ant && \
+          sudo apt-get --purge autoremove -y && \
+          sudo apt-get clean && \
+          sudo rm -rf /usr/share/swift
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: false
+          swap-storage: false
+      - name: Set Swap Space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 8
+      - name: Install Powershell
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y powershell
+      - name: Setup .NET 6.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+      - name: Setup .NET 7.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 7.0.x
+      - name: Setup .NET 8.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Setup .NET 9.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Install Mono
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y mono-runtime mono-devel
+      - name: Install Java
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y openjdk-8-jdk-headless openjdk-21-jdk && \
+          echo "JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64" >> $GITHUB_ENV
+      - name: Install LLVM and Clang
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y clang-20 llvm-20 && \
+          echo "PATH=/usr/lib/llvm-20/bin:$PATH" >> $GITHUB_ENV
+      - name: Download Native SDKs
+        uses: robinraju/release-downloader@v1.9
+        with:
+          repository: ikvmnet/ikvm-native-sdk
+          tag: ${{ env.NATIVE_SDK_VERSION }}
+          fileName: "*.tar.gz"
+          out-file-path: ikvm/ext/ikvm-native-sdk
+          extract: true
+      - name: NuGet Restore
+        shell: bash
+        working-directory: ikvm
+        run: dotnet restore IKVM.sln
+      - name: Build IKVM
+        shell: bash
+        working-directory: ikvm
+        run: |
+          dotnet msbuild /m /bl \
+            /p:Configuration="Release" \
+            /p:Platform="Any CPU" \
+            /p:BuildInParallel=true \
+            /p:CreateHardLinksForAdditionalFilesIfPossible=true \
+            /p:CreateHardLinksForCopyAdditionalFilesIfPossible=true \
+            /p:CreateHardLinksForCopyFilesToOutputDirectoryIfPossible=true \
+            /p:CreateHardLinksForCopyLocalIfPossible=true \
+            /p:CreateHardLinksForPublishFilesIfPossible=true \
+            /p:ContinuousIntegrationBuild=true \
+            /p:ClangToolExe="/usr/bin/clang-20" \
+            /p:LlvmArToolExe="/usr/bin/llvm-ar-20" \
+            IKVM.sln
+
+      # -- WASM native library build --
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
       - name: Build WASM native artifacts
         shell: bash
         run: |
           set -euo pipefail
+
+          mkdir -p out/native/tmp
 
           PREFIX=""
           PTHREAD_FLAGS=()
@@ -106,27 +174,29 @@ jobs:
           emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o out/native/tmp/sig.o
           emar rcs "out/native/${PREFIX}libikvm.a" out/native/tmp/dl.o out/native/tmp/sig.o
 
+      # -- bundle managed DLLs + WASM native libs --
       - name: Bundle artifacts
+        shell: bash
         run: |
+          set -euo pipefail
+
           PREFIX=""
           if [ "${{ matrix.pthread_enabled }}" = "false" ]; then
             PREFIX="ST-"
           fi
 
-          cp out/managed/dll/IKVM.CoreLib.dll out/bundle/dll/
-          cp out/managed/dll/IKVM.Java.dll out/bundle/dll/
-          cp out/managed/dll/IKVM.Runtime.dll out/bundle/dll/
-          cp out/managed/dll/IKVM.ByteCode.dll out/bundle/dll/
-          cp "out/native/${PREFIX}libjvm.a" out/bundle/native/
-          cp "out/native/${PREFIX}libikvm.a" out/bundle/native/
+          mkdir -p out/release
 
-          ZIP_NAME="ikvm-wasm-${PREFIX}bundle.zip"
-          zip -j "out/release/$ZIP_NAME" out/bundle/dll/*.dll out/bundle/native/*.a
-          if [ -d "out/bundle/image" ]; then
-            (cd out/bundle && zip -r -u ../release/$ZIP_NAME image)
-          fi
+          BYTECODE_DLL=$(find ~/.nuget/packages/ikvm.bytecode -name "IKVM.ByteCode.dll" -path "*/net8.0/*" | head -1)
 
-      - name: Upload outputs
+          zip -j "out/release/ikvm-wasm-${PREFIX}bundle.zip" \
+            ikvm/src/IKVM.Runtime/bin/Release/net8.0/IKVM.Runtime.dll \
+            ikvm/src/IKVM.CoreLib/bin/Release/net8.0/IKVM.CoreLib.dll \
+            ikvm/src/IKVM.Java/bin/Release/net8.0/IKVM.Java.dll \
+            "$BYTECODE_DLL" \
+            "out/native/${PREFIX}libjvm.a" \
+            "out/native/${PREFIX}libikvm.a"
+      - name: Archive artifacts (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@v4
         with:
           name: ikvm-wasm-build-pthread-${{ matrix.pthread_enabled }}
@@ -150,17 +220,18 @@ jobs:
       - name: Organize release assets
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p release_assets
-          find artifacts/ -type f -name "*.zip" -exec cp {} release_assets/ \;
+          mkdir release_assets
+          find artifacts/ -type f | while read file; do
+            cp "$file" release_assets/
+          done
 
       - name: Create release
         uses: ncipollo/release-action@v1
         with:
           name: "IKVM WASM ${{ env.RELEASE_NAME }}"
-          body: "These are the IKVM libs build for WASM (Emscripten)"
+          body: "These are the IKVM libs built for WASM (Emscripten)"
           commit: ${{ github.ref_name }}
           tag: ${{ env.RELEASE_NAME }}
           removeArtifacts: true
-          artifacts: "release_assets/*.zip"
+          artifacts: "release_assets/*"
           token: ${{ secrets.GITHUB_TOKEN }}

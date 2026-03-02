@@ -1,0 +1,134 @@
+diff --git a/src/IKVM.Runtime/JNI/JNIVM.cs b/src/IKVM.Runtime/JNI/JNIVM.cs
+index fb3fd0ed5..175ea4d82 100644
+--- a/src/IKVM.Runtime/JNI/JNIVM.cs
++++ b/src/IKVM.Runtime/JNI/JNIVM.cs
+@@ -77,6 +77,7 @@ static string DecodePlatformString(byte* psz)
+         /// <param name="p_env"></param>
+         /// <param name="vm_args"></param>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         public static int CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args)
+         {
+             var pInitArgs = (JavaVMInitArgs*)vm_args;
+@@ -130,6 +131,7 @@ public static int CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args)
+         /// </summary>
+         /// <param name="vm_args"></param>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         public static int GetDefaultJavaVMInitArgs(void* vm_args)
+         {
+             // This is only used for JDK 1.1 JavaVMInitArgs, and we don't support those.
+@@ -143,6 +145,7 @@ public static int GetDefaultJavaVMInitArgs(void* vm_args)
+         /// <param name="bufLen"></param>
+         /// <param name="nVMs"></param>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         public static int GetCreatedJavaVMs(JavaVM** ppvmBuf, jsize bufLen, jsize* nVMs)
+         {
+             if (jvmCreated)
+@@ -163,4 +166,4 @@ public static int GetCreatedJavaVMs(JavaVM** ppvmBuf, jsize bufLen, jsize* nVMs)
+ 
+ #endif
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/IKVM.Runtime/LibJVM.cs b/src/IKVM.Runtime/LibJVM.cs
+index 2fa4d5bcd..f0136b17b 100644
+--- a/src/IKVM.Runtime/LibJVM.cs
++++ b/src/IKVM.Runtime/LibJVM.cs
+@@ -173,6 +173,7 @@ unsafe struct JVMInvokeInterface
+         /// <param name="name"></param>
+         /// <param name="msg"></param>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         void JVM_ThrowException(string name, string msg)
+         {
+             try
+@@ -218,6 +219,7 @@ void JVM_ThrowException(string name, string msg)
+         /// Invoked by the native code to get an event handle to wait on for thread interruption.
+         /// </summary>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         nint JVM_GetThreadInterruptEvent()
+         {
+             try
+@@ -241,6 +243,7 @@ nint JVM_GetThreadInterruptEvent()
+         /// Invoked by the native code to get the active number of processors.
+         /// </summary>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         int JVM_ActiveProcessorCount()
+         {
+             return Environment.ProcessorCount;
+@@ -252,6 +255,7 @@ int JVM_ActiveProcessorCount()
+         /// <param name="env"></param>
+         /// <param name="handle"></param>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         int JVM_IHashCode(JNIEnv* env, nint handle)
+         {
+             return handle == 0 ? 0 : RuntimeHelpers.GetHashCode(env->UnwrapRef(handle));
+@@ -267,6 +271,7 @@ int JVM_IHashCode(JNIEnv* env, nint handle)
+         /// <param name="dst"></param>
+         /// <param name="dst_pos"></param>
+         /// <param name="length"></param>
++		[UnmanagedCallersOnly]
+         void JVM_ArrayCopy(JNIEnv* env, nint ignored, nint src, int src_pos, nint dst, int dst_pos, int length)
+         {
+             try
+@@ -314,6 +319,7 @@ void JVM_ArrayCopy(JNIEnv* env, nint ignored, nint src, int src_pos, nint dst, i
+         /// <param name="dst"></param>
+         /// <param name="dst_pos"></param>
+         /// <param name="length"></param>
++		[UnmanagedCallersOnly]
+         nint JVM_InitProperties(JNIEnv* env, nint props)
+         {
+             try
+@@ -341,6 +347,7 @@ nint JVM_InitProperties(JNIEnv* env, nint props)
+         /// Invoked by the native code to create a monitor lock.
+         /// </summary>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         nint JVM_RawMonitorCreate()
+         {
+             try
+@@ -358,6 +365,7 @@ nint JVM_RawMonitorCreate()
+         /// Invoked by the native code to destroy a monitor lock.
+         /// </summary>v
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         void JVM_RawMonitorDestroy(nint mon)
+         {
+             try
+@@ -375,6 +383,7 @@ void JVM_RawMonitorDestroy(nint mon)
+         /// </summary>
+         /// <param name="mon"></param>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         int JVM_RawMonitorEnter(nint mon)
+         {
+             try
+@@ -394,6 +403,7 @@ int JVM_RawMonitorEnter(nint mon)
+         /// </summary>
+         /// <param name="mon"></param>
+         /// <returns></returns>
++		[UnmanagedCallersOnly]
+         void JVM_RawMonitorExit(nint mon)
+         {
+             try
+@@ -416,6 +426,7 @@ void JVM_RawMonitorExit(nint mon)
+         /// <param name="dstOffset"></param>
+         /// <param name="size"></param>
+         /// <param name="elemSize"></param>
++		[UnmanagedCallersOnly]
+         unsafe void JVM_CopySwapMemory(JNIEnv* env, nint srcObj, long srcOffset, nint dstObj, long dstOffset, long size, long elemSize)
+         {
+             JVM_CopySwapMemory((Array)env->UnwrapRef(srcObj), srcOffset, (Array)env->UnwrapRef(dstObj), dstOffset, size, elemSize);
+@@ -610,4 +621,4 @@ public nint JVM_FindLibraryEntry(nint handle, string name)
+ 
+ #endif
+ 
+-}
+\ No newline at end of file
++}
