@@ -227,10 +227,8 @@ jobs:
 
         BYTECODE_DLL=$(find $NUGET_PACKAGES/ikvm.bytecode -name "IKVM.ByteCode.dll" -path "*/net8.0/*" | head -1)
 
-        cp ikvm/src/IKVM.Runtime/bin/Release/net8.0/IKVM.Runtime.dll out/managed/
-        cp ikvm/src/IKVM.CoreLib/bin/Release/net8.0/IKVM.CoreLib.dll out/managed/
-        cp ikvm/src/IKVM.Java/bin/Release/net8.0/IKVM.Java.dll out/managed/
-        cp "$BYTECODE_DLL" out/managed/
+
+        cp "ikvm/dist/jdk/net8.0/linux-x64/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll "out/managed/"
 
         tar czvf /tmp/managed-dlls.tar.gz -C out/managed .
     - name: Upload Managed DLLs
@@ -238,6 +236,16 @@ jobs:
       with:
         name: managed-dlls
         path: /tmp/managed-dlls.tar.gz
+    - name: Package linux-x64 JRE image
+      shell: bash
+      run: |
+        IMAGE_DIR="ikvm/src/IKVM/bin/Release/net8.0/ikvm/linux-x64/"
+        tar czvf /tmp/ikvm-image-linux-x64.tar.gz -C "$IMAGE_DIR" .
+    - name: Upload linux-x64 JRE image
+      uses: actions/upload-artifact@v4
+      with:
+        name: ikvm-image-linux-x64
+        path: /tmp/ikvm-image-linux-x64.tar.gz
 
   build-wasm-native:
     name: Build WASM Native (pthread=${{ matrix.pthread_enabled }})
@@ -342,6 +350,17 @@ jobs:
         name: wasm-native-pthread-false
         path: native/
 
+    - name: Download linux-x64 JRE image
+      uses: actions/download-artifact@v4
+      with:
+        name: ikvm-image-linux-x64
+        path: /tmp/image
+
+    - name: Restore linux-x64 JRE image
+      run: |
+        mkdir -p image
+        tar xzvf /tmp/image/ikvm-image-linux-x64.tar.gz -C image
+
     - name: Bundle artifacts
       shell: bash
       run: |
@@ -357,6 +376,7 @@ jobs:
           managed/IKVM.ByteCode.dll \
           native/libjvm.a \
           native/libikvm.a
+        zip -r "release/ikvm-wasm-bundle.zip" image
 
         # Bundle ST (no pthread) version
         zip -j "release/ikvm-wasm-ST-bundle.zip" \
@@ -366,6 +386,7 @@ jobs:
           managed/IKVM.ByteCode.dll \
           native/ST-libjvm.a \
           native/ST-libikvm.a
+        zip -r "release/ikvm-wasm-ST-bundle.zip" image
 
     - name: Create release
       uses: ncipollo/release-action@v1
