@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# build-ikvm-native.sh — Builds IKVM WASM native static libraries for one variant.
+# Assumes emcc, em++, emar are already in PATH (set up via emsdk or otherwise).
+#
+# Usage: build-ikvm-native.sh <ikvm-src-dir> <out-dir> <mt|st>
+#   ikvm-src-dir   path to the ikvmnet/ikvm checkout
+#   out-dir        output base directory; *.a files are written to <out-dir>/native/
+#   variant        mt  → pthread build  → libjvm.a, libikvm.a, libiava.a
+#                  st  → no-pthread     → ST-libjvm.a, ST-libikvm.a, ST-libiava.a
+
+set -euo pipefail
+
+if [ $# -ne 3 ]; then
+    echo "Usage: $(basename "$0") <ikvm-src-dir> <out-dir> <mt|st>" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+IKVM_SRC="$1"
+OUT_DIR="$2"
+VARIANT="$3"
+
+case "$VARIANT" in
+    mt)
+        PREFIX=""
+        PTHREAD_FLAGS=(-pthread)
+        ;;
+    st)
+        PREFIX="ST-"
+        PTHREAD_FLAGS=()
+        ;;
+    *)
+        echo "ERROR: variant must be 'mt' or 'st', got '$VARIANT'" >&2
+        exit 1
+        ;;
+esac
+
+log() { echo "[build-ikvm-native/$VARIANT] $*"; }
+
+LIBJVM_SRC="$IKVM_SRC/src/libjvm"
+LIBIKVM_SRC="$IKVM_SRC/src/libikvm"
+OPENJDK_DIR="$IKVM_SRC/ext/openjdk"
+
+COMMON_DEFS=( -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux -DLINUX -D__int64='long long' )
+COMMON_INCLUDES=(
+    -I"$LIBJVM_SRC"
+    -I"$OPENJDK_DIR/hotspot/src/share/vm"
+    -I"$OPENJDK_DIR/hotspot/src/share/vm/prims"
+    -I"$OPENJDK_DIR/hotspot/src/cpu/x86/vm"
+    -I"$OPENJDK_DIR/hotspot/src/os/linux/vm"
+    -I"$OPENJDK_DIR/jdk/src/share/javavm/export"
+    -I"$OPENJDK_DIR/jdk/src/solaris/javavm/export"
+    -I"$OPENJDK_DIR/jdk/src/linux/javavm/export"
+)
+
+# Variant-specific tmp subdirs to allow MT and ST to run in parallel without collisions
+TMP_DIR="$OUT_DIR/native/tmp-$VARIANT"
+mkdir -p "$TMP_DIR/libiava"
+
+# ── libjvm ────────────────────────────────────────────────────────────────────
+
+log "Building ${PREFIX}libjvm ..."
+emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni.c"      -o "$TMP_DIR/jni.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm_emscripten_dynlib.c"      -o "$TMP_DIR/jvm_emscripten_dynlib.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni_vargs.c" -o "$TMP_DIR/jni_vargs.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+em++  -O2 -fPIC -std=c++11 -Wno-error -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm.cpp" -o "$TMP_DIR/jvm.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+emar rcs "$OUT_DIR/native/${PREFIX}libjvm.a" "$TMP_DIR/jni.o" "$TMP_DIR/jni_vargs.o" "$TMP_DIR/jvm.o" "$TMP_DIR/jvm_emscripten_dynlib.o"
+
+# ── libikvm ───────────────────────────────────────────────────────────────────
+
+log "Building ${PREFIX}libikvm ..."
+emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c"  -o "$TMP_DIR/dl.o"
+emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o "$TMP_DIR/sig.o"
+emar rcs "$OUT_DIR/native/${PREFIX}libikvm.a" "$TMP_DIR/dl.o" "$TMP_DIR/sig.o"
+
+# ── libiava ───────────────────────────────────────────────────────────────────
+# Source directories (linux uses solaris as the OS API dir per OpenJDK 8 convention)
+
+LIBIAVA_SRCDIRS=(
+    "$OPENJDK_DIR/jdk/src/solaris/native/java/lang"
+    "$OPENJDK_DIR/jdk/src/share/native/java/lang"
+    "$OPENJDK_DIR/jdk/src/share/native/java/lang/reflect"
+    "$OPENJDK_DIR/jdk/src/share/native/java/lang/fdlibm/src"
+    "$OPENJDK_DIR/jdk/src/share/native/java/io"
+    "$OPENJDK_DIR/jdk/src/solaris/native/java/io"
+    "$OPENJDK_DIR/jdk/src/share/native/java/nio"
+    "$OPENJDK_DIR/jdk/src/share/native/java/security"
+    "$OPENJDK_DIR/jdk/src/share/native/common"
+    "$OPENJDK_DIR/jdk/src/share/native/sun/misc"
+    "$OPENJDK_DIR/jdk/src/share/native/sun/reflect"
+    "$OPENJDK_DIR/jdk/src/share/native/java/util"
+    "$OPENJDK_DIR/jdk/src/share/native/java/util/concurrent/atomic"
+    "$OPENJDK_DIR/jdk/src/solaris/native/common"
+    "$OPENJDK_DIR/jdk/src/solaris/native/java/util"
+    "$OPENJDK_DIR/jdk/src/solaris/native/sun/security/provider"
+    "$OPENJDK_DIR/jdk/src/solaris/native/sun/io"
+    "$OPENJDK_DIR/jdk/src/linux/native/jdk/internal/platform/cgroupv1"
+)
+
+# Files excluded on linux (mirrors libiava.clangproj excludes)
+LIBIAVA_EXCLUDES="check_code\.c|verify_stub\.c|jspawnhelper\.c|Shutdown\.c|AccessController\.c|Throwable\.c|NativeAccessors\.c|Class\.c|Runtime\.c|Package\.c|SecurityManager\.c|Compiler\.c|Object\.c|ClassLoader\.c|Array\.c|Thread\.c|String\.c|ConstantPool\.c|URLClassPath\.c|Signal\.c|GC\.c|Field\.c|Executable\.c|VM\.c|Reflection\.c|AtomicLong\.c|ProcessImpl_md\.c|WinNTFileSystem_md\.c|dirent_md\.c|WindowsPreferences\.c|WinCAPISeedGenerator\.c|Win32ErrorMode\.c|java_props_macosx\.c"
+
+# Per-srcdir -I flags PLUS COMMON_INCLUDES so that jni_md.h can find jni_x86.h
+# (jni_md.h does `#include "jni_x86.h"` which resolves via the hotspot/src/cpu/x86/vm path)
+# Also include the bundled JNI stub headers (generated by javah from the Java class files)
+LIBIAVA_INCLUDES=()
+for d in "${LIBIAVA_SRCDIRS[@]}"; do
+    LIBIAVA_INCLUDES+=("-I$d")
+done
+LIBIAVA_INCLUDES+=("${COMMON_INCLUDES[@]}")
+LIBIAVA_INCLUDES+=("-I$SCRIPT_DIR/jni-headers")
+LIBIAVA_INCLUDES+=("-I$OPENJDK_DIR/jdk/src/share/native/java/lang/fdlibm/include")
+
+LIBIAVA_DEFS=(
+    -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux
+    -DLINUX -D__linux__ -D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE
+    -D_AMD64_ -Damd64
+    -DJDK_MAJOR_VERSION='"1"' -DJDK_MINOR_VERSION='"8"'
+    -DJDK_MICRO_VERSION='"0"' -DJDK_UPDATE_VERSION='"462"'
+    -DJDK_BUILD_NUMBER='"b08"'
+    '-DRELEASE="1.8.0_462-b08"'
+    '-DVENDOR="IKVM"'
+    '-DVENDOR_URL="https://github.com/ikvmnet/ikvm"'
+    '-DVENDOR_URL_BUG="https://github.com/ikvmnet/ikvm/issues/"'
+    '-DARCHPROPNAME="amd64"'
+)
+
+log "Building ${PREFIX}libiava ..."
+LIBIAVA_OBJS=()
+for dir in "${LIBIAVA_SRCDIRS[@]}"; do
+    [ -d "$dir" ] || continue
+    for src in "$dir"/*.c; do
+        [ -f "$src" ] || continue
+        fname="$(basename "$src")"
+        if ! echo "$fname" | grep -qE "^($LIBIAVA_EXCLUDES)$"; then
+            obj="$TMP_DIR/libiava/${fname%.c}.o"
+            emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+                "${LIBIAVA_DEFS[@]}" "${LIBIAVA_INCLUDES[@]}" \
+                -c "$src" -o "$obj"
+            LIBIAVA_OBJS+=("$obj")
+        fi
+    done
+done
+emar rcs "$OUT_DIR/native/${PREFIX}libiava.a" "${LIBIAVA_OBJS[@]}"
+
+log "Done! Artifacts written to $OUT_DIR/native/"
+ls -lh "$OUT_DIR/native/${PREFIX}"*.a

@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
-# build-local.sh - Builds IKVM managed libraries locally
+# build-ikvm-local.sh - Builds IKVM managed libraries and WASM native artifacts locally.
 # Based on .github/workflows/ikvm-wasm-build.yml
 
 set -euo pipefail
 
 IKVM_REF="8.14.0"
 NATIVE_SDK_VERSION="20251124.1"
+EMSDK_VERSION="3.1.56"
 WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+SKIP_MANAGED=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-managed) SKIP_MANAGED=true ;;
+        *) echo "ERROR: unknown argument '$arg'" >&2; exit 1 ;;
+    esac
+done
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-log() { echo "[build-local] $*"; }
+log() { echo "[build-ikvm-local] $*"; }
 
 require_cmd() {
     if ! command -v "$1" &>/dev/null; then
@@ -22,57 +33,62 @@ require_cmd() {
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
 require_cmd git
-require_cmd mono
-require_cmd java
 require_cmd curl
 require_cmd zip
 
-# Locate clang/llvm-ar: prefer versioned (clang-20, llvm-ar-20), fall back to unversioned
-CLANG_EXE=""
-LLVM_AR_EXE=""
-for ver in 20 19 18 17 ""; do
-    suffix="${ver:+-$ver}"
-    if command -v "clang${suffix}" &>/dev/null; then
-        CLANG_EXE="$(command -v "clang${suffix}")"
-        break
-    fi
-done
-for ver in 20 19 18 17 ""; do
-    suffix="${ver:+-$ver}"
-    if command -v "llvm-ar${suffix}" &>/dev/null; then
-        LLVM_AR_EXE="$(command -v "llvm-ar${suffix}")"
-        break
-    fi
-done
-if [ -z "$CLANG_EXE" ] || [ -z "$LLVM_AR_EXE" ]; then
-    echo "ERROR: clang and llvm-ar are required" >&2
-    exit 1
-fi
-log "Using clang:   $CLANG_EXE"
-log "Using llvm-ar: $LLVM_AR_EXE"
+if [ "$SKIP_MANAGED" = "false" ]; then
+    require_cmd mono
+    require_cmd java
 
-# Locate JDK 8 (workflow sets JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64)
-if [ -z "${JAVA_HOME:-}" ]; then
-    for candidate in \
-        /usr/lib/jvm/java-8-openjdk-amd64 \
-        /usr/lib/jvm/java-8-openjdk \
-        /usr/lib/jvm/java-1.8.0-openjdk-amd64 \
-        /usr/lib/jvm/java-1.8.0-openjdk; do
-        if [ -d "$candidate" ]; then
-            export JAVA_HOME="$candidate"
+    # Locate clang/llvm-ar: prefer versioned (clang-20, llvm-ar-20), fall back to unversioned
+    CLANG_EXE=""
+    LLVM_AR_EXE=""
+    for ver in 20 19 18 17 ""; do
+        suffix="${ver:+-$ver}"
+        if command -v "clang${suffix}" &>/dev/null; then
+            CLANG_EXE="$(command -v "clang${suffix}")"
             break
         fi
     done
+    for ver in 20 19 18 17 ""; do
+        suffix="${ver:+-$ver}"
+        if command -v "llvm-ar${suffix}" &>/dev/null; then
+            LLVM_AR_EXE="$(command -v "llvm-ar${suffix}")"
+            break
+        fi
+    done
+    if [ -z "$CLANG_EXE" ] || [ -z "$LLVM_AR_EXE" ]; then
+        echo "ERROR: clang and llvm-ar are required" >&2
+        exit 1
+    fi
+    log "Using clang:   $CLANG_EXE"
+    log "Using llvm-ar: $LLVM_AR_EXE"
+
+    # Locate JDK 8 (workflow sets JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64)
+    if [ -z "${JAVA_HOME:-}" ]; then
+        for candidate in \
+            /usr/lib/jvm/java-8-openjdk-amd64 \
+            /usr/lib/jvm/java-8-openjdk \
+            /usr/lib/jvm/java-1.8.0-openjdk-amd64 \
+            /usr/lib/jvm/java-1.8.0-openjdk; do
+            if [ -d "$candidate" ]; then
+                export JAVA_HOME="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "${JAVA_HOME:-}" ]; then
+        echo "ERROR: could not locate JDK 8. Set JAVA_HOME manually." >&2
+        exit 1
+    fi
+    log "Using JAVA_HOME: $JAVA_HOME"
 fi
-if [ -z "${JAVA_HOME:-}" ]; then
-    echo "ERROR: could not locate JDK 8. Set JAVA_HOME manually." >&2
-    exit 1
-fi
-log "Using JAVA_HOME: $JAVA_HOME"
 
 # ── .NET SDK setup ────────────────────────────────────────────────────────────
 # IKVM's global.json requires .NET 9.0.x (rollForward: latestFeature).
 # Install it locally via dotnet-install.sh if the system doesn't have it.
+
+if [ "$SKIP_MANAGED" = "false" ]; then
 
 DOTNET_INSTALL_DIR="$WORKSPACE/.dotnet"
 DOTNET_INSTALL_SCRIPT="$WORKSPACE/.dotnet-install.sh"
@@ -106,6 +122,8 @@ if ! command -v dotnet &>/dev/null; then
     echo "ERROR: 'dotnet' not found even after local install" >&2
     exit 1
 fi
+
+fi # end SKIP_MANAGED=false
 
 # ── Step 1: Clone IKVM source ─────────────────────────────────────────────────
 
@@ -145,6 +163,8 @@ export GitVersion_WeightedPreReleaseNumber="0"
 # ── Step 4: Build JTReg (OpenJDK Test Harness) ───────────────────────────────
 # build-all.sh uses `git rev-parse --show-toplevel` to find its root, so it
 # must be run from within the jtreg submodule directory.
+
+if [ "$SKIP_MANAGED" = "false" ]; then
 
 JTREG_DIR="$WORKSPACE/ikvm/ext/jtreg"
 JTREG_STAMP="$JTREG_DIR/build/stamp"
@@ -238,101 +258,88 @@ cp "$WORKSPACE/ikvm/dist/jdk/net8.0/linux-x64/bin/IKVM."{ByteCode,CoreLib,Java,R
 log "Done! Managed DLLs are in $WORKSPACE/out/managed/"
 ls -lh "$WORKSPACE/out/managed/"
 
+fi # end SKIP_MANAGED=false (Steps 4-8)
+
 # ── Step 9: Build WASM Native ─────────────────────────────────────────────────
 
-require_cmd emcc
-require_cmd em++
-require_cmd emar
+# ── emsdk setup ───────────────────────────────────────────────────────────────
 
-log "Building WASM native artifacts ..."
-mkdir -p "$WORKSPACE/out/native/tmp"
+EMSDK_DIR="$WORKSPACE/.emsdk"
 
-LIBJVM_SRC="$WORKSPACE/ikvm/src/libjvm"
-LIBIKVM_SRC="$WORKSPACE/ikvm/src/libikvm"
-OPENJDK_DIR="$WORKSPACE/ikvm/ext/openjdk"
+if emcc --version 2>/dev/null | grep -q "$EMSDK_VERSION"; then
+    log "emsdk $EMSDK_VERSION already active."
+else
+    log "Setting up emsdk $EMSDK_VERSION in $EMSDK_DIR ..."
+    if [ ! -d "$EMSDK_DIR/.git" ]; then
+        git clone https://github.com/emscripten-core/emsdk.git "$EMSDK_DIR"
+    fi
+    "$EMSDK_DIR/emsdk" install "$EMSDK_VERSION"
+    "$EMSDK_DIR/emsdk" activate "$EMSDK_VERSION"
+    # shellcheck source=/dev/null
+    source "$EMSDK_DIR/emsdk_env.sh"
+fi
 
-COMMON_DEFS=( -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux -DLINUX -D__int64='long long' )
-COMMON_INCLUDES=(
-    -I"$LIBJVM_SRC"
-    -I"$OPENJDK_DIR/hotspot/src/share/vm"
-    -I"$OPENJDK_DIR/hotspot/src/share/vm/prims"
-    -I"$OPENJDK_DIR/hotspot/src/cpu/x86/vm"
-    -I"$OPENJDK_DIR/hotspot/src/os/linux/vm"
-    -I"$OPENJDK_DIR/jdk/src/share/javavm/export"
-    -I"$OPENJDK_DIR/jdk/src/solaris/javavm/export"
-    -I"$OPENJDK_DIR/jdk/src/linux/javavm/export"
-)
+log "Building WASM native artifacts (mt) ..."
+bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt
 
-# MT (pthread) build
-log "  Building MT (pthread) native artifacts ..."
-emcc -O2 -fPIC -fdeclspec -pthread -c "$LIBJVM_SRC/jni.c"      -o "$WORKSPACE/out/native/tmp/jni.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-emcc -O2 -fPIC -fdeclspec -pthread -c "$LIBJVM_SRC/jni_vargs.c" -o "$WORKSPACE/out/native/tmp/jni_vargs.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-em++  -O2 -fPIC -std=c++11 -Wno-error -fdeclspec -pthread -c "$LIBJVM_SRC/jvm.cpp" -o "$WORKSPACE/out/native/tmp/jvm.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-emar rcs "$WORKSPACE/out/native/libjvm.a"  "$WORKSPACE/out/native/tmp/jni.o" "$WORKSPACE/out/native/tmp/jni_vargs.o" "$WORKSPACE/out/native/tmp/jvm.o"
-emcc -O2 -fPIC -DLINUX -pthread -c "$LIBIKVM_SRC/dl.c"  -o "$WORKSPACE/out/native/tmp/dl.o"
-emcc -O2 -fPIC -DLINUX -pthread -c "$LIBIKVM_SRC/sig.c" -o "$WORKSPACE/out/native/tmp/sig.o"
-emar rcs "$WORKSPACE/out/native/libikvm.a" "$WORKSPACE/out/native/tmp/dl.o" "$WORKSPACE/out/native/tmp/sig.o"
-
-# ST (no pthread) build
-log "  Building ST (no pthread) native artifacts ..."
-emcc -O2 -fPIC -fdeclspec -c "$LIBJVM_SRC/jni.c"      -o "$WORKSPACE/out/native/tmp/jni.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-emcc -O2 -fPIC -fdeclspec -c "$LIBJVM_SRC/jni_vargs.c" -o "$WORKSPACE/out/native/tmp/jni_vargs.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-em++  -O2 -fPIC -std=c++11 -Wno-error -fdeclspec -c "$LIBJVM_SRC/jvm.cpp" -o "$WORKSPACE/out/native/tmp/jvm.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-emar rcs "$WORKSPACE/out/native/ST-libjvm.a"  "$WORKSPACE/out/native/tmp/jni.o" "$WORKSPACE/out/native/tmp/jni_vargs.o" "$WORKSPACE/out/native/tmp/jvm.o"
-emcc -O2 -fPIC -DLINUX -c "$LIBIKVM_SRC/dl.c"  -o "$WORKSPACE/out/native/tmp/dl.o"
-emcc -O2 -fPIC -DLINUX -c "$LIBIKVM_SRC/sig.c" -o "$WORKSPACE/out/native/tmp/sig.o"
-emar rcs "$WORKSPACE/out/native/ST-libikvm.a" "$WORKSPACE/out/native/tmp/dl.o" "$WORKSPACE/out/native/tmp/sig.o"
+log "Building WASM native artifacts (st) ..."
+bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st
 
 log "Done! WASM native artifacts are in $WORKSPACE/out/native/"
-ls -lh "$WORKSPACE/out/native/"*.a
 
 # ── Step 10: Bundle Release Zips ──────────────────────────────────────────────
 
-log "Bundling release zips ..."
+if [ ! -f "$WORKSPACE/out/managed/IKVM.Runtime.dll" ]; then
+    log "Skipping bundle step: managed DLLs not present in out/managed/ (run without --skip-managed to build them)."
+else
+    log "Bundling release zips ..."
 
-IMAGE_DIR="$WORKSPACE/ikvm/src/IKVM/bin/Release/net8.0/ikvm/linux-x64/"
-if [ ! -d "$IMAGE_DIR" ]; then
-    echo "ERROR: linux-x64 JRE image not found at: $IMAGE_DIR" >&2
-    exit 1
+    IMAGE_DIR="$WORKSPACE/ikvm/src/IKVM/bin/Release/net8.0/ikvm/linux-x64/"
+    if [ ! -d "$IMAGE_DIR" ]; then
+        echo "ERROR: linux-x64 JRE image not found at: $IMAGE_DIR" >&2
+        exit 1
+    fi
+
+    mkdir -p "$WORKSPACE/out/release"
+    mkdir -p "$WORKSPACE/out/bundle-staging/image"
+
+    # Copy image files into staging area
+    cp -r "$IMAGE_DIR/." "$WORKSPACE/out/bundle-staging/image/"
+
+    rm -f "$WORKSPACE/out/release/ikvm-wasm-bundle.zip"
+    rm -f "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip"
+    # MT bundle (ikvm-wasm-bundle.zip)
+    log "  Creating ikvm-wasm-bundle.zip ..."
+    (
+        cd "$WORKSPACE/out/bundle-staging"
+        zip -j "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" \
+            "$WORKSPACE/out/managed/IKVM.Runtime.dll" \
+            "$WORKSPACE/out/managed/IKVM.CoreLib.dll" \
+            "$WORKSPACE/out/managed/IKVM.Java.dll" \
+            "$WORKSPACE/out/managed/IKVM.ByteCode.dll" \
+            "$WORKSPACE/out/native/libjvm.a" \
+            "$WORKSPACE/out/native/libikvm.a" \
+            "$WORKSPACE/out/native/libiava.a"
+        zip -r "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" image
+    )
+
+    # ST bundle (ikvm-wasm-ST-bundle.zip)
+    log "  Creating ikvm-wasm-ST-bundle.zip ..."
+    (
+        cd "$WORKSPACE/out/bundle-staging"
+        zip -j "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" \
+            "$WORKSPACE/out/managed/IKVM.Runtime.dll" \
+            "$WORKSPACE/out/managed/IKVM.CoreLib.dll" \
+            "$WORKSPACE/out/managed/IKVM.Java.dll" \
+            "$WORKSPACE/out/managed/IKVM.ByteCode.dll" \
+            "$WORKSPACE/out/native/ST-libjvm.a" \
+            "$WORKSPACE/out/native/ST-libikvm.a" \
+            "$WORKSPACE/out/native/ST-libiava.a"
+        zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" image
+    )
+
+    rm -rf "$WORKSPACE/out/bundle-staging"
+
+    log "Done! Release zips are in $WORKSPACE/out/release/"
+    ls -lh "$WORKSPACE/out/release/"
 fi
-
-mkdir -p "$WORKSPACE/out/release"
-mkdir -p "$WORKSPACE/out/bundle-staging/image"
-
-# Copy image files into staging area
-cp -r "$IMAGE_DIR/." "$WORKSPACE/out/bundle-staging/image/"
-
-rm "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" || true
-rm "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" || true
-# MT bundle (ikvm-wasm-bundle.zip)
-log "  Creating ikvm-wasm-bundle.zip ..."
-(
-    cd "$WORKSPACE/out/bundle-staging"
-    zip -j "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" \
-        "$WORKSPACE/out/managed/IKVM.Runtime.dll" \
-        "$WORKSPACE/out/managed/IKVM.CoreLib.dll" \
-        "$WORKSPACE/out/managed/IKVM.Java.dll" \
-        "$WORKSPACE/out/managed/IKVM.ByteCode.dll" \
-        "$WORKSPACE/out/native/libjvm.a" \
-        "$WORKSPACE/out/native/libikvm.a"
-    zip -r "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" image
-)
-
-# ST bundle (ikvm-wasm-ST-bundle.zip)
-log "  Creating ikvm-wasm-ST-bundle.zip ..."
-(
-    cd "$WORKSPACE/out/bundle-staging"
-    zip -j "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" \
-        "$WORKSPACE/out/managed/IKVM.Runtime.dll" \
-        "$WORKSPACE/out/managed/IKVM.CoreLib.dll" \
-        "$WORKSPACE/out/managed/IKVM.Java.dll" \
-        "$WORKSPACE/out/managed/IKVM.ByteCode.dll" \
-        "$WORKSPACE/out/native/ST-libjvm.a" \
-        "$WORKSPACE/out/native/ST-libikvm.a"
-    zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" image
-)
-
-rm -rf "$WORKSPACE/out/bundle-staging"
-
-log "Done! Release zips are in $WORKSPACE/out/release/"
-ls -lh "$WORKSPACE/out/release/"

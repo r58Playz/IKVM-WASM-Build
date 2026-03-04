@@ -248,11 +248,11 @@ jobs:
         path: /tmp/ikvm-image-linux-x64.tar.gz
 
   build-wasm-native:
-    name: Build WASM Native (pthread=${{ matrix.pthread_enabled }})
+    name: Build WASM Native (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        pthread_enabled: [true, false]
-    runs-on: ubuntu-24.04
+        variant: [mt, st]
     steps:
     - name: Checkout Source
       uses: actions/checkout@v4
@@ -273,53 +273,17 @@ jobs:
         version: ${{ env.EMSDK_VERSION }}
     - name: Build WASM native artifacts
       shell: bash
-      run: |
-        set -euo pipefail
-
-        mkdir -p out/native/tmp
-
-        PREFIX=""
-        PTHREAD_FLAGS=()
-
-        if [ "${{ matrix.pthread_enabled }}" = "false" ]; then
-          PREFIX="ST-"
-        else
-          PTHREAD_FLAGS=( -pthread )
-        fi
-
-        LIBJVM_SRC="ikvm/src/libjvm"
-        LIBIKVM_SRC="ikvm/src/libikvm"
-        OPENJDK_DIR="ikvm/ext/openjdk"
-
-        COMMON_DEFS=( -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux -DLINUX -D__int64='long long' )
-        COMMON_INCLUDES=(
-          -I"$LIBJVM_SRC"
-          -I"$OPENJDK_DIR/hotspot/src/share/vm"
-          -I"$OPENJDK_DIR/hotspot/src/share/vm/prims"
-          -I"$OPENJDK_DIR/hotspot/src/cpu/x86/vm"
-          -I"$OPENJDK_DIR/hotspot/src/os/linux/vm"
-          -I"$OPENJDK_DIR/jdk/src/share/javavm/export"
-          -I"$OPENJDK_DIR/jdk/src/solaris/javavm/export"
-          -I"$OPENJDK_DIR/jdk/src/linux/javavm/export"
-        )
-
-        emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni.c" -o out/native/tmp/jni.o "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-        emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni_vargs.c" -o out/native/tmp/jni_vargs.o "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-        em++ -O2 -fPIC -std=c++11 -Wno-error -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm.cpp" -o out/native/tmp/jvm.o "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-        emar rcs "out/native/${PREFIX}libjvm.a" out/native/tmp/jni.o out/native/tmp/jni_vargs.o out/native/tmp/jvm.o
-
-        emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c" -o out/native/tmp/dl.o
-        emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o out/native/tmp/sig.o
-        emar rcs "out/native/${PREFIX}libikvm.a" out/native/tmp/dl.o out/native/tmp/sig.o
-    - name: Upload WASM native artifacts (pthread=${{ matrix.pthread_enabled }})
+      run: bash "$GITHUB_WORKSPACE/build-ikvm-native.sh" "$GITHUB_WORKSPACE/ikvm" "$GITHUB_WORKSPACE/out" ${{ matrix.variant }}
+    - name: Upload WASM native artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: wasm-native-pthread-${{ matrix.pthread_enabled }}
+        name: wasm-native-${{ matrix.variant }}
         path: out/native/*.a
 
   release:
     runs-on: ubuntu-latest
     needs: [build-ikvm, build-wasm-native]
+    # build-wasm-native is a matrix job; both variants (mt, st) must succeed
     permissions:
       contents: write
     name: Create Release
@@ -338,16 +302,16 @@ jobs:
         mkdir -p managed
         tar xzvf /tmp/managed/managed-dlls.tar.gz -C managed
 
-    - name: Download WASM native artifacts (pthread=true)
+    - name: Download WASM native artifacts (mt)
       uses: actions/download-artifact@v4
       with:
-        name: wasm-native-pthread-true
+        name: wasm-native-mt
         path: native/
 
-    - name: Download WASM native artifacts (pthread=false)
+    - name: Download WASM native artifacts (st)
       uses: actions/download-artifact@v4
       with:
-        name: wasm-native-pthread-false
+        name: wasm-native-st
         path: native/
 
     - name: Download linux-x64 JRE image
@@ -375,7 +339,8 @@ jobs:
           managed/IKVM.Java.dll \
           managed/IKVM.ByteCode.dll \
           native/libjvm.a \
-          native/libikvm.a
+          native/libikvm.a \
+          native/libiava.a
         zip -r "release/ikvm-wasm-bundle.zip" image
 
         # Bundle ST (no pthread) version
@@ -385,7 +350,8 @@ jobs:
           managed/IKVM.Java.dll \
           managed/IKVM.ByteCode.dll \
           native/ST-libjvm.a \
-          native/ST-libikvm.a
+          native/ST-libikvm.a \
+          native/ST-libiava.a
         zip -r "release/ikvm-wasm-ST-bundle.zip" image
 
     - name: Create release
