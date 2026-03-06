@@ -279,6 +279,8 @@ else
     source "$EMSDK_DIR/emsdk_env.sh"
 fi
 
+rm -rf "$WORKSPACE/out/native/"*
+
 log "Building WASM native artifacts (mt) ..."
 bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt
 
@@ -319,7 +321,14 @@ else
             "$WORKSPACE/out/managed/IKVM.ByteCode.dll" \
             "$WORKSPACE/out/native/libjvm.a" \
             "$WORKSPACE/out/native/libikvm.a" \
-            "$WORKSPACE/out/native/libiava.a"
+            "$WORKSPACE/out/native/libiava.a" \
+            "$WORKSPACE/out/native/libjpeg.a" \
+            "$WORKSPACE/out/native/libsunec.a" \
+            "$WORKSPACE/out/native/libunpack.a" \
+            "$WORKSPACE/out/native/libzip.a" \
+            "$WORKSPACE/out/native/libmanagement.a" \
+            "$WORKSPACE/out/native/libnio.a" \
+            "$WORKSPACE/out/native/libnet.a"
         zip -r "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" image
     )
 
@@ -334,7 +343,14 @@ else
             "$WORKSPACE/out/managed/IKVM.ByteCode.dll" \
             "$WORKSPACE/out/native/ST-libjvm.a" \
             "$WORKSPACE/out/native/ST-libikvm.a" \
-            "$WORKSPACE/out/native/ST-libiava.a"
+            "$WORKSPACE/out/native/ST-libiava.a" \
+            "$WORKSPACE/out/native/ST-libjpeg.a" \
+            "$WORKSPACE/out/native/ST-libsunec.a" \
+            "$WORKSPACE/out/native/ST-libunpack.a" \
+            "$WORKSPACE/out/native/ST-libzip.a" \
+            "$WORKSPACE/out/native/ST-libmanagement.a" \
+            "$WORKSPACE/out/native/ST-libnio.a" \
+            "$WORKSPACE/out/native/ST-libnet.a"
         zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" image
     )
 

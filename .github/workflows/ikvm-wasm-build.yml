@@ -340,7 +340,14 @@ jobs:
           managed/IKVM.ByteCode.dll \
           native/libjvm.a \
           native/libikvm.a \
-          native/libiava.a
+          native/libiava.a \
+          native/libjpeg.a \
+          native/libsunec.a \
+          native/libunpack.a \
+          native/libzip.a \
+          native/libmanagement.a \
+          native/libnio.a \
+          native/libnet.a
         zip -r "release/ikvm-wasm-bundle.zip" image
 
         # Bundle ST (no pthread) version
@@ -351,7 +358,14 @@ jobs:
           managed/IKVM.ByteCode.dll \
           native/ST-libjvm.a \
           native/ST-libikvm.a \
-          native/ST-libiava.a
+          native/ST-libiava.a \
+          native/ST-libjpeg.a \
+          native/ST-libsunec.a \
+          native/ST-libunpack.a \
+          native/ST-libzip.a \
+          native/ST-libmanagement.a \
+          native/ST-libnio.a \
+          native/ST-libnet.a
         zip -r "release/ikvm-wasm-ST-bundle.zip" image
 
     - name: Create release

@@ -56,6 +56,16 @@ COMMON_INCLUDES=(
 # Variant-specific tmp subdirs to allow MT and ST to run in parallel without collisions
 TMP_DIR="$OUT_DIR/native/tmp-$VARIANT"
 mkdir -p "$TMP_DIR/libiava"
+mkdir -p "$TMP_DIR/libjpeg"
+mkdir -p "$TMP_DIR/libsunec"
+mkdir -p "$TMP_DIR/libsunec/impl"
+mkdir -p "$TMP_DIR/libunpack"
+mkdir -p "$TMP_DIR/libunpack/pack"
+mkdir -p "$TMP_DIR/libzip"
+mkdir -p "$TMP_DIR/libzip/zlib"
+mkdir -p "$TMP_DIR/libmanagement"
+mkdir -p "$TMP_DIR/libnio"
+mkdir -p "$TMP_DIR/libnet"
 
 # ── libjvm ────────────────────────────────────────────────────────────────────
 
@@ -142,6 +152,340 @@ for dir in "${LIBIAVA_SRCDIRS[@]}"; do
     done
 done
 emar rcs "$OUT_DIR/native/${PREFIX}libiava.a" "${LIBIAVA_OBJS[@]}"
+
+# ── Shared defines/includes for remaining OpenJDK-derived native libraries ───
+# These mirror the defines from openjdk.lib.props + lib.props for a linux-x64 target.
+
+OPENJDK_LIB_DEFS=(
+    -DLINUX -D__linux__ -D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE
+    -D_AMD64_ -Damd64
+    -DJDK_MAJOR_VERSION='"1"' -DJDK_MINOR_VERSION='"8"'
+    -DJDK_MICRO_VERSION='"0"' -DJDK_UPDATE_VERSION='"462"'
+    -DJDK_BUILD_NUMBER='"b08"'
+)
+
+# Base includes reused by all four libraries below.
+# Use the JDK JNI export paths (not the Hotspot paths) since these libraries
+# are JNI consumers, not hotspot internals.
+OPENJDK_LIB_INCLUDES=(
+    -I"$OPENJDK_DIR/jdk/src/share/javavm/export"
+    -I"$OPENJDK_DIR/jdk/src/solaris/javavm/export"
+    -I"$OPENJDK_DIR/jdk/src/linux/javavm/export"
+    -I"$OPENJDK_DIR/jdk/src/share/native/common"
+    -I"$OPENJDK_DIR/jdk/src/solaris/native/common"
+    -I"$SCRIPT_DIR/jni-headers"
+)
+
+# ── libjpeg ───────────────────────────────────────────────────────────────────
+
+JPEG_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/awt/image/jpeg"
+
+log "Building ${PREFIX}libjpeg ..."
+LIBJPEG_OBJS=()
+for src in "$JPEG_SRC"/*.c; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    obj="$TMP_DIR/libjpeg/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" \
+        -I"$JPEG_SRC" \
+        "${OPENJDK_LIB_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBJPEG_OBJS+=("$obj")
+done
+emar rcs "$OUT_DIR/native/${PREFIX}libjpeg.a" "${LIBJPEG_OBJS[@]}"
+
+# ── libsunec ──────────────────────────────────────────────────────────────────
+
+SUNEC_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/security/ec"
+
+log "Building ${PREFIX}libsunec ..."
+LIBSUNEC_OBJS=()
+
+# ECC_JNI.cpp (C++11)
+em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+    "${OPENJDK_LIB_DEFS[@]}" \
+    -DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B \
+    -I"$SUNEC_SRC/impl" \
+    "${OPENJDK_LIB_INCLUDES[@]}" \
+    -c "$SUNEC_SRC/ECC_JNI.cpp" -o "$TMP_DIR/libsunec/ECC_JNI.o"
+LIBSUNEC_OBJS+=("$TMP_DIR/libsunec/ECC_JNI.o")
+
+# impl/*.c (C99)
+for src in "$SUNEC_SRC/impl"/*.c; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    obj="$TMP_DIR/libsunec/impl/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" \
+        -DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B \
+        -I"$SUNEC_SRC/impl" \
+        "${OPENJDK_LIB_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBSUNEC_OBJS+=("$obj")
+done
+
+# Local jni_onload.c (C99)
+emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    "${OPENJDK_LIB_DEFS[@]}" "${OPENJDK_LIB_INCLUDES[@]}" \
+    -c "$IKVM_SRC/src/libsunec/jni_onload.c" -o "$TMP_DIR/libsunec/jni_onload.o"
+LIBSUNEC_OBJS+=("$TMP_DIR/libsunec/jni_onload.o")
+
+emar rcs "$OUT_DIR/native/${PREFIX}libsunec.a" "${LIBSUNEC_OBJS[@]}"
+
+# ── libunpack ─────────────────────────────────────────────────────────────────
+
+PACK_SRC="$OPENJDK_DIR/jdk/src/share/native/com/sun/java/util/jar/pack"
+
+log "Building ${PREFIX}libunpack ..."
+LIBUNPACK_OBJS=()
+
+# OpenJDK pack .cpp files (C++11), excluding main.cpp and jni.cpp
+for src in "$PACK_SRC"/*.cpp; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    [[ "$fname" == "main.cpp" || "$fname" == "jni.cpp" ]] && continue
+    obj="$TMP_DIR/libunpack/pack/${fname%.cpp}.o"
+    em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" \
+        -DNO_ZLIB -DUNPACK_JNI -DFULL \
+        -I"$PACK_SRC" \
+        "${OPENJDK_LIB_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBUNPACK_OBJS+=("$obj")
+done
+
+# Local jni.cpp (C++11, replaces upstream jni.cpp)
+em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+    "${OPENJDK_LIB_DEFS[@]}" \
+    -DNO_ZLIB -DUNPACK_JNI -DFULL \
+    -I"$PACK_SRC" \
+    "${OPENJDK_LIB_INCLUDES[@]}" \
+    -c "$IKVM_SRC/src/libunpack/jni.cpp" -o "$TMP_DIR/libunpack/jni.o"
+LIBUNPACK_OBJS+=("$TMP_DIR/libunpack/jni.o")
+
+# Local jni_onload.c (C99)
+emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    "${OPENJDK_LIB_DEFS[@]}" "${OPENJDK_LIB_INCLUDES[@]}" \
+    -c "$IKVM_SRC/src/libunpack/jni_onload.c" -o "$TMP_DIR/libunpack/jni_onload.o"
+LIBUNPACK_OBJS+=("$TMP_DIR/libunpack/jni_onload.o")
+
+emar rcs "$OUT_DIR/native/${PREFIX}libunpack.a" "${LIBUNPACK_OBJS[@]}"
+
+# ── libzip ────────────────────────────────────────────────────────────────────
+
+ZIP_SRC="$OPENJDK_DIR/jdk/src/share/native/java/util/zip"
+
+log "Building ${PREFIX}libzip ..."
+LIBZIP_OBJS=()
+
+# Main zip sources (excluding ZipFile.c)
+for src in "$ZIP_SRC"/*.c; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    [ "$fname" = "ZipFile.c" ] && continue
+    obj="$TMP_DIR/libzip/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" \
+        -DUSE_MMAP \
+        -I"$ZIP_SRC" \
+        -I"$ZIP_SRC/zlib" \
+        -I"$OPENJDK_DIR/jdk/src/share/native/java/io" \
+        -I"$OPENJDK_DIR/jdk/src/solaris/native/java/io" \
+        "${OPENJDK_LIB_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBZIP_OBJS+=("$obj")
+done
+
+# Bundled zlib sources
+for src in "$ZIP_SRC/zlib"/*.c; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    obj="$TMP_DIR/libzip/zlib/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" \
+        -I"$ZIP_SRC/zlib" \
+        "${OPENJDK_LIB_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBZIP_OBJS+=("$obj")
+done
+
+emar rcs "$OUT_DIR/native/${PREFIX}libzip.a" "${LIBZIP_OBJS[@]}"
+
+# ── libmanagement ─────────────────────────────────────────────────────────────
+# Sources: local *.c glob (management.c + jni_onload.c) plus linux-specific
+# OpenJDK sources from solaris/native/sun/management/.
+# No library-specific preprocessor defines for linux.
+
+MGMT_SHARE_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/management"
+MGMT_SOL_SRC="$OPENJDK_DIR/jdk/src/solaris/native/sun/management"
+LIBMGMT_SRC="$IKVM_SRC/src/libmanagement"
+
+LIBMGMT_INCLUDES=(
+    "${OPENJDK_LIB_INCLUDES[@]}"
+    -I"$MGMT_SHARE_SRC"
+    -I"$MGMT_SOL_SRC"
+    -I"$SCRIPT_DIR/emscripten-stubs"
+)
+
+log "Building ${PREFIX}libmanagement ..."
+LIBMGMT_OBJS=()
+
+# Local sources (management.c, jni_onload.c)
+for src in "$LIBMGMT_SRC"/*.c; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    obj="$TMP_DIR/libmanagement/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBMGMT_OBJS+=("$obj")
+done
+
+# Linux-specific OpenJDK sources
+for src in \
+    "$MGMT_SOL_SRC/FileSystemImpl.c" \
+    "$MGMT_SOL_SRC/OperatingSystemImpl.c" \
+    "$MGMT_SOL_SRC/LinuxOperatingSystem.c"; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    obj="$TMP_DIR/libmanagement/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBMGMT_OBJS+=("$obj")
+done
+
+emar rcs "$OUT_DIR/native/${PREFIX}libmanagement.a" "${LIBMGMT_OBJS[@]}"
+
+# ── libnio ────────────────────────────────────────────────────────────────────
+# JoinPathsAndFiles cross-product: (solaris/java/nio, solaris/sun/nio/ch,
+# solaris/sun/nio/fs) × (common files + linux-only files), only if the file
+# exists on disk.
+
+NIO_SOL_JAVA_NIO="$OPENJDK_DIR/jdk/src/solaris/native/java/nio"
+NIO_SOL_CH="$OPENJDK_DIR/jdk/src/solaris/native/sun/nio/ch"
+NIO_SOL_FS="$OPENJDK_DIR/jdk/src/solaris/native/sun/nio/fs"
+NIO_SHARE_CH="$OPENJDK_DIR/jdk/src/share/native/sun/nio/ch"
+LIBNIO_SRC="$IKVM_SRC/src/libnio"
+
+LIBNIO_INCLUDES=(
+    "${OPENJDK_LIB_INCLUDES[@]}"
+    -I"$NIO_SHARE_CH"
+    -I"$OPENJDK_DIR/jdk/src/share/native/java/io"
+    -I"$OPENJDK_DIR/jdk/src/share/native/java/net"
+    -I"$OPENJDK_DIR/jdk/src/solaris/native/java/net"
+    -I"$SCRIPT_DIR/emscripten-stubs"
+)
+
+LIBNIO_DEFS=(
+    "${OPENJDK_LIB_DEFS[@]}"
+    -D_Included_java_lang_Long
+    "-Djava_lang_Long_serialVersionUID=4290774380558885855LL"
+    "-Djava_lang_Long_MIN_VALUE=-9223372036854775808LL"
+    "-Djava_lang_Long_MAX_VALUE=9223372036854775807LL"
+    -D__SIGRTMAX=64
+)
+
+# Full list of files to attempt (cross-product of dirs × filenames; skip if not present)
+NIO_DIRS=("$NIO_SOL_JAVA_NIO" "$NIO_SOL_CH" "$NIO_SOL_FS")
+NIO_FILES=(
+    # common (all platforms)
+    DatagramChannelImpl.c DatagramDispatcher.c FileChannelImpl.c FileDispatcherImpl.c
+    FileKey.c IOUtil.c MappedByteBuffer.c Net.c ServerSocketChannelImpl.c
+    SocketChannelImpl.c SocketDispatcher.c
+    # linux-only
+    EPoll.c EPollArrayWrapper.c EPollPort.c InheritedChannel.c NativeThread.c
+    PollArrayWrapper.c UnixAsynchronousServerSocketChannelImpl.c
+    UnixAsynchronousSocketChannelImpl.c GnomeFileTypeDetector.c MagicFileTypeDetector.c
+    LinuxNativeDispatcher.c LinuxWatchService.c UnixCopyFile.c UnixNativeDispatcher.c
+)
+
+log "Building ${PREFIX}libnio ..."
+LIBNIO_OBJS=()
+
+for dir in "${NIO_DIRS[@]}"; do
+    for fname in "${NIO_FILES[@]}"; do
+        src="$dir/$fname"
+        [ -f "$src" ] || continue
+        obj="$TMP_DIR/libnio/${fname%.c}.o"
+        # Guard against duplicate object names (first match wins)
+        if [[ ! " ${LIBNIO_OBJS[*]} " =~ " $obj " ]]; then
+            emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+                "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
+                -c "$src" -o "$obj"
+            LIBNIO_OBJS+=("$obj")
+        fi
+    done
+done
+
+# Local jni_onload.c
+emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
+    -c "$LIBNIO_SRC/jni_onload.c" -o "$TMP_DIR/libnio/jni_onload.o"
+LIBNIO_OBJS+=("$TMP_DIR/libnio/jni_onload.o")
+
+emar rcs "$OUT_DIR/native/${PREFIX}libnio.a" "${LIBNIO_OBJS[@]}"
+
+# ── libnet ────────────────────────────────────────────────────────────────────
+
+NET_SHARE_SRC="$OPENJDK_DIR/jdk/src/share/native/java/net"
+NET_SOL_SRC="$OPENJDK_DIR/jdk/src/solaris/native/java/net"
+LIBNET_SRC="$IKVM_SRC/src/libnet"
+
+LIBNET_INCLUDES=(
+    "${OPENJDK_LIB_INCLUDES[@]}"
+    -I"$NET_SHARE_SRC"
+    -I"$NET_SOL_SRC"
+    -I"$OPENJDK_DIR/jdk/src/share/native/java/io"
+    -I"$SCRIPT_DIR/emscripten-stubs"
+)
+
+LIBNET_DEFS=(
+    "${OPENJDK_LIB_DEFS[@]}"
+    -D__SIGRTMAX=64
+)
+
+log "Building ${PREFIX}libnet ..."
+LIBNET_OBJS=()
+
+# Share sources
+for fname in net_util.c InetAddress.c Inet4Address.c Inet6Address.c DatagramPacket.c; do
+    src="$NET_SHARE_SRC/$fname"
+    [ -f "$src" ] || continue
+    obj="$TMP_DIR/libnet/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBNET_OBJS+=("$obj")
+done
+
+# Solaris/Linux sources
+for fname in net_util_md.c Inet4AddressImpl.c Inet6AddressImpl.c InetAddressImplFactory.c \
+             NetworkInterface.c PlainDatagramSocketImpl.c PlainSocketImpl.c \
+             SocketInputStream.c SocketOutputStream.c; do
+    src="$NET_SOL_SRC/$fname"
+    [ -f "$src" ] || continue
+    obj="$TMP_DIR/libnet/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBNET_OBJS+=("$obj")
+done
+
+# linux_close.c requires pthreads — only include in MT variant
+if [ "$VARIANT" = "mt" ]; then
+    src="$NET_SOL_SRC/linux_close.c"
+    if [ -f "$src" ]; then
+        obj="$TMP_DIR/libnet/linux_close.o"
+        emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+            "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
+            -c "$src" -o "$obj"
+        LIBNET_OBJS+=("$obj")
+    fi
+fi
+
+emar rcs "$OUT_DIR/native/${PREFIX}libnet.a" "${LIBNET_OBJS[@]}"
 
 log "Done! Artifacts written to $OUT_DIR/native/"
 ls -lh "$OUT_DIR/native/${PREFIX}"*.a
