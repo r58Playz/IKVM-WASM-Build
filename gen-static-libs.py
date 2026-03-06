@@ -275,7 +275,14 @@ def generate(
             )
             out.append(f"static const jvm_symbol_entry_t _syms_{table_id}[] = {{\n")
             for sym in syms:
-                out.append(f'    {{ "{_c_str(sym)}", (void*){sym} }},\n')
+                # If the symbol follows the __lib<NAME>_JNI_OnLoad pattern,
+                # expose it under the canonical "JNI_OnLoad" key so that
+                # JVM_FindLibraryEntry("JNI_OnLoad") still works per-library.
+                if re.match(r"^__[A-Za-z0-9_]+_JNI_OnLoad$", sym):
+                    key = "JNI_OnLoad"
+                else:
+                    key = sym
+                out.append(f'    {{ "{_c_str(key)}", (void*){sym} }},\n')
             out.append("    { NULL, NULL }  /* sentinel */\n")
             out.append("};\n\n")
         else:
