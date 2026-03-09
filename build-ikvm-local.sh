@@ -144,6 +144,10 @@ cd "$WORKSPACE/ikvm"
 if git apply --check "$WORKSPACE/ikvm.patch" 2>/dev/null; then
     log "Applying ikvm.patch ..."
     git apply "$WORKSPACE/ikvm.patch"
+	(
+		cd "$WORKSPACE/ikvm/ext/openjdk"
+		git apply "$WORKSPACE/openjdk.patch"
+	)
 else
     log "ikvm.patch already applied or cannot be applied cleanly, skipping."
 fi

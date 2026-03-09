@@ -1,0 +1,36 @@
+diff --git a/jdk/src/share/native/java/net/net_util.c b/jdk/src/share/native/java/net/net_util.c
+index b1b8223a63..b5db51eeef 100644
+--- a/jdk/src/share/native/java/net/net_util.c
++++ b/jdk/src/share/native/java/net/net_util.c
+@@ -38,7 +38,7 @@ JNIEXPORT jint JNICALL ipv6_available()
+ }
+ 
+ JNIEXPORT jint JNICALL
+-JNI_OnLoad(JavaVM *vm, void *reserved)
++__libnet_JNI_OnLoad(JavaVM *vm, void *reserved)
+ {
+     JNIEnv *env;
+     jclass iCls;
+diff --git a/jdk/src/solaris/native/java/lang/java_props_md.c b/jdk/src/solaris/native/java/lang/java_props_md.c
+index b03bd6ac8f..20d63640ac 100644
+--- a/jdk/src/solaris/native/java/lang/java_props_md.c
++++ b/jdk/src/solaris/native/java/lang/java_props_md.c
+@@ -459,6 +459,10 @@ GetJavaProperties(JNIEnv *env)
+     {
+ #ifdef MACOSX
+         setOSNameAndVersion(&sprops);
++#else
++#ifdef __EMSCRIPTEN__
++		sprops.os_name = strdup("Linux");
++		sprops.os_version = strdup("7.0.0-emscripten");
+ #else
+         struct utsname name;
+         uname(&name);
+@@ -477,6 +481,7 @@ GetJavaProperties(JNIEnv *env)
+ #else
+         sprops.os_version = strdup(name.release);
+ #endif /* _AIX   */
++#endif /* __EMSCRIPTEN__ */
+ #endif /* MACOSX */
+ 
+         sprops.os_arch = ARCHPROPNAME;
