@@ -224,12 +224,8 @@ jobs:
       shell: bash
       run: |
         mkdir -p out/managed
-
         BYTECODE_DLL=$(find $NUGET_PACKAGES/ikvm.bytecode -name "IKVM.ByteCode.dll" -path "*/net8.0/*" | head -1)
-
-
-        cp "ikvm/dist/jdk/net8.0/linux-x64/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll "out/managed/"
-
+        cp "ikvm/dist/jre/net8.0/linux-x64/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll "out/managed/"
         tar czvf /tmp/managed-dlls.tar.gz -C out/managed .
     - name: Upload Managed DLLs
       uses: actions/upload-artifact@v4
@@ -239,7 +235,7 @@ jobs:
     - name: Package linux-x64 JRE image
       shell: bash
       run: |
-        IMAGE_DIR="ikvm/src/IKVM/bin/Release/net8.0/ikvm/linux-x64/"
+        IMAGE_DIR="ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/linux-x64/"
         tar czvf /tmp/ikvm-image-linux-x64.tar.gz -C "$IMAGE_DIR" .
     - name: Upload linux-x64 JRE image
       uses: actions/upload-artifact@v4

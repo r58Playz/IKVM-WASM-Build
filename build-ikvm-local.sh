@@ -224,7 +224,7 @@ dotnet restore IKVM.sln
 # ── Step 7: Build Artifacts ───────────────────────────────────────────────────
 
 log "Building IKVM artifacts (this will take a while) ..."
-dotnet msbuild /m /bl \
+dotnet msbuild /m /bl /nr:false \
     /p:Configuration="Release" \
     /p:Platform="Any CPU" \
     /p:PreReleaseLabel="${GitVersion_PreReleaseLabel}" \
@@ -253,7 +253,7 @@ dotnet msbuild /m /bl \
 log "Packaging managed DLLs ..."
 mkdir -p "$WORKSPACE/out/managed"
 
-cp "$WORKSPACE/ikvm/dist/jdk/net8.0/linux-x64/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll   "$WORKSPACE/out/managed/"
+cp "$WORKSPACE/ikvm/dist/jre/net8.0/linux-x64/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll   "$WORKSPACE/out/managed/"
 
 log "Done! Managed DLLs are in $WORKSPACE/out/managed/"
 ls -lh "$WORKSPACE/out/managed/"
@@ -296,7 +296,7 @@ if [ ! -f "$WORKSPACE/out/managed/IKVM.Runtime.dll" ]; then
 else
     log "Bundling release zips ..."
 
-    IMAGE_DIR="$WORKSPACE/ikvm/src/IKVM/bin/Release/net8.0/ikvm/linux-x64/"
+    IMAGE_DIR="$WORKSPACE/ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/linux-x64/"
     if [ ! -d "$IMAGE_DIR" ]; then
         echo "ERROR: linux-x64 JRE image not found at: $IMAGE_DIR" >&2
         exit 1
