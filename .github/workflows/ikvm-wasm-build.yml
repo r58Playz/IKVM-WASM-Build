@@ -342,22 +342,34 @@ jobs:
         zip -r "release/ikvm-wasm-bundle.zip" image
 
         # Bundle ST (no pthread) version
+        mkdir -p /tmp/st-native
+        cp native/ST-libjvm.a /tmp/st-native/libjvm.a
+        cp native/ST-libikvm.a /tmp/st-native/libikvm.a
+        cp native/ST-libiava.a /tmp/st-native/libiava.a
+        cp native/ST-libjpeg.a /tmp/st-native/libjpeg.a
+        cp native/ST-libsunec.a /tmp/st-native/libsunec.a
+        cp native/ST-libunpack.a /tmp/st-native/libunpack.a
+        cp native/ST-libzip.a /tmp/st-native/libzip.a
+        cp native/ST-libmanagement.a /tmp/st-native/libmanagement.a
+        cp native/ST-libnio.a /tmp/st-native/libnio.a
+        cp native/ST-libnet.a /tmp/st-native/libnet.a
         zip -j "release/ikvm-wasm-ST-bundle.zip" \
           managed/IKVM.Runtime.dll \
           managed/IKVM.CoreLib.dll \
           managed/IKVM.Java.dll \
           managed/IKVM.ByteCode.dll \
-          native/ST-libjvm.a \
-          native/ST-libikvm.a \
-          native/ST-libiava.a \
-          native/ST-libjpeg.a \
-          native/ST-libsunec.a \
-          native/ST-libunpack.a \
-          native/ST-libzip.a \
-          native/ST-libmanagement.a \
-          native/ST-libnio.a \
-          native/ST-libnet.a
+          /tmp/st-native/libjvm.a \
+          /tmp/st-native/libikvm.a \
+          /tmp/st-native/libiava.a \
+          /tmp/st-native/libjpeg.a \
+          /tmp/st-native/libsunec.a \
+          /tmp/st-native/libunpack.a \
+          /tmp/st-native/libzip.a \
+          /tmp/st-native/libmanagement.a \
+          /tmp/st-native/libnio.a \
+          /tmp/st-native/libnet.a
         zip -r "release/ikvm-wasm-ST-bundle.zip" image
+        rm -rf /tmp/st-native
 
     - name: Create release
       uses: ncipollo/release-action@v1

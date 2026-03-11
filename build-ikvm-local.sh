@@ -339,24 +339,36 @@ else
     # ST bundle (ikvm-wasm-ST-bundle.zip)
     log "  Creating ikvm-wasm-ST-bundle.zip ..."
     (
+        mkdir -p "$WORKSPACE/out/st-native"
+        cp "$WORKSPACE/out/native/ST-libjvm.a" "$WORKSPACE/out/st-native/libjvm.a"
+        cp "$WORKSPACE/out/native/ST-libikvm.a" "$WORKSPACE/out/st-native/libikvm.a"
+        cp "$WORKSPACE/out/native/ST-libiava.a" "$WORKSPACE/out/st-native/libiava.a"
+        cp "$WORKSPACE/out/native/ST-libjpeg.a" "$WORKSPACE/out/st-native/libjpeg.a"
+        cp "$WORKSPACE/out/native/ST-libsunec.a" "$WORKSPACE/out/st-native/libsunec.a"
+        cp "$WORKSPACE/out/native/ST-libunpack.a" "$WORKSPACE/out/st-native/libunpack.a"
+        cp "$WORKSPACE/out/native/ST-libzip.a" "$WORKSPACE/out/st-native/libzip.a"
+        cp "$WORKSPACE/out/native/ST-libmanagement.a" "$WORKSPACE/out/st-native/libmanagement.a"
+        cp "$WORKSPACE/out/native/ST-libnio.a" "$WORKSPACE/out/st-native/libnio.a"
+        cp "$WORKSPACE/out/native/ST-libnet.a" "$WORKSPACE/out/st-native/libnet.a"
         cd "$WORKSPACE/out/bundle-staging"
         zip -j "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" \
             "$WORKSPACE/out/managed/IKVM.Runtime.dll" \
             "$WORKSPACE/out/managed/IKVM.CoreLib.dll" \
             "$WORKSPACE/out/managed/IKVM.Java.dll" \
             "$WORKSPACE/out/managed/IKVM.ByteCode.dll" \
-            "$WORKSPACE/out/native/ST-libjvm.a" \
-            "$WORKSPACE/out/native/ST-libikvm.a" \
-            "$WORKSPACE/out/native/ST-libiava.a" \
-            "$WORKSPACE/out/native/ST-libjpeg.a" \
-            "$WORKSPACE/out/native/ST-libsunec.a" \
-            "$WORKSPACE/out/native/ST-libunpack.a" \
-            "$WORKSPACE/out/native/ST-libzip.a" \
-            "$WORKSPACE/out/native/ST-libmanagement.a" \
-            "$WORKSPACE/out/native/ST-libnio.a" \
-            "$WORKSPACE/out/native/ST-libnet.a"
+            "$WORKSPACE/out/st-native/libjvm.a" \
+            "$WORKSPACE/out/st-native/libikvm.a" \
+            "$WORKSPACE/out/st-native/libiava.a" \
+            "$WORKSPACE/out/st-native/libjpeg.a" \
+            "$WORKSPACE/out/st-native/libsunec.a" \
+            "$WORKSPACE/out/st-native/libunpack.a" \
+            "$WORKSPACE/out/st-native/libzip.a" \
+            "$WORKSPACE/out/st-native/libmanagement.a" \
+            "$WORKSPACE/out/st-native/libnio.a" \
+            "$WORKSPACE/out/st-native/libnet.a"
         zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" image
     )
+    rm -rf "$WORKSPACE/out/st-native"
 
     rm -rf "$WORKSPACE/out/bundle-staging"
 
