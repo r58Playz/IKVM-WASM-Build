@@ -425,6 +425,16 @@ emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     -c "$LIBNIO_SRC/jni_onload.c" -o "$TMP_DIR/libnio/jni_onload.o"
 LIBNIO_OBJS+=("$TMP_DIR/libnio/jni_onload.o")
 
+# NativeThread.c calls pthread_kill to interrupt blocked threads.  In the
+# ST build there is no pthread runtime, so provide a stub that satisfies
+# the linker.
+if [ "$VARIANT" = "st" ]; then
+    emcc -O2 -fPIC -Wno-error -std=c99 \
+        "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
+        -c "$SCRIPT_DIR/st-stubs/pthread_stubs.c" -o "$TMP_DIR/libnio/pthread_stubs.o"
+    LIBNIO_OBJS+=("$TMP_DIR/libnio/pthread_stubs.o")
+fi
+
 emar rcs "$OUT_DIR/native/${PREFIX}libnio.a" "${LIBNIO_OBJS[@]}"
 
 # ── libnet ────────────────────────────────────────────────────────────────────
@@ -473,7 +483,9 @@ for fname in net_util_md.c Inet4AddressImpl.c Inet6AddressImpl.c InetAddressImpl
     LIBNET_OBJS+=("$obj")
 done
 
-# linux_close.c requires pthreads — only include in MT variant
+# linux_close.c requires pthreads — only include in MT variant.
+# For ST: compile a simplified drop-in that provides the same NET_* API
+# without any pthread machinery.
 if [ "$VARIANT" = "mt" ]; then
     src="$NET_SOL_SRC/linux_close.c"
     if [ -f "$src" ]; then
@@ -483,6 +495,12 @@ if [ "$VARIANT" = "mt" ]; then
             -c "$src" -o "$obj"
         LIBNET_OBJS+=("$obj")
     fi
+else
+    obj="$TMP_DIR/libnet/linux_close_st.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 \
+        "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
+        -c "$SCRIPT_DIR/st-stubs/linux_close_st.c" -o "$obj"
+    LIBNET_OBJS+=("$obj")
 fi
 
 emar rcs "$OUT_DIR/native/${PREFIX}libnet.a" "${LIBNET_OBJS[@]}"
