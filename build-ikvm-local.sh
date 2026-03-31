@@ -359,7 +359,7 @@ fi
 
 cd "$WORKSPACE/ikvm"
 log "Running NuGet restore ..."
-dotnet restore IKVM.sln /p:RestoreUseStaticGraphEvaluation=true "${RUNTIME_BUILD_PROPS[@]}"
+dotnet restore IKVM.sln "${RUNTIME_BUILD_PROPS[@]}"
 
 # ── Step 7: Build Artifacts ───────────────────────────────────────────────────
 
