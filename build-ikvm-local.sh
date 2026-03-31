@@ -1,20 +1,44 @@
 #!/usr/bin/env bash
-# build-ikvm-local.sh - Builds IKVM managed libraries and WASM native artifacts locally.
-# Based on .github/workflows/ikvm-wasm-build.yml
+# build-ikvm-local.sh - Builds IKVM managed libraries and WASM native artifacts.
+# Shared by local runs and GitHub Actions.
 
 set -euo pipefail
 
-IKVM_REF="8.14.0"
-NATIVE_SDK_VERSION="20251124.1"
-EMSDK_VERSION="3.1.56"
+IKVM_REF="${IKVM_REF:-8.14.0}"
+NATIVE_SDK_VERSION="${NATIVE_SDK_VERSION:-20251124.1}"
+EMSDK_VERSION="${EMSDK_VERSION:-3.1.56}"
 WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
+BUILD_RUNTIME="${BUILD_RUNTIME:-linux-x64}"
+ENABLED_RUNTIMES="${ENABLED_RUNTIMES:-$BUILD_RUNTIME}"
+ENABLED_IMAGE_RUNTIMES="${ENABLED_IMAGE_RUNTIMES:-$BUILD_RUNTIME}"
+ENABLED_IMAGE_BIN_RUNTIMES="${ENABLED_IMAGE_BIN_RUNTIMES:-$BUILD_RUNTIME}"
+ENABLED_TOOL_RUNTIMES="${ENABLED_TOOL_RUNTIMES:-$BUILD_RUNTIME}"
+CLANG_COMPAT_FLAGS="${CLANG_COMPAT_FLAGS:-}"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 SKIP_MANAGED=false
+SKIP_NATIVE=false
+SKIP_BUNDLE=false
+CLEAN_NATIVE=false
+NATIVE_VARIANT="both"
 for arg in "$@"; do
     case "$arg" in
         --skip-managed) SKIP_MANAGED=true ;;
+        --skip-native) SKIP_NATIVE=true ;;
+        --skip-bundle) SKIP_BUNDLE=true ;;
+        --managed-only)
+            SKIP_NATIVE=true
+            SKIP_BUNDLE=true
+            ;;
+        --native-only)
+            SKIP_MANAGED=true
+            SKIP_BUNDLE=true
+            ;;
+        --native-variant=mt) NATIVE_VARIANT="mt" ;;
+        --native-variant=st) NATIVE_VARIANT="st" ;;
+        --native-variant=both) NATIVE_VARIANT="both" ;;
+        --clean-native) CLEAN_NATIVE=true ;;
         *) echo "ERROR: unknown argument '$arg'" >&2; exit 1 ;;
     esac
 done
@@ -30,11 +54,52 @@ require_cmd() {
     fi
 }
 
+apply_patch_once() {
+    local repo_dir="$1"
+    local patch_file="$2"
+    local patch_name="$3"
+
+    if git -C "$repo_dir" apply --check "$patch_file" >/dev/null 2>&1; then
+        log "Applying $patch_name ..."
+        git -C "$repo_dir" apply "$patch_file"
+    elif git -C "$repo_dir" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+        log "$patch_name already applied, skipping."
+    else
+        echo "ERROR: $patch_name cannot be applied cleanly in $repo_dir" >&2
+        exit 1
+    fi
+}
+
+java_version_from_home() {
+    local home="$1"
+    local version_line=""
+
+    if [ ! -x "$home/bin/java" ]; then
+        return 1
+    fi
+
+    version_line="$("$home/bin/java" -version 2>&1 | sed -n 's/.* version "\([^"]*\)".*/\1/p' | head -n 1 || true)"
+    printf '%s' "$version_line"
+}
+
+java_home_is_8() {
+    local home="$1"
+    local version
+
+    version="$(java_version_from_home "$home" || true)"
+    [[ "$version" == 1.8* ]]
+}
+
+if [ "$SKIP_NATIVE" = "true" ] && [ "$CLEAN_NATIVE" = "true" ]; then
+    log "Ignoring --clean-native because native build is skipped."
+fi
+
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
 require_cmd git
 require_cmd curl
 require_cmd zip
+require_cmd tar
 
 if [ "$SKIP_MANAGED" = "false" ]; then
     require_cmd mono
@@ -64,24 +129,49 @@ if [ "$SKIP_MANAGED" = "false" ]; then
     log "Using clang:   $CLANG_EXE"
     log "Using llvm-ar: $LLVM_AR_EXE"
 
-    # Locate JDK 8 (workflow sets JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64)
-    if [ -z "${JAVA_HOME:-}" ]; then
-        for candidate in \
-            /usr/lib/jvm/java-8-openjdk-amd64 \
-            /usr/lib/jvm/java-8-openjdk \
-            /usr/lib/jvm/java-1.8.0-openjdk-amd64 \
-            /usr/lib/jvm/java-1.8.0-openjdk; do
-            if [ -d "$candidate" ]; then
-                export JAVA_HOME="$candidate"
-                break
-            fi
-        done
+    CLANG_MAJOR="$($CLANG_EXE -dumpversion 2>/dev/null | cut -d. -f1 || true)"
+    if [ -z "$CLANG_COMPAT_FLAGS" ] && [[ "$CLANG_MAJOR" =~ ^[0-9]+$ ]] && [ "$CLANG_MAJOR" -ge 22 ]; then
+        CLANG_COMPAT_FLAGS="-Wno-incompatible-pointer-types"
     fi
-    if [ -z "${JAVA_HOME:-}" ]; then
-        echo "ERROR: could not locate JDK 8. Set JAVA_HOME manually." >&2
+    if [ -n "$CLANG_COMPAT_FLAGS" ]; then
+        log "Using additional Clang compile options: $CLANG_COMPAT_FLAGS"
+    fi
+
+    # Locate JDK 8. Some CI runners set JAVA_HOME to a newer JDK by default.
+    JAVA8_CANDIDATES=()
+    if [ -n "${JAVA8_HOME:-}" ]; then
+        JAVA8_CANDIDATES+=("$JAVA8_HOME")
+    fi
+    if [ -n "${JAVA_HOME_8_X64:-}" ]; then
+        JAVA8_CANDIDATES+=("$JAVA_HOME_8_X64")
+    fi
+    if [ -n "${JAVA_HOME:-}" ]; then
+        JAVA8_CANDIDATES+=("$JAVA_HOME")
+    fi
+    JAVA8_CANDIDATES+=(
+        /usr/lib/jvm/java-8-openjdk-amd64
+        /usr/lib/jvm/java-8-openjdk
+        /usr/lib/jvm/java-1.8.0-openjdk-amd64
+        /usr/lib/jvm/java-1.8.0-openjdk
+    )
+
+    JAVA_HOME=""
+    for candidate in "${JAVA8_CANDIDATES[@]}"; do
+        [ -d "$candidate" ] || continue
+        if java_home_is_8 "$candidate"; then
+            JAVA_HOME="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$JAVA_HOME" ]; then
+        echo "ERROR: could not locate a JDK 8 home. Configure JAVA8_HOME, JAVA_HOME_8_X64, or JAVA_HOME to a JDK 8 path." >&2
         exit 1
     fi
-    log "Using JAVA_HOME: $JAVA_HOME"
+
+    export JAVA_HOME
+    JAVA_VERSION_DETECTED="$(java_version_from_home "$JAVA_HOME" || true)"
+    log "Using JAVA_HOME: $JAVA_HOME (Java $JAVA_VERSION_DETECTED)"
 fi
 
 # ── .NET SDK setup ────────────────────────────────────────────────────────────
@@ -105,13 +195,8 @@ if ! _dotnet_has_sdk; then
         curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$DOTNET_INSTALL_SCRIPT"
         chmod +x "$DOTNET_INSTALL_SCRIPT"
     fi
-    # Install the specific versions the workflow uses
-    for ver in 6.0 7.0 8.0 9.0 10.0; do
-        if ! dotnet --list-sdks 2>/dev/null | grep -q "^${ver}\."; then
-            log "  Installing .NET $ver SDK ..."
-            "$DOTNET_INSTALL_SCRIPT" --channel "$ver" --install-dir "$DOTNET_INSTALL_DIR" --no-path
-        fi
-    done
+    log "  Installing .NET 9 SDK ..."
+    "$DOTNET_INSTALL_SCRIPT" --channel "9.0" --install-dir "$DOTNET_INSTALL_DIR" --no-path
     export DOTNET_ROOT="$DOTNET_INSTALL_DIR"
     export PATH="$DOTNET_INSTALL_DIR:$PATH"
 else
@@ -138,20 +223,13 @@ else
     log "IKVM source already present, skipping clone."
 fi
 
+log "Updating IKVM submodules ..."
+git -C "$WORKSPACE/ikvm" submodule update --init --recursive
+
 # ── Step 2: Apply patch ───────────────────────────────────────────────────────
 
-cd "$WORKSPACE/ikvm"
-if git apply --check "$WORKSPACE/ikvm.patch" 2>/dev/null; then
-    log "Applying ikvm.patch ..."
-    git apply "$WORKSPACE/ikvm.patch"
-	(
-		cd "$WORKSPACE/ikvm/ext/openjdk"
-		git apply "$WORKSPACE/openjdk.patch"
-	)
-else
-    log "ikvm.patch already applied or cannot be applied cleanly, skipping."
-fi
-cd "$WORKSPACE"
+apply_patch_once "$WORKSPACE/ikvm" "$WORKSPACE/ikvm.patch" "ikvm.patch"
+apply_patch_once "$WORKSPACE/ikvm/ext/openjdk" "$WORKSPACE/openjdk.patch" "openjdk.patch"
 
 # ── Step 3: Version environment variables ─────────────────────────────────────
 
@@ -220,10 +298,23 @@ fi
 
 export NUGET_PACKAGES="${NUGET_PACKAGES:-$WORKSPACE/.nuget/packages}"
 log "Using NuGet package cache: $NUGET_PACKAGES"
+log "Managed runtime filters: Enabled=$ENABLED_RUNTIMES Image=$ENABLED_IMAGE_RUNTIMES ImageBin=$ENABLED_IMAGE_BIN_RUNTIMES Tool=$ENABLED_TOOL_RUNTIMES"
+
+RUNTIME_BUILD_PROPS=(
+    "/p:EnabledRuntimes=$ENABLED_RUNTIMES"
+    "/p:EnabledImageRuntimes=$ENABLED_IMAGE_RUNTIMES"
+    "/p:EnabledImageBinRuntimes=$ENABLED_IMAGE_BIN_RUNTIMES"
+    "/p:EnabledToolRuntimes=$ENABLED_TOOL_RUNTIMES"
+    "/p:RuntimeIdentifier=$BUILD_RUNTIME"
+)
+
+if [ -n "$CLANG_COMPAT_FLAGS" ]; then
+    RUNTIME_BUILD_PROPS+=("/p:AdditionalCompileOptions=$CLANG_COMPAT_FLAGS")
+fi
 
 cd "$WORKSPACE/ikvm"
 log "Running NuGet restore ..."
-dotnet restore IKVM.sln
+dotnet restore IKVM.dist.msbuildproj "${RUNTIME_BUILD_PROPS[@]}"
 
 # ── Step 7: Build Artifacts ───────────────────────────────────────────────────
 
@@ -247,6 +338,7 @@ dotnet msbuild /m /bl /nr:false \
     /p:CreateHardLinksForCopyLocalIfPossible=true \
     /p:CreateHardLinksForPublishFilesIfPossible=true \
     /p:ContinuousIntegrationBuild=true \
+    "${RUNTIME_BUILD_PROPS[@]}" \
     /p:ClangToolExe="$CLANG_EXE" \
     /p:LlvmArToolExe="$LLVM_AR_EXE" \
     /p:EnableOSXCodeSign=false \
@@ -257,56 +349,89 @@ dotnet msbuild /m /bl /nr:false \
 log "Packaging managed DLLs ..."
 mkdir -p "$WORKSPACE/out/managed"
 
-cp "$WORKSPACE/ikvm/dist/jre/net8.0/linux-x64/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll   "$WORKSPACE/out/managed/"
+cp "$WORKSPACE/ikvm/dist/jre/net8.0/$BUILD_RUNTIME/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll "$WORKSPACE/out/managed/"
 
 log "Done! Managed DLLs are in $WORKSPACE/out/managed/"
 ls -lh "$WORKSPACE/out/managed/"
 
 fi # end SKIP_MANAGED=false (Steps 4-8)
 
-# ── Step 9: Build WASM Native ─────────────────────────────────────────────────
-
-# ── emsdk setup ───────────────────────────────────────────────────────────────
-
-EMSDK_DIR="$WORKSPACE/.emsdk"
-
-if emcc --version 2>/dev/null | grep -q "$EMSDK_VERSION"; then
-    log "emsdk $EMSDK_VERSION already active."
+if [ "$SKIP_NATIVE" = "true" ]; then
+    log "Skipping WASM native build."
 else
-    log "Setting up emsdk $EMSDK_VERSION in $EMSDK_DIR ..."
-    if [ ! -d "$EMSDK_DIR/.git" ]; then
-        git clone https://github.com/emscripten-core/emsdk.git "$EMSDK_DIR"
+    # ── Step 9: Build WASM Native ─────────────────────────────────────────────
+
+    # ── emsdk setup ───────────────────────────────────────────────────────────
+
+    EMSDK_DIR="$WORKSPACE/.emsdk"
+
+    if emcc --version 2>/dev/null | grep -q "$EMSDK_VERSION"; then
+        log "emsdk $EMSDK_VERSION already active."
+    else
+        log "Setting up emsdk $EMSDK_VERSION in $EMSDK_DIR ..."
+        if [ ! -d "$EMSDK_DIR/.git" ]; then
+            git clone https://github.com/emscripten-core/emsdk.git "$EMSDK_DIR"
+        fi
+        "$EMSDK_DIR/emsdk" install "$EMSDK_VERSION"
+        "$EMSDK_DIR/emsdk" activate "$EMSDK_VERSION"
     fi
-    "$EMSDK_DIR/emsdk" install "$EMSDK_VERSION"
-    "$EMSDK_DIR/emsdk" activate "$EMSDK_VERSION"
-    # shellcheck source=/dev/null
-    source "$EMSDK_DIR/emsdk_env.sh"
+
+    if [ -f "$EMSDK_DIR/emsdk_env.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$EMSDK_DIR/emsdk_env.sh"
+    fi
+
+    require_cmd emcc
+    require_cmd em++
+    require_cmd emar
+
+    if [ "$CLEAN_NATIVE" = "true" ]; then
+        log "Cleaning native output directory ..."
+        rm -rf "$WORKSPACE/out/native/"*
+    fi
+
+    mkdir -p "$WORKSPACE/out/native"
+
+    case "$NATIVE_VARIANT" in
+        mt)
+            log "Building WASM native artifacts (mt) ..."
+            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt
+            ;;
+        st)
+            log "Building WASM native artifacts (st) ..."
+            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st
+            ;;
+        both)
+            log "Building WASM native artifacts (mt + st in parallel) ..."
+            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt &
+            pid_mt=$!
+            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st &
+            pid_st=$!
+            wait "$pid_mt"
+            wait "$pid_st"
+            ;;
+    esac
+
+    log "Done! WASM native artifacts are in $WORKSPACE/out/native/"
 fi
-
-rm -rf "$WORKSPACE/out/native/"*
-
-log "Building WASM native artifacts (mt) ..."
-bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt
-
-log "Building WASM native artifacts (st) ..."
-bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st
-
-log "Done! WASM native artifacts are in $WORKSPACE/out/native/"
 
 # ── Step 10: Bundle Release Zips ──────────────────────────────────────────────
 
-if [ ! -f "$WORKSPACE/out/managed/IKVM.Runtime.dll" ]; then
+if [ "$SKIP_BUNDLE" = "true" ]; then
+    log "Skipping bundle step."
+elif [ ! -f "$WORKSPACE/out/managed/IKVM.Runtime.dll" ]; then
     log "Skipping bundle step: managed DLLs not present in out/managed/ (run without --skip-managed to build them)."
 else
     log "Bundling release zips ..."
 
-    IMAGE_DIR="$WORKSPACE/ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/linux-x64/"
+    IMAGE_DIR="$WORKSPACE/ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/$BUILD_RUNTIME/"
     if [ ! -d "$IMAGE_DIR" ]; then
-        echo "ERROR: linux-x64 JRE image not found at: $IMAGE_DIR" >&2
+        echo "ERROR: $BUILD_RUNTIME JRE image not found at: $IMAGE_DIR" >&2
         exit 1
     fi
 
     mkdir -p "$WORKSPACE/out/release"
+    rm -rf "$WORKSPACE/out/bundle-staging"
     mkdir -p "$WORKSPACE/out/bundle-staging/image"
 
     # Copy image files into staging area
