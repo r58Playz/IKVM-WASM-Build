@@ -70,6 +70,53 @@ apply_patch_once() {
     fi
 }
 
+add_unique_asset() {
+    local asset="$1"
+    if [ -z "${NATIVE_SDK_ASSET_SEEN[$asset]+x}" ]; then
+        NATIVE_SDK_ASSETS+=("$asset")
+        NATIVE_SDK_ASSET_SEEN["$asset"]=1
+    fi
+}
+
+collect_native_sdk_assets() {
+    local runtime_list="$1"
+    local tokenized
+    local runtime
+
+    NATIVE_SDK_ASSETS=()
+    declare -gA NATIVE_SDK_ASSET_SEEN=()
+
+    tokenized="${runtime_list//,/;}"
+    IFS=';' read -r -a _runtimes <<< "$tokenized"
+    for runtime in "${_runtimes[@]}"; do
+        runtime="${runtime//[[:space:]]/}"
+        [ -n "$runtime" ] || continue
+        case "$runtime" in
+            linux-arm) add_unique_asset "linux-arm.tar.gz" ;;
+            linux-arm64) add_unique_asset "linux-arm64.tar.gz" ;;
+            linux-musl-arm) add_unique_asset "linux-musl-arm.tar.gz" ;;
+            linux-musl-arm64) add_unique_asset "linux-musl-arm64.tar.gz" ;;
+            linux-musl-x64) add_unique_asset "linux-musl-x64.tar.gz" ;;
+            linux-x64) add_unique_asset "linux-x64.tar.gz" ;;
+            osx*|macos*) add_unique_asset "osx.tar.gz" ;;
+            win*|windows*) add_unique_asset "win.tar.gz" ;;
+        esac
+    done
+
+    if [ "${#NATIVE_SDK_ASSETS[@]}" -eq 0 ]; then
+        NATIVE_SDK_ASSETS=(
+            linux-arm.tar.gz
+            linux-arm64.tar.gz
+            linux-musl-arm.tar.gz
+            linux-musl-arm64.tar.gz
+            linux-musl-x64.tar.gz
+            linux-x64.tar.gz
+            osx.tar.gz
+            win.tar.gz
+        )
+    fi
+}
+
 java_version_from_home() {
     local home="$1"
     local version_line=""
@@ -267,31 +314,29 @@ fi
 # ── Step 5: Download Native SDKs ─────────────────────────────────────────────
 
 NATIVE_SDK_DIR="$WORKSPACE/ikvm/ext/ikvm-native-sdk"
-NATIVE_SDK_STAMP="$NATIVE_SDK_DIR/.downloaded"
 mkdir -p "$NATIVE_SDK_DIR"
 
-if [ -f "$NATIVE_SDK_STAMP" ]; then
-    log "Native SDKs already downloaded, skipping."
-else
-    log "Downloading Native SDKs (tag $NATIVE_SDK_VERSION) ..."
-    RELEASE_BASE="https://github.com/ikvmnet/ikvm-native-sdk/releases/download/${NATIVE_SDK_VERSION}"
-    ASSETS=(
-        linux-arm.tar.gz
-        linux-arm64.tar.gz
-        linux-musl-arm.tar.gz
-        linux-musl-arm64.tar.gz
-        linux-musl-x64.tar.gz
-        linux-x64.tar.gz
-        osx.tar.gz
-        win.tar.gz
-    )
-    for asset in "${ASSETS[@]}"; do
-        log "  Downloading $asset ..."
-        curl -fsSL -o "$NATIVE_SDK_DIR/$asset" "$RELEASE_BASE/$asset"
-        tar xzf "$NATIVE_SDK_DIR/$asset" -C "$NATIVE_SDK_DIR"
-        rm "$NATIVE_SDK_DIR/$asset"
-    done
-    touch "$NATIVE_SDK_STAMP"
+collect_native_sdk_assets "$ENABLED_RUNTIMES"
+log "Native SDK runtime filters: $ENABLED_RUNTIMES"
+
+RELEASE_BASE="https://github.com/ikvmnet/ikvm-native-sdk/releases/download/${NATIVE_SDK_VERSION}"
+downloaded_any=false
+for asset in "${NATIVE_SDK_ASSETS[@]}"; do
+    marker="$NATIVE_SDK_DIR/.asset-${NATIVE_SDK_VERSION}-${asset}.ok"
+    if [ -f "$marker" ]; then
+        continue
+    fi
+
+    downloaded_any=true
+    log "  Downloading $asset (tag $NATIVE_SDK_VERSION) ..."
+    curl -fsSL -o "$NATIVE_SDK_DIR/$asset" "$RELEASE_BASE/$asset"
+    tar xzf "$NATIVE_SDK_DIR/$asset" -C "$NATIVE_SDK_DIR"
+    rm "$NATIVE_SDK_DIR/$asset"
+    touch "$marker"
+done
+
+if [ "$downloaded_any" = "false" ]; then
+    log "Native SDKs already downloaded for current runtime filters, skipping."
 fi
 
 # ── Step 6: NuGet Restore ─────────────────────────────────────────────────────
@@ -314,7 +359,7 @@ fi
 
 cd "$WORKSPACE/ikvm"
 log "Running NuGet restore ..."
-dotnet restore IKVM.dist.msbuildproj "${RUNTIME_BUILD_PROPS[@]}"
+dotnet restore IKVM.sln /p:RestoreUseStaticGraphEvaluation=true "${RUNTIME_BUILD_PROPS[@]}"
 
 # ── Step 7: Build Artifacts ───────────────────────────────────────────────────
 
