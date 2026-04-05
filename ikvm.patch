@@ -1944,6 +1944,18 @@ index 79a7c736c..468b86512 100644
          internal static jint AttachCurrentThreadAsDaemon(JavaVM* pJVM, void** penv, void* args)
          {
              return AttachCurrentThreadImpl(pJVM, penv, (JavaVMAttachArgs*)args, true);
+diff --git a/src/IKVM.Runtime/JVM.cs b/src/IKVM.Runtime/JVM.cs
+index b3c9d17bc..1a30bef1d 100644
+--- a/src/IKVM.Runtime/JVM.cs
++++ b/src/IKVM.Runtime/JVM.cs
+@@ -169,6 +169,7 @@ internal static Exception GetPendingException()
+         /// <param name="e"></param>
+         internal static void SetPendingException(Exception e)
+         {
++			Console.WriteLine($"[IKVM] PENDING EXCEPTION! {e}");
+             pendingException = e != null ? ikvm.runtime.Util.mapException(e) : null;
+         }
+ 
 diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
 index 0322f2275..c9db1de29 100644
 --- a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
@@ -2184,82 +2196,6 @@ index 000000000..bf21a7868
 +    }
 +
 +}
-diff --git a/src/dist-jre/dist-jre.csproj b/src/dist-jre/dist-jre.csproj
-index e39f7f31d..d06513cd7 100644
---- a/src/dist-jre/dist-jre.csproj
-+++ b/src/dist-jre/dist-jre.csproj
-@@ -7,6 +7,7 @@
-     </PropertyGroup>
- 
-     <ItemGroup>
-+		<!--
-         <ImageTarget Include="net472|win-x64" TargetFramework="net472" RuntimeIdentifier="win-x64" Condition="$(_EnabledImageRuntimes.Contains(';win-x64;'))" />
-         <ImageTarget Include="net472|win-x86" TargetFramework="net472" RuntimeIdentifier="win-x86" Condition="$(_EnabledImageRuntimes.Contains(';win-x86;'))" />
-         <ImageTarget Include="net472|win-arm64" TargetFramework="net472" RuntimeIdentifier="win-arm64" Condition="$(_EnabledImageRuntimes.Contains(';win-arm64;'))" />
-@@ -23,15 +24,15 @@
-         <ImageTarget Include="net6.0|osx-arm64" TargetFramework="net6.0" RuntimeIdentifier="osx-arm64" Condition="$(_EnabledImageRuntimes.Contains(';osx-arm64;'))" />
-         <ImageTarget Include="net8.0|win-x64" TargetFramework="net8.0" RuntimeIdentifier="win-x64" Condition="$(_EnabledImageRuntimes.Contains(';win-x64;'))" />
-         <ImageTarget Include="net8.0|win-x86" TargetFramework="net8.0" RuntimeIdentifier="win-x86" Condition="$(_EnabledImageRuntimes.Contains(';win-x86;'))" />
--        <ImageTarget Include="net8.0|win-arm64" TargetFramework="net8.0" RuntimeIdentifier="win-arm64" Condition="$(_EnabledImageRuntimes.Contains(';win-arm64;'))" />
-+		<ImageTarget Include="net8.0|win-arm64" TargetFramework="net8.0" RuntimeIdentifier="win-arm64" Condition="$(_EnabledImageRuntimes.Contains(';win-arm64;'))" />-->
-         <ImageTarget Include="net8.0|linux-x64" TargetFramework="net8.0" RuntimeIdentifier="linux-x64" Condition="$(_EnabledImageRuntimes.Contains(';linux-x64;'))" />
--        <ImageTarget Include="net8.0|linux-arm" TargetFramework="net8.0" RuntimeIdentifier="linux-arm" Condition="$(_EnabledImageRuntimes.Contains(';linux-arm;'))" />
-+		<!--<ImageTarget Include="net8.0|linux-arm" TargetFramework="net8.0" RuntimeIdentifier="linux-arm" Condition="$(_EnabledImageRuntimes.Contains(';linux-arm;'))" />
-         <ImageTarget Include="net8.0|linux-arm64" TargetFramework="net8.0" RuntimeIdentifier="linux-arm64" Condition="$(_EnabledImageRuntimes.Contains(';linux-arm64;'))" />
-         <ImageTarget Include="net8.0|linux-musl-x64" TargetFramework="net8.0" RuntimeIdentifier="linux-musl-x64" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-x64;'))" />
-         <ImageTarget Include="net8.0|linux-musl-arm" TargetFramework="net8.0" RuntimeIdentifier="linux-musl-arm" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-arm;'))" />
-         <ImageTarget Include="net8.0|linux-musl-arm64" TargetFramework="net8.0" RuntimeIdentifier="linux-musl-arm64" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-arm64;'))" />
-         <ImageTarget Include="net8.0|osx-x64" TargetFramework="net8.0" RuntimeIdentifier="osx-x64" Condition="$(_EnabledImageRuntimes.Contains(';osx-x64;'))" />
--        <ImageTarget Include="net8.0|osx-arm64" TargetFramework="net8.0" RuntimeIdentifier="osx-arm64" Condition="$(_EnabledImageRuntimes.Contains(';osx-arm64;'))" />
-+		<ImageTarget Include="net8.0|osx-arm64" TargetFramework="net8.0" RuntimeIdentifier="osx-arm64" Condition="$(_EnabledImageRuntimes.Contains(';osx-arm64;'))" />-->
-     </ItemGroup>
- 
-     <!-- Runs once per TFM/RID combination to generate individual output. -->
-diff --git a/src/dist-tools/dist-tools.csproj b/src/dist-tools/dist-tools.csproj
-index f045d87a5..20e3c569e 100644
---- a/src/dist-tools/dist-tools.csproj
-+++ b/src/dist-tools/dist-tools.csproj
-@@ -7,20 +7,20 @@
-     </PropertyGroup>
- 
-     <ItemGroup>
--        <ToolTarget Include="net472|win-x64" TargetFramework="net472" RuntimeIdentifier="win-x64" Condition="$(_EnabledToolRuntimes.Contains(';win-x64;'))" />
-+		<!--<ToolTarget Include="net472|win-x64" TargetFramework="net472" RuntimeIdentifier="win-x64" Condition="$(_EnabledToolRuntimes.Contains(';win-x64;'))" />
-         <ToolTarget Include="net472|win-x86" TargetFramework="net472" RuntimeIdentifier="win-x86" Condition="$(_EnabledToolRuntimes.Contains(';win-x86;'))" />
-         <ToolTarget Include="net472|win-arm64" TargetFramework="net472" RuntimeIdentifier="win-arm64" Condition="$(_EnabledToolRuntimes.Contains(';win-arm64;'))" />
-         <ToolTarget Include="net8.0|win-x64" TargetFramework="net8.0" RuntimeIdentifier="win-x64" Condition="$(_EnabledToolRuntimes.Contains(';win-x64;'))" />
-         <ToolTarget Include="net8.0|win-x86" TargetFramework="net8.0" RuntimeIdentifier="win-x86" Condition="$(_EnabledToolRuntimes.Contains(';win-x86;'))" />
--        <ToolTarget Include="net8.0|win-arm64" TargetFramework="net8.0" RuntimeIdentifier="win-arm64" Condition="$(_EnabledToolRuntimes.Contains(';win-arm64;'))" />
-+		<ToolTarget Include="net8.0|win-arm64" TargetFramework="net8.0" RuntimeIdentifier="win-arm64" Condition="$(_EnabledToolRuntimes.Contains(';win-arm64;'))" />-->
-         <ToolTarget Include="net8.0|linux-x64" TargetFramework="net8.0" RuntimeIdentifier="linux-x64" Condition="$(_EnabledToolRuntimes.Contains(';linux-x64;'))" />
--        <ToolTarget Include="net8.0|linux-arm" TargetFramework="net8.0" RuntimeIdentifier="linux-arm" Condition="$(_EnabledToolRuntimes.Contains(';linux-arm;'))" />
-+		<!--<ToolTarget Include="net8.0|linux-arm" TargetFramework="net8.0" RuntimeIdentifier="linux-arm" Condition="$(_EnabledToolRuntimes.Contains(';linux-arm;'))" />
-         <ToolTarget Include="net8.0|linux-arm64" TargetFramework="net8.0" RuntimeIdentifier="linux-arm64" Condition="$(_EnabledToolRuntimes.Contains(';linux-arm64;'))" />
-         <ToolTarget Include="net8.0|linux-musl-x64" TargetFramework="net8.0" RuntimeIdentifier="linux-musl-x64" Condition="$(_EnabledToolRuntimes.Contains(';linux-musl-x64;'))" />
-         <ToolTarget Include="net8.0|linux-musl-arm" TargetFramework="net8.0" RuntimeIdentifier="linux-musl-arm" Condition="$(_EnabledToolRuntimes.Contains(';linux-musl-arm;'))" />
-         <ToolTarget Include="net8.0|linux-musl-arm64" TargetFramework="net8.0" RuntimeIdentifier="linux-musl-arm64" Condition="$(_EnabledToolRuntimes.Contains(';linux-musl-arm64;'))" />
-         <ToolTarget Include="net8.0|osx-x64" TargetFramework="net8.0" RuntimeIdentifier="osx-x64" Condition="$(_EnabledToolRuntimes.Contains(';osx-x64;'))" />
--        <ToolTarget Include="net8.0|osx-arm64" TargetFramework="net8.0" RuntimeIdentifier="osx-arm64" Condition="$(_EnabledToolRuntimes.Contains(';osx-arm64;'))" />
-+		<ToolTarget Include="net8.0|osx-arm64" TargetFramework="net8.0" RuntimeIdentifier="osx-arm64" Condition="$(_EnabledToolRuntimes.Contains(';osx-arm64;'))" />-->
-     </ItemGroup>
- 
-     <!-- Runs once per TFM/RID combination to generate individual output. -->
-diff --git a/src/ikvmstub/ikvmstub.csproj b/src/ikvmstub/ikvmstub.csproj
-index 1d89f5a4d..40cc20902 100644
---- a/src/ikvmstub/ikvmstub.csproj
-+++ b/src/ikvmstub/ikvmstub.csproj
-@@ -12,4 +12,11 @@
-     </ItemGroup>
- 
-     <Import Project="$(MSBuildThisFileDirectory)..\..\IKVM.deps.targets" />
-+
-+    <!-- Provide GetPublishProjectPath target for tool resolution during builds -->
-+    <Target Name="GetPublishProjectPath" Outputs="$(OutputPath)">
-+        <PropertyGroup>
-+            <PublishDir Condition=" '$(PublishDir)' == '' ">$(OutputPath)</PublishDir>
-+        </PropertyGroup>
-+    </Target>
- </Project>
 diff --git a/src/libjsound/jni_onload.c b/src/libjsound/jni_onload.c
 index a66940e94..67ef4c4b9 100644
 --- a/src/libjsound/jni_onload.c

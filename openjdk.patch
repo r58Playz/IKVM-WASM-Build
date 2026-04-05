@@ -12,7 +12,7 @@ index b1b8223a63..b5db51eeef 100644
      JNIEnv *env;
      jclass iCls;
 diff --git a/jdk/src/solaris/native/java/lang/java_props_md.c b/jdk/src/solaris/native/java/lang/java_props_md.c
-index b03bd6ac8f..20d63640ac 100644
+index b03bd6ac8f..4114a25983 100644
 --- a/jdk/src/solaris/native/java/lang/java_props_md.c
 +++ b/jdk/src/solaris/native/java/lang/java_props_md.c
 @@ -459,6 +459,10 @@ GetJavaProperties(JNIEnv *env)
@@ -34,3 +34,40 @@ index b03bd6ac8f..20d63640ac 100644
  #endif /* MACOSX */
  
          sprops.os_arch = ARCHPROPNAME;
+@@ -494,34 +499,13 @@ GetJavaProperties(JNIEnv *env)
+     sprops.sun_arch_abi = JDK_ARCH_ABI_PROP_NAME;
+ #endif
+ 
+-    /* Determine the language, country, variant, and encoding from the host,
+-     * and store these in the user.language, user.country, user.variant and
+-     * file.encoding system properties. */
+-    setlocale(LC_ALL, "");
+-    if (ParseLocale(env, LC_CTYPE,
+-                    &(sprops.format_language),
+-                    &(sprops.format_script),
+-                    &(sprops.format_country),
+-                    &(sprops.format_variant),
+-                    &(sprops.encoding))) {
+-        ParseLocale(env, LC_MESSAGES,
+-                    &(sprops.language),
+-                    &(sprops.script),
+-                    &(sprops.country),
+-                    &(sprops.variant),
+-                    NULL);
+-    } else {
+-        sprops.language = "en";
+-        sprops.encoding = "ISO8859-1";
+-    }
++	sprops.language = "en";
++	sprops.encoding = "ISO8859-1";
+     sprops.display_language = sprops.language;
+     sprops.display_script = sprops.script;
+     sprops.display_country = sprops.country;
+     sprops.display_variant = sprops.variant;
+ 
+-    /* ParseLocale failed with OOME */
+-    JNU_CHECK_EXCEPTION_RETURN(env, NULL);
+-
+ #ifdef MACOSX
+     sprops.sun_jnu_encoding = "UTF-8";
+ #else
