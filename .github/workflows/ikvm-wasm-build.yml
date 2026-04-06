@@ -118,6 +118,10 @@ jobs:
         shell: bash
         run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}" --output-dir="$GITHUB_WORKSPACE/out/java-native-deps/${{ matrix.variant }}"
 
+      - name: build lwjgl3
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-lwjgl3.sh" --variant="${{ matrix.variant }}" --output-dir="$GITHUB_WORKSPACE/out/java-native-deps/${{ matrix.variant }}"
+
       - name: Upload Java/native dependency artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -207,6 +211,14 @@ jobs:
           zip -j "release/glfw-mobileglues-st.zip" \
             java-native-deps/st/libglfw3.a \
             java-native-deps/st/lib_emscripten_glfw3.js
+
+          zip -j "release/lwjgl3-mt.zip" \
+            java-native-deps/mt/lwjgl3.jar \
+            java-native-deps/mt/liblwjgl3.a
+
+          zip -j "release/lwjgl3-st.zip" \
+            java-native-deps/st/lwjgl3.jar \
+            java-native-deps/st/liblwjgl3.a
 
           mkdir -p /tmp/st-native
           cp native/ST-libjvm.a /tmp/st-native/libjvm.a
