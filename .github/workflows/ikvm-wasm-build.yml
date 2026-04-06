@@ -53,11 +53,13 @@ jobs:
           path: tools/ikvm/ikvm/msbuild.binlog
           if-no-files-found: warn
 
-      - name: Upload Managed DLLs
+      - name: Upload Managed Outputs
         uses: actions/upload-artifact@v4
         with:
           name: managed-dlls
-          path: tools/ikvm/out/managed/*.dll
+          path: |
+            tools/ikvm/out/managed/*.dll
+            tools/ikvm/out/managed/ikvm-tools/**
           if-no-files-found: error
 
       - name: Package linux-x64 JRE image
@@ -187,6 +189,11 @@ jobs:
 
           mkdir -p release
 
+          if [ ! -d managed/ikvm-tools ]; then
+            echo "ERROR: managed/ikvm-tools not found in managed artifact" >&2
+            exit 1
+          fi
+
           zip -j "release/ikvm-wasm-bundle.zip" \
             managed/IKVM.Runtime.dll \
             managed/IKVM.CoreLib.dll \
@@ -241,6 +248,15 @@ jobs:
             /tmp/st-native/libnio.a \
             /tmp/st-native/libnet.a
           zip -r "release/ikvm-wasm-ST-bundle.zip" image
+
+          cp -r managed/ikvm-tools release/ikvm-tools
+          (
+            cd release
+            zip -r "ikvm-wasm-bundle.zip" ikvm-tools
+            zip -r "ikvm-wasm-ST-bundle.zip" ikvm-tools
+          )
+          rm -rf release/ikvm-tools
+
           rm -rf /tmp/st-native
 
       - name: Create release

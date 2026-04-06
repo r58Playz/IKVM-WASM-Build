@@ -391,14 +391,24 @@ dotnet msbuild /m /bl /nr:false \
     /p:EnableOSXCodeSign=false \
     IKVM.dist.msbuildproj
 
-# ── Step 8: Package Managed DLLs ─────────────────────────────────────────────
+# ── Step 8: Package Managed Outputs ──────────────────────────────────────────
 
-log "Packaging managed DLLs ..."
+log "Packaging managed outputs ..."
 mkdir -p "$WORKSPACE/out/managed"
 
 cp "$WORKSPACE/ikvm/dist/jre/net8.0/$BUILD_RUNTIME/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll "$WORKSPACE/out/managed/"
 
-log "Done! Managed DLLs are in $WORKSPACE/out/managed/"
+IKVM_TOOLS_DIST_DIR="$WORKSPACE/ikvm/dist/tools/net8.0/$BUILD_RUNTIME"
+if [ ! -d "$IKVM_TOOLS_DIST_DIR" ]; then
+    echo "ERROR: IKVM tools directory not found at: $IKVM_TOOLS_DIST_DIR" >&2
+    exit 1
+fi
+
+rm -rf "$WORKSPACE/out/managed/ikvm-tools"
+mkdir -p "$WORKSPACE/out/managed/ikvm-tools"
+cp -r "$IKVM_TOOLS_DIST_DIR/." "$WORKSPACE/out/managed/ikvm-tools/"
+
+log "Done! Managed outputs are in $WORKSPACE/out/managed/"
 ls -lh "$WORKSPACE/out/managed/"
 
 fi # end SKIP_MANAGED=false (Steps 4-8)
@@ -484,6 +494,17 @@ else
     # Copy image files into staging area
     cp -r "$IMAGE_DIR/." "$WORKSPACE/out/bundle-staging/image/"
 
+    IKVM_TOOLS_SRC="$WORKSPACE/out/managed/ikvm-tools"
+    if [ ! -d "$IKVM_TOOLS_SRC" ] && [ -d "$WORKSPACE/ikvm/dist/tools/net8.0/$BUILD_RUNTIME" ]; then
+        log "ikvm-tools not found in out/managed, using dist/tools fallback."
+        IKVM_TOOLS_SRC="$WORKSPACE/ikvm/dist/tools/net8.0/$BUILD_RUNTIME"
+    fi
+    if [ ! -d "$IKVM_TOOLS_SRC" ]; then
+        echo "ERROR: ikvm-tools directory not found for bundling." >&2
+        exit 1
+    fi
+    cp -r "$IKVM_TOOLS_SRC" "$WORKSPACE/out/bundle-staging/ikvm-tools"
+
     rm -f "$WORKSPACE/out/release/ikvm-wasm-bundle.zip"
     rm -f "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip"
     # MT bundle (ikvm-wasm-bundle.zip)
@@ -506,6 +527,7 @@ else
             "$WORKSPACE/out/native/libnio.a" \
             "$WORKSPACE/out/native/libnet.a"
         zip -r "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" image
+        zip -r "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" ikvm-tools
     )
 
     # ST bundle (ikvm-wasm-ST-bundle.zip)
@@ -539,6 +561,7 @@ else
             "$WORKSPACE/out/st-native/libnio.a" \
             "$WORKSPACE/out/st-native/libnet.a"
         zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" image
+        zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" ikvm-tools
     )
     rm -rf "$WORKSPACE/out/st-native"
 
