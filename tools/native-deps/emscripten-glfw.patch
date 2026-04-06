@@ -1,0 +1,61 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2d9df93..d06fd66 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -83,6 +83,12 @@ add_glfw_lib("glfw3")
+ # library compiled with -pthread
+ add_glfw_lib("glfw3_pthread")
+ target_compile_options(glfw3_pthread PUBLIC "-pthread")
++target_link_options(glfw3_pthread PUBLIC "-pthread")
++
++if(EMSCRIPTEN)
++  target_compile_definitions(glfw3 PUBLIC __EMSCRIPTEN_PTHREADS__=0)
++  target_compile_definitions(glfw3_pthread PUBLIC __EMSCRIPTEN_PTHREADS__=1)
++endif()
+ 
+ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+   ### create archive/emscripten-glfw3-${emscripten-glfw_VERSION}.zip for the port
+diff --git a/src/cpp/emscripten/glfw3/Window.cpp b/src/cpp/emscripten/glfw3/Window.cpp
+index cfa866b..545c8ae 100644
+--- a/src/cpp/emscripten/glfw3/Window.cpp
++++ b/src/cpp/emscripten/glfw3/Window.cpp
+@@ -41,6 +41,12 @@ int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
+ double emscripten_glfw3_context_get_now();
+ }
+ 
++extern "C" {
++EMSCRIPTEN_WEBGL_CONTEXT_HANDLE mobileglues_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
++EMSCRIPTEN_RESULT mobileglues_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++EMSCRIPTEN_RESULT mobileglues_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++}
++
+ namespace emscripten::glfw3 {
+ 
+ static ErrorHandler &kErrorHandler = ErrorHandler::instance();
+@@ -134,7 +140,7 @@ void Window::destroy()
+   {
+     addOrRemoveEventListeners(false);
+     if(hasGLContext())
+-      emscripten_webgl_destroy_context(fWebGLContextHandle);
++      mobileglues_webgl_destroy_context(fWebGLContextHandle);
+     emscripten_glfw3_window_destroy(asOpaquePtr());
+     fDestroyed = true;
+   }
+@@ -488,7 +494,7 @@ bool Window::createGLContext()
+     attributes.stencil = fConfig.fStencilBits > 0;
+     attributes.alpha = fConfig.fAlphaBits > 0;
+ 
+-    fWebGLContextHandle = emscripten_webgl_create_context(getCanvasSelector(), &attributes);
++    fWebGLContextHandle = mobileglues_webgl_create_context(getCanvasSelector(), &attributes);
+     if(fWebGLContextHandle == 0)
+     {
+       kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot create GL context for [%s]", getCanvasSelector());
+@@ -506,7 +512,7 @@ void Window::makeGLContextCurrent() const
+ {
+   if(hasGLContext())
+   {
+-    if(emscripten_webgl_make_context_current(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
++    if(mobileglues_webgl_make_context_current(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
+       kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot make GL context current for [%s]", getCanvasSelector());
+   }
+ }

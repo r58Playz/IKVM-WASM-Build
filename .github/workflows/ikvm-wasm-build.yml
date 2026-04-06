@@ -74,7 +74,7 @@ jobs:
           if-no-files-found: error
 
   build-wasm-native:
-    name: Build WASM Native (${{ matrix.variant }})
+    name: Build IKVM WASM Native (${{ matrix.variant }})
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -100,8 +100,11 @@ jobs:
           if-no-files-found: error
 
   build-java-native-deps:
-    name: build java/native deps
+    name: build java/native deps (${{ matrix.variant }})
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        variant: [mt, st]
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -113,13 +116,13 @@ jobs:
 
       - name: build glfw
         shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --output-dir="$GITHUB_WORKSPACE/out/java-native-deps"
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}" --output-dir="$GITHUB_WORKSPACE/out/java-native-deps/${{ matrix.variant }}"
 
       - name: Upload Java/native dependency artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: java-native-deps
-          path: out/java-native-deps/*
+          name: java-native-deps-${{ matrix.variant }}
+          path: out/java-native-deps/${{ matrix.variant }}/*
           if-no-files-found: error
 
   release:
@@ -150,11 +153,17 @@ jobs:
           name: wasm-native-st
           path: native/
 
-      - name: Download Java/native dependency artifacts
+      - name: Download Java/native dependency artifacts (mt)
         uses: actions/download-artifact@v4
         with:
-          name: java-native-deps
-          path: java-native-deps/
+          name: java-native-deps-mt
+          path: java-native-deps/mt/
+
+      - name: Download Java/native dependency artifacts (st)
+        uses: actions/download-artifact@v4
+        with:
+          name: java-native-deps-st
+          path: java-native-deps/st/
 
       - name: Download linux-x64 JRE image
         uses: actions/download-artifact@v4
@@ -179,8 +188,6 @@ jobs:
             managed/IKVM.CoreLib.dll \
             managed/IKVM.Java.dll \
             managed/IKVM.ByteCode.dll \
-            java-native-deps/libglfw3.a \
-            java-native-deps/lib_emscripten_glfw3.js \
             native/libjvm.a \
             native/libikvm.a \
             native/libiava.a \
@@ -192,6 +199,14 @@ jobs:
             native/libnio.a \
             native/libnet.a
           zip -r "release/ikvm-wasm-bundle.zip" image
+
+          zip -j "release/glfw-mobileglues-mt.zip" \
+            java-native-deps/mt/libglfw3.a \
+            java-native-deps/mt/lib_emscripten_glfw3.js
+
+          zip -j "release/glfw-mobileglues-st.zip" \
+            java-native-deps/st/libglfw3.a \
+            java-native-deps/st/lib_emscripten_glfw3.js
 
           mkdir -p /tmp/st-native
           cp native/ST-libjvm.a /tmp/st-native/libjvm.a
@@ -209,8 +224,6 @@ jobs:
             managed/IKVM.CoreLib.dll \
             managed/IKVM.Java.dll \
             managed/IKVM.ByteCode.dll \
-            java-native-deps/libglfw3.a \
-            java-native-deps/lib_emscripten_glfw3.js \
             /tmp/st-native/libjvm.a \
             /tmp/st-native/libikvm.a \
             /tmp/st-native/libiava.a \

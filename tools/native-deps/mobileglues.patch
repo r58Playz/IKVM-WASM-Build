@@ -1,0 +1,101 @@
+diff --git a/MobileGlues-cpp/CMakeLists.txt b/MobileGlues-cpp/CMakeLists.txt
+index 4209b64..0dbab5e 100644
+--- a/MobileGlues-cpp/CMakeLists.txt
++++ b/MobileGlues-cpp/CMakeLists.txt
+@@ -85,7 +85,7 @@ endif()
+ 
+ set(PROFILING OFF)
+ 
+-add_library(${CMAKE_PROJECT_NAME} SHARED
++add_library(${CMAKE_PROJECT_NAME} STATIC
+     init.cpp
+     main.cpp
+     gl/gl_stub.cpp
+diff --git a/MobileGlues-cpp/config/gpu_utils.cpp b/MobileGlues-cpp/config/gpu_utils.cpp
+index e3fb47e..62c475d 100644
+--- a/MobileGlues-cpp/config/gpu_utils.cpp
++++ b/MobileGlues-cpp/config/gpu_utils.cpp
+@@ -7,7 +7,7 @@
+ 
+ #include "gpu_utils.h"
+ #include "../gles/loader.h"
+-#if !defined(__APPLE__)
++#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+ #include "vulkan/vulkan.h"
+ #endif
+ 
+@@ -169,7 +169,7 @@ int hasVulkan12() {
+     void* vulkan_lib = open_lib(vk_lib, nullptr);
+     if (!vulkan_lib) return 0;
+ 
+-#ifndef __APPLE__
++#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+ 
+     typedef VkResult (*PFN_vkEnumerateInstanceExtensionProperties)(const char*, uint32_t*, VkExtensionProperties*);
+     typedef VkResult (*PFN_vkCreateInstance)(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance*);
+@@ -256,4 +256,4 @@ int hasVulkan12() {
+     return 0;
+ 
+ #endif
+-}
+\ No newline at end of file
++}
+diff --git a/MobileGlues-cpp/gl/texture.cpp b/MobileGlues-cpp/gl/texture.cpp
+index fe02cad..e30d0b9 100644
+--- a/MobileGlues-cpp/gl/texture.cpp
++++ b/MobileGlues-cpp/gl/texture.cpp
+@@ -12,7 +12,7 @@
+ #include <cstring>
+ #include <vector>
+ 
+-#ifndef __APPLE__
++#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+ #include <android/log.h>
+ #include <malloc.h>
+ #endif
+diff --git a/MobileGlues-cpp/main.cpp b/MobileGlues-cpp/main.cpp
+index cf981f0..f1a200e 100644
+--- a/MobileGlues-cpp/main.cpp
++++ b/MobileGlues-cpp/main.cpp
+@@ -20,6 +20,10 @@
+ 
+ #define DEBUG 0
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten/html5.h>
++#endif
++
+ #ifndef __APPLE__
+ __attribute__((used))
+ #endif
+@@ -76,3 +80,30 @@ void proc_init() {
+ #endif
+     g_initialized = 1;
+ }
++
++#ifdef __EMSCRIPTEN__
++extern "C" {
++EMSCRIPTEN_WEBGL_CONTEXT_HANDLE mobileglues_webgl_create_context(
++    const char* target,
++    const EmscriptenWebGLContextAttributes* attributes) {
++    if (!g_initialized) {
++        proc_init();
++    }
++    return emscripten_webgl_create_context(target, attributes);
++}
++
++EMSCRIPTEN_RESULT mobileglues_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context) {
++    if (!g_initialized) {
++        proc_init();
++    }
++    return emscripten_webgl_make_context_current(context);
++}
++
++EMSCRIPTEN_RESULT mobileglues_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context) {
++    if (!g_initialized) {
++        proc_init();
++    }
++    return emscripten_webgl_destroy_context(context);
++}
++}
++#endif
