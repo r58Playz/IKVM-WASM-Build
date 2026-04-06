@@ -204,21 +204,15 @@ jobs:
             native/libnet.a
           zip -r "release/ikvm-wasm-bundle.zip" image
 
-          zip -j "release/glfw-mobileglues-mt.zip" \
-            java-native-deps/mt/libglfw3.a \
-            java-native-deps/mt/lib_emscripten_glfw3.js
+          cp java-native-deps/mt/libglfw3.a release/libglfw3-mt.a
+          cp java-native-deps/mt/lib_emscripten_glfw3.js release/lib_emscripten_glfw3-mt.js
+          cp java-native-deps/st/libglfw3.a release/libglfw3-st.a
+          cp java-native-deps/st/lib_emscripten_glfw3.js release/lib_emscripten_glfw3-st.js
 
-          zip -j "release/glfw-mobileglues-st.zip" \
-            java-native-deps/st/libglfw3.a \
-            java-native-deps/st/lib_emscripten_glfw3.js
-
-          zip -j "release/lwjgl3-mt.zip" \
-            java-native-deps/mt/lwjgl3.jar \
-            java-native-deps/mt/liblwjgl3.a
-
-          zip -j "release/lwjgl3-st.zip" \
-            java-native-deps/st/lwjgl3.jar \
-            java-native-deps/st/liblwjgl3.a
+          cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
+          cp java-native-deps/mt/liblwjgl3.a release/liblwjgl3-mt.a
+          cp java-native-deps/st/lwjgl3.jar release/lwjgl3-st.jar
+          cp java-native-deps/st/liblwjgl3.a release/liblwjgl3-st.a
 
           mkdir -p /tmp/st-native
           cp native/ST-libjvm.a /tmp/st-native/libjvm.a
