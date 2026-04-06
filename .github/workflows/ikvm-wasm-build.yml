@@ -43,27 +43,27 @@ jobs:
 
       - name: Build managed artifacts via script
         shell: bash
-        run: bash "$GITHUB_WORKSPACE/build-ikvm-local.sh" --managed-only
+        run: bash "$GITHUB_WORKSPACE/tools/ikvm/build-ikvm-local.sh" --managed-only
 
       - name: Upload MSBuild Log
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: msbuild.binlog
-          path: ikvm/msbuild.binlog
+          path: tools/ikvm/ikvm/msbuild.binlog
           if-no-files-found: warn
 
       - name: Upload Managed DLLs
         uses: actions/upload-artifact@v4
         with:
           name: managed-dlls
-          path: out/managed/*.dll
+          path: tools/ikvm/out/managed/*.dll
           if-no-files-found: error
 
       - name: Package linux-x64 JRE image
         shell: bash
         run: |
-          IMAGE_DIR="ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/${BUILD_RUNTIME}/"
+          IMAGE_DIR="tools/ikvm/ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/${BUILD_RUNTIME}/"
           tar czvf /tmp/ikvm-image-${BUILD_RUNTIME}.tar.gz -C "$IMAGE_DIR" .
 
       - name: Upload linux-x64 JRE image
@@ -90,19 +90,42 @@ jobs:
 
       - name: Build WASM native artifacts via script
         shell: bash
-        run: bash "$GITHUB_WORKSPACE/build-ikvm-local.sh" --native-only --native-variant="${{ matrix.variant }}" --clean-native
+        run: bash "$GITHUB_WORKSPACE/tools/ikvm/build-ikvm-local.sh" --native-only --native-variant="${{ matrix.variant }}" --clean-native
 
       - name: Upload WASM native artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wasm-native-${{ matrix.variant }}
-          path: out/native/*.a
+          path: tools/ikvm/out/native/*.a
+          if-no-files-found: error
+
+  build-java-native-deps:
+    name: build java/native deps
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+
+      - name: build glfw
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --output-dir="$GITHUB_WORKSPACE/out/java-native-deps"
+
+      - name: Upload Java/native dependency artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-native-deps
+          path: out/java-native-deps/*
           if-no-files-found: error
 
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-managed, build-wasm-native]
+    needs: [build-managed, build-wasm-native, build-java-native-deps]
     permissions:
       contents: write
     steps:
@@ -127,6 +150,12 @@ jobs:
           name: wasm-native-st
           path: native/
 
+      - name: Download Java/native dependency artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: java-native-deps
+          path: java-native-deps/
+
       - name: Download linux-x64 JRE image
         uses: actions/download-artifact@v4
         with:
@@ -150,6 +179,8 @@ jobs:
             managed/IKVM.CoreLib.dll \
             managed/IKVM.Java.dll \
             managed/IKVM.ByteCode.dll \
+            java-native-deps/libglfw3.a \
+            java-native-deps/lib_emscripten_glfw3.js \
             native/libjvm.a \
             native/libikvm.a \
             native/libiava.a \
@@ -178,6 +209,8 @@ jobs:
             managed/IKVM.CoreLib.dll \
             managed/IKVM.Java.dll \
             managed/IKVM.ByteCode.dll \
+            java-native-deps/libglfw3.a \
+            java-native-deps/lib_emscripten_glfw3.js \
             /tmp/st-native/libjvm.a \
             /tmp/st-native/libikvm.a \
             /tmp/st-native/libiava.a \

@@ -7,7 +7,9 @@ set -euo pipefail
 IKVM_REF="${IKVM_REF:-8.14.0}"
 NATIVE_SDK_VERSION="${NATIVE_SDK_VERSION:-20251124.1}"
 EMSDK_VERSION="${EMSDK_VERSION:-3.1.56}"
-WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE="$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_RUNTIME="${BUILD_RUNTIME:-linux-x64}"
 ENABLED_RUNTIMES="${ENABLED_RUNTIMES:-$BUILD_RUNTIME}"
 ENABLED_IMAGE_RUNTIMES="${ENABLED_IMAGE_RUNTIMES:-$BUILD_RUNTIME}"
@@ -227,8 +229,8 @@ fi
 
 if [ "$SKIP_MANAGED" = "false" ]; then
 
-DOTNET_INSTALL_DIR="$WORKSPACE/.dotnet"
-DOTNET_INSTALL_SCRIPT="$WORKSPACE/.dotnet-install.sh"
+DOTNET_INSTALL_DIR="$REPO_ROOT/.dotnet"
+DOTNET_INSTALL_SCRIPT="$REPO_ROOT/.dotnet-install.sh"
 
 _dotnet_has_sdk() {
     # returns 0 if a 9.x SDK is already reachable
@@ -341,7 +343,7 @@ fi
 
 # ── Step 6: NuGet Restore ─────────────────────────────────────────────────────
 
-export NUGET_PACKAGES="${NUGET_PACKAGES:-$WORKSPACE/.nuget/packages}"
+export NUGET_PACKAGES="${NUGET_PACKAGES:-$REPO_ROOT/.nuget/packages}"
 log "Using NuGet package cache: $NUGET_PACKAGES"
 log "Managed runtime filters: Enabled=$ENABLED_RUNTIMES Image=$ENABLED_IMAGE_RUNTIMES ImageBin=$ENABLED_IMAGE_BIN_RUNTIMES Tool=$ENABLED_TOOL_RUNTIMES"
 

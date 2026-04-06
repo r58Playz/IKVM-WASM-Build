@@ -1,5 +1,6 @@
 /.dotnet-install.sh
 /.dotnet
 /.nuget
-/ikvm
+/tools/ikvm/ikvm
+/tools/ikvm/out
 /out
