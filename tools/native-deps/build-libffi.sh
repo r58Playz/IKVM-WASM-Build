@@ -6,9 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
 
-LIBFFI_REPO="https://github.com/hoodmane/libffi-emscripten"
+LIBFFI_REPO="https://github.com/libffi/libffi"
 # libffi 3.5.2 is the latest release and builds with emsdk 3.1.56.
-LIBFFI_REF="${LIBFFI_REF:-2022-06-23}"
+LIBFFI_REF="${LIBFFI_REF:-v3.5.2}"
 LIBFFI_PATCH="${LIBFFI_PATCH:-$SCRIPT_DIR/libffi.patch}"
 EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-3.1.56}"
 

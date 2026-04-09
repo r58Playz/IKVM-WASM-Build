@@ -216,6 +216,32 @@ index aa685aa..782fcdc 100644
 \ No newline at end of file
 +    eglTerminate(eglDisplay);
 +}
+diff --git a/MobileGlues-cpp/gl/buffer.cpp b/MobileGlues-cpp/gl/buffer.cpp
+index b2c551a..9733e25 100644
+--- a/MobileGlues-cpp/gl/buffer.cpp
++++ b/MobileGlues-cpp/gl/buffer.cpp
+@@ -739,13 +739,16 @@ void* glMapBuffer(GLenum target, GLenum access) {
+ #if !defined(__APPLE__)
+ extern "C"
+ {
+-    GLAPI GLAPIENTRY void* glMapBufferARB(GLenum target, GLenum access) __attribute__((alias("glMapBuffer")));
++    GLAPI GLAPIENTRY void* glMapBufferARB(GLenum target, GLenum access)
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glMapBuffer))));
+     GLAPI GLAPIENTRY void glBufferDataARB(GLenum target, GLsizeiptr size, const void* data, GLenum usage)
+-        __attribute__((alias("glBufferData")));
+-    GLAPI GLAPIENTRY GLboolean glUnmapBufferARB(GLenum target) __attribute__((alias("glUnmapBuffer")));
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glBufferData))));
++    GLAPI GLAPIENTRY GLboolean glUnmapBufferARB(GLenum target)
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glUnmapBuffer))));
+     GLAPI GLAPIENTRY void glBufferStorageARB(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags)
+-        __attribute__((alias("glBufferStorage")));
+-    GLAPI GLAPIENTRY void glBindBufferARB(GLenum target, GLuint buffer) __attribute__((alias("glBindBuffer")));
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glBufferStorage))));
++    GLAPI GLAPIENTRY void glBindBufferARB(GLenum target, GLuint buffer)
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glBindBuffer))));
+ }
+ #endif
+ 
 diff --git a/MobileGlues-cpp/gl/drawing.cpp b/MobileGlues-cpp/gl/drawing.cpp
 index debc6b6..30ab0ae 100644
 --- a/MobileGlues-cpp/gl/drawing.cpp
@@ -282,20 +308,21 @@ index fe02cad..e30d0b9 100644
  #include <malloc.h>
  #endif
 diff --git a/MobileGlues-cpp/gles/loader.cpp b/MobileGlues-cpp/gles/loader.cpp
-index 9e42471..1f06bea 100644
+index 9e42471..d340b01 100644
 --- a/MobileGlues-cpp/gles/loader.cpp
 +++ b/MobileGlues-cpp/gles/loader.cpp
-@@ -10,6 +10,9 @@
+@@ -10,6 +10,10 @@
  #include "loader.h"
  #include "../includes.h"
  #include "loader.h"
 +#ifdef __EMSCRIPTEN__
++#include <emscripten/html5_webgl.h>
 +#include "../glx/lookup.h"
 +#endif
  #include <GL/gl.h>
  #include "../gl/glext.h"
  #include "../gl/envvars.h"
-@@ -77,7 +80,10 @@ void* open_lib(const char** names, const char* override) {
+@@ -77,7 +81,10 @@ void* open_lib(const char** names, const char* override) {
  }
  
  void load_libs() {
@@ -307,23 +334,42 @@ index 9e42471..1f06bea 100644
      const char* gles_override = global_settings.angle == AngleMode::Enabled ? GLES_ANGLE : nullptr;
      const char* egl_override = global_settings.angle == AngleMode::Enabled ? EGL_ANGLE : nullptr;
      gles = open_lib(gles3_lib, gles_override);
-@@ -89,7 +95,11 @@ void load_libs() {
+@@ -89,7 +96,11 @@ void load_libs() {
  }
  
  void* proc_address(void* lib, const char* name) {
 +#ifdef __EMSCRIPTEN__
-+    return glXGetProcAddress(name);
++    return emscripten_webgl_get_proc_address(name);
 +#else
      return dlsym(lib, name);
 +#endif
  }
  
  void set_hardware() {
+diff --git a/MobileGlues-cpp/gles/loader.h b/MobileGlues-cpp/gles/loader.h
+index bccd3ab..14b73ae 100644
+--- a/MobileGlues-cpp/gles/loader.h
++++ b/MobileGlues-cpp/gles/loader.h
+@@ -91,9 +91,13 @@ extern "C"
+ 
+ #define INIT_CHECK_GL_ERROR_FORCE GLenum ERR = GL_NO_ERROR;
+ 
++#define MOBILEGLUES_ALIAS_STRING_IMPL(name) #name
++#define MOBILEGLUES_ALIAS_STRING(name) MOBILEGLUES_ALIAS_STRING_IMPL(name)
++
+ #ifndef __APPLE__
+ #define NATIVE_FUNCTION_HEAD(type, name, ...)                                                                          \
+-    extern "C" GLAPI GLAPIENTRY type name##ARB(__VA_ARGS__) __attribute__((alias(#name)));                             \
++    extern "C" GLAPI GLAPIENTRY type name##ARB(__VA_ARGS__)                                                            \
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(name))));                                                        \
+     extern "C" GLAPI GLAPIENTRY type name(__VA_ARGS__) {
+ #else
+ #define NATIVE_FUNCTION_HEAD(type, name, ...) extern "C" GLAPI GLAPIENTRY type name(__VA_ARGS__) {
 diff --git a/MobileGlues-cpp/glx/lookup.cpp b/MobileGlues-cpp/glx/lookup.cpp
-index 09fcd5e..76e0867 100644
+index 09fcd5e..24c88df 100644
 --- a/MobileGlues-cpp/glx/lookup.cpp
 +++ b/MobileGlues-cpp/glx/lookup.cpp
-@@ -8,17 +8,80 @@
+@@ -8,17 +8,28 @@
  #include "lookup.h"
  
  #include "../config/settings.h"
@@ -337,9 +383,7 @@ index 09fcd5e..76e0867 100644
  #include <EGL/egl.h>
  #include <cstdio>
  #include <cstring>
-+#ifdef __EMSCRIPTEN__
-+#include <emscripten/html5_webgl.h>
-+#else
++#ifndef __EMSCRIPTEN__
  #include <dlfcn.h>
 +#endif
  
@@ -347,83 +391,23 @@ index 09fcd5e..76e0867 100644
  
 +#ifdef __EMSCRIPTEN__
 +extern "C" {
-+void* emscripten_GetProcAddress(const char* name);
-+__attribute__((weak)) void* JVM_LoadLibrary(const char* name);
-+__attribute__((weak)) void* JVM_FindLibraryEntry(void* handle, const char* name);
-+}
-+
-+static void* mobileglues_find_linked_symbol(const char* name) {
-+    if (!JVM_LoadLibrary || !JVM_FindLibraryEntry) {
-+        return nullptr;
-+    }
-+
-+    static void* handle = nullptr;
-+    if (!handle) {
-+        const char* candidates[] = {"glfw3", "libglfw3.so", "libglfw3.a", "glfw", nullptr};
-+        for (int i = 0; candidates[i]; ++i) {
-+            handle = JVM_LoadLibrary(candidates[i]);
-+            if (handle) {
-+                break;
-+            }
-+        }
-+    }
-+
-+    if (!handle) {
-+        return nullptr;
-+    }
-+
-+	return JVM_FindLibraryEntry(handle, name);
-+}
-+
-+static void* mobileglues_builtin_proc_address(const std::string& name) {
-+    // These wrappers are implemented inside the linked MobileGlues archive, but
-+    // Emscripten's GL proc lookup cannot see them and JVM symbol lookup may not
-+    // surface them as dynamic exports. Return their addresses directly so LWJGL
-+    // does not install its zero-arg missing-function trampoline.
-+    if (name == "glPrimitiveRestartIndex") return reinterpret_cast<void*>(glPrimitiveRestartIndex);
-+    if (name == "glTexBuffer") return reinterpret_cast<void*>(glTexBuffer);
-+    if (name == "glTexBufferRange") return reinterpret_cast<void*>(glTexBufferRange);
-+    if (name == "glDrawElementsBaseVertex") return reinterpret_cast<void*>(glDrawElementsBaseVertex);
-+    if (name == "glMultiDrawElements") return reinterpret_cast<void*>(glMultiDrawElements);
-+    if (name == "glMultiDrawElementsBaseVertex") return reinterpret_cast<void*>(glMultiDrawElementsBaseVertex);
-+    if (name == "mg_glMultiDrawElements_indirect") return reinterpret_cast<void*>(mg_glMultiDrawElements_indirect);
-+    if (name == "mg_glMultiDrawElements_multiindirect") return reinterpret_cast<void*>(mg_glMultiDrawElements_multiindirect);
-+    if (name == "mg_glMultiDrawElements_basevertex") return reinterpret_cast<void*>(mg_glMultiDrawElements_basevertex);
-+    if (name == "mg_glMultiDrawElements_drawelements") return reinterpret_cast<void*>(mg_glMultiDrawElements_drawelements);
-+    if (name == "mg_glMultiDrawElements_compute") return reinterpret_cast<void*>(mg_glMultiDrawElements_compute);
-+    if (name == "mg_glMultiDrawElementsBaseVertex_indirect") return reinterpret_cast<void*>(mg_glMultiDrawElementsBaseVertex_indirect);
-+    if (name == "mg_glMultiDrawElementsBaseVertex_multiindirect") return reinterpret_cast<void*>(mg_glMultiDrawElementsBaseVertex_multiindirect);
-+    if (name == "mg_glMultiDrawElementsBaseVertex_basevertex") return reinterpret_cast<void*>(mg_glMultiDrawElementsBaseVertex_basevertex);
-+    if (name == "mg_glMultiDrawElementsBaseVertex_drawelements") return reinterpret_cast<void*>(mg_glMultiDrawElementsBaseVertex_drawelements);
-+    if (name == "mg_glMultiDrawElementsBaseVertex_compute") return reinterpret_cast<void*>(mg_glMultiDrawElementsBaseVertex_compute);
-+
-+    return nullptr;
++void* mobileglues_find_proc_address(const char* name);
 +}
 +#endif
 +
  std::string handle_multidraw_func_name(std::string name) {
      std::string namestr = name;
      if (namestr != "glMultiDrawElementsBaseVertex" && namestr != "glMultiDrawElements") {
-@@ -56,6 +119,18 @@ void* glXGetProcAddress(const char* name) {
+@@ -56,6 +67,8 @@ void* glXGetProcAddress(const char* name) {
      std::string real_func_name = handle_multidraw_func_name(std::string(name));
  #ifdef __APPLE__
      return dlsym((void*)(~(uintptr_t)0), real_func_name.c_str());
 +#elif defined(__EMSCRIPTEN__)
-+	void* proc = emscripten_GetProcAddress(real_func_name.c_str());
-+
-+	if (!proc) {
-+		proc = mobileglues_find_linked_symbol(real_func_name.c_str());
-+	}
-+
-+	if (!proc) {
-+		proc = mobileglues_builtin_proc_address(real_func_name);
-+	}
-+
-+	return proc;
++    return mobileglues_find_proc_address(real_func_name.c_str());
  #else
  
      void* proc = nullptr;
-@@ -73,4 +148,4 @@ void* glXGetProcAddress(const char* name) {
+@@ -73,4 +86,4 @@ void* glXGetProcAddress(const char* name) {
  
  void* glXGetProcAddressARB(const char* name) {
      return glXGetProcAddress(name);

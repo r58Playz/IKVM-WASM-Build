@@ -130,10 +130,6 @@ jobs:
         shell: bash
         run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-lwjgl3.sh" --variant="${{ matrix.variant }}"
 
-      - name: build jemalloc
-        shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-jemalloc.sh" --variant="${{ matrix.variant }}"
-
       - name: build libffi
         shell: bash
         run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-libffi.sh" --variant="${{ matrix.variant }}"
@@ -236,9 +232,6 @@ jobs:
           cp java-native-deps/st/lwjgl3.jar release/lwjgl3-st.jar
           cp java-native-deps/st/liblwjgl3.a release/liblwjgl3-st.a
           cp java-native-deps/st/liblwjgl_stb.a release/liblwjgl_stb-st.a
-
-          cp java-native-deps/mt/libjemalloc.a release/libjemalloc-mt.a
-          cp java-native-deps/st/libjemalloc.a release/libjemalloc-st.a
 
           cp java-native-deps/mt/libffi.a release/libffi-mt.a
           cp java-native-deps/st/libffi.a release/libffi-st.a

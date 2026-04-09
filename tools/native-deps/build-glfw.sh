@@ -15,6 +15,7 @@ EMSCRIPTEN_GLFW_PATCH="${EMSCRIPTEN_GLFW_PATCH:-$SCRIPT_DIR/emscripten-glfw.patc
 MOBILEGLUES_REPO="${MOBILEGLUES_REPO:-https://github.com/MobileGL-Dev/MobileGlues.git}"
 MOBILEGLUES_REF="${MOBILEGLUES_REF:-main}"
 MOBILEGLUES_PATCH="${MOBILEGLUES_PATCH:-$SCRIPT_DIR/mobileglues.patch}"
+MOBILEGLUES_SYMBOL_GEN="${MOBILEGLUES_SYMBOL_GEN:-$SCRIPT_DIR/gen-mobileglues-gl-symbols.py}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 VARIANT="${VARIANT:-mt}"
@@ -30,6 +31,8 @@ Options:
   --output-dir=<path>          Output directory (default: tools/native-deps/out/<variant>).
   --glfw-ref=<ref>             emscripten-glfw git ref (default: v3.4.0.20250607).
   --mobileglues-ref=<ref>      MobileGlues git ref (default: main).
+  --mobileglues-symbol-gen=<path>
+                               MobileGlues GL symbol generator script.
   --tmp-dir=<path>             Temporary build directory (default: mktemp).
   --keep-tmp                   Keep temporary build directory.
   -h, --help                   Show this help message.
@@ -39,6 +42,7 @@ Environment overrides:
   OUTPUT_DIR
   EMSCRIPTEN_GLFW_REF
   MOBILEGLUES_REF
+  MOBILEGLUES_SYMBOL_GEN
 EOF
 }
 
@@ -48,6 +52,7 @@ for arg in "$@"; do
         --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
         --glfw-ref=*) EMSCRIPTEN_GLFW_REF="${arg#*=}" ;;
         --mobileglues-ref=*) MOBILEGLUES_REF="${arg#*=}" ;;
+        --mobileglues-symbol-gen=*) MOBILEGLUES_SYMBOL_GEN="${arg#*=}" ;;
         --tmp-dir=*) TMP_DIR="${arg#*=}" ;;
         --keep-tmp) KEEP_TMP="true" ;;
         -h|--help)
@@ -71,6 +76,18 @@ require_cmd() {
         echo "ERROR: required command '$1' not found" >&2
         exit 1
     fi
+}
+
+find_first_cmd() {
+    local candidate
+    for candidate in "$@"; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 apply_patch_once() {
@@ -98,6 +115,13 @@ require_cmd emcmake
 require_cmd cmake
 require_cmd emcc
 require_cmd emar
+require_cmd python3
+
+MOBILEGLUES_NM="$(find_first_cmd llvm-nm llvm-nm-20 llvm-nm-19 llvm-nm-18 llvm-nm-17 emnm nm || true)"
+if [ -z "$MOBILEGLUES_NM" ]; then
+    echo "ERROR: unable to find llvm-nm (or compatible nm tool) for MobileGlues symbol generation" >&2
+    exit 1
+fi
 
 CMAKE_GENERATOR=()
 if command -v ninja >/dev/null 2>&1; then
@@ -201,6 +225,63 @@ for archive in "${MOBILEGLUES_ARCHIVES[@]}"; do
         exit 1
     fi
 done
+
+MOBILEGLUES_PRIMARY_ARCHIVE="${MOBILEGLUES_ARCHIVES[0]}"
+if [ ! -f "$MOBILEGLUES_SYMBOL_GEN" ]; then
+    echo "ERROR: MobileGlues symbol generator not found: $MOBILEGLUES_SYMBOL_GEN" >&2
+    exit 1
+fi
+
+MOBILEGLUES_SYMBOLS_C="$TMP_DIR/mobileglues_gl_symbols.c"
+MOBILEGLUES_PREFIX_HEADER_DIR="$TMP_DIR/mobileglues-prefix"
+MOBILEGLUES_PREFIX_HEADER="$MOBILEGLUES_PREFIX_HEADER_DIR/gl_prefix_overrides.h"
+MOBILEGLUES_SYMBOLS_OBJ="$TMP_DIR/mobileglues_gl_symbols.o"
+
+mkdir -p "$MOBILEGLUES_PREFIX_HEADER_DIR"
+
+log "Generating MobileGlues symbol table"
+python3 "$MOBILEGLUES_SYMBOL_GEN" \
+    --archive "$MOBILEGLUES_PRIMARY_ARCHIVE" \
+    --output-c "$MOBILEGLUES_SYMBOLS_C" \
+    --output-header "$MOBILEGLUES_PREFIX_HEADER" \
+    --source-root "$MOBILEGLUES_CPP_DIR" \
+    --nm "$MOBILEGLUES_NM"
+
+if [ ! -s "$MOBILEGLUES_PREFIX_HEADER" ]; then
+    echo "ERROR: generated MobileGlues prefix header is empty: $MOBILEGLUES_PREFIX_HEADER" >&2
+    exit 1
+fi
+
+log "Rebuilding MobileGlues with generated GL symbol prefixes"
+rm -rf "$MOBILEGLUES_BUILD_DIR"
+if [ "$VARIANT" = "mt" ]; then
+    CFLAGS="-pthread -include $MOBILEGLUES_PREFIX_HEADER" CXXFLAGS="-pthread -include $MOBILEGLUES_PREFIX_HEADER" \
+        emcmake cmake -S "$MOBILEGLUES_CPP_DIR" -B "$MOBILEGLUES_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release "${CMAKE_GENERATOR[@]}"
+else
+    CFLAGS="-include $MOBILEGLUES_PREFIX_HEADER" CXXFLAGS="-include $MOBILEGLUES_PREFIX_HEADER" \
+        emcmake cmake -S "$MOBILEGLUES_CPP_DIR" -B "$MOBILEGLUES_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release "${CMAKE_GENERATOR[@]}"
+fi
+
+cmake --build "$MOBILEGLUES_BUILD_DIR" --target mobileglues -j"$(nproc)"
+
+for archive in "${MOBILEGLUES_ARCHIVES[@]}"; do
+    if [ ! -f "$archive" ]; then
+        echo "ERROR: expected MobileGlues archive not found after prefixed rebuild: $archive" >&2
+        exit 1
+    fi
+done
+
+log "Compiling generated MobileGlues symbol table"
+if [ "${#PTHREAD_FLAGS[@]}" -gt 0 ]; then
+    em++ "${PTHREAD_FLAGS[@]}" -x c++ -O2 -fPIC -I"$MOBILEGLUES_PREFIX_HEADER_DIR" -I"$MOBILEGLUES_CPP_DIR" -I"$MOBILEGLUES_CPP_DIR/include" \
+        -include "$MOBILEGLUES_PREFIX_HEADER" -c "$MOBILEGLUES_SYMBOLS_C" -o "$MOBILEGLUES_SYMBOLS_OBJ"
+else
+    em++ -x c++ -O2 -fPIC -I"$MOBILEGLUES_PREFIX_HEADER_DIR" -I"$MOBILEGLUES_CPP_DIR" -I"$MOBILEGLUES_CPP_DIR/include" \
+        -include "$MOBILEGLUES_PREFIX_HEADER" -c "$MOBILEGLUES_SYMBOLS_C" -o "$MOBILEGLUES_SYMBOLS_OBJ"
+fi
+
+log "Injecting MobileGlues symbol table into archive"
+emar rcs "$MOBILEGLUES_PRIMARY_ARCHIVE" "$MOBILEGLUES_SYMBOLS_OBJ"
 
 COMBINED_OBJ="$TMP_DIR/glfw-mobileglues-$VARIANT.o"
 log "Combining glfw + MobileGlues into single archive"
