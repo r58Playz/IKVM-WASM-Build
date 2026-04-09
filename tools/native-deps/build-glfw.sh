@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WORKSPACE="$SCRIPT_DIR"
 
 EMSCRIPTEN_GLFW_REPO="https://github.com/pongasoft/emscripten-glfw.git"
 # Latest emscripten-glfw release verified to build with emsdk 3.1.56.
@@ -27,7 +27,7 @@ Usage: build-glfw.sh [options]
 
 Options:
   --variant=<mt|st>            Build variant (default: mt).
-  --output-dir=<path>          Output directory (default: out/java-native-deps/<variant>).
+  --output-dir=<path>          Output directory (default: tools/native-deps/out/<variant>).
   --glfw-ref=<ref>             emscripten-glfw git ref (default: v3.4.0.20250607).
   --mobileglues-ref=<ref>      MobileGlues git ref (default: main).
   --tmp-dir=<path>             Temporary build directory (default: mktemp).
@@ -73,7 +73,7 @@ require_cmd() {
     fi
 }
 
-apply_patch_or_fail() {
+apply_patch_once() {
     local repo_dir="$1"
     local patch_file="$2"
     local patch_name="$3"
@@ -85,6 +85,8 @@ apply_patch_or_fail() {
     if git -C "$repo_dir" apply --check "$patch_file" >/dev/null 2>&1; then
         log "Applying $patch_name"
         git -C "$repo_dir" apply "$patch_file"
+    elif git -C "$repo_dir" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+        log "$patch_name already applied, skipping."
     else
         echo "ERROR: $patch_name cannot be applied cleanly in $repo_dir" >&2
         exit 1
@@ -120,7 +122,7 @@ case "$VARIANT" in
 esac
 
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_DIR="$REPO_ROOT/out/java-native-deps/$VARIANT"
+    OUTPUT_DIR="$WORKSPACE/out/$VARIANT"
 fi
 
 if [ -n "$TMP_DIR" ]; then
@@ -138,12 +140,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-GLFW_SRC_DIR="$TMP_DIR/emscripten-glfw"
+GLFW_SRC_DIR="$WORKSPACE/emscripten-glfw"
 GLFW_BUILD_DIR="$TMP_DIR/glfw-build"
 
-log "Cloning emscripten-glfw @ $EMSCRIPTEN_GLFW_REF"
-git clone --depth 1 --branch "$EMSCRIPTEN_GLFW_REF" "$EMSCRIPTEN_GLFW_REPO" "$GLFW_SRC_DIR"
-apply_patch_or_fail "$GLFW_SRC_DIR" "$EMSCRIPTEN_GLFW_PATCH" "emscripten-glfw.patch"
+if [ ! -d "$GLFW_SRC_DIR/.git" ]; then
+    log "Cloning emscripten-glfw @ $EMSCRIPTEN_GLFW_REF"
+    git clone --depth 1 --branch "$EMSCRIPTEN_GLFW_REF" "$EMSCRIPTEN_GLFW_REPO" "$GLFW_SRC_DIR"
+else
+    log "emscripten-glfw source already present, skipping clone."
+fi
+apply_patch_once "$GLFW_SRC_DIR" "$EMSCRIPTEN_GLFW_PATCH" "emscripten-glfw.patch"
 
 log "Configuring emscripten-glfw"
 emcmake cmake -S "$GLFW_SRC_DIR" -B "$GLFW_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release "${CMAKE_GENERATOR[@]}"
@@ -157,13 +163,19 @@ if [ ! -f "$GLFW_ARCHIVE" ]; then
     exit 1
 fi
 
-MOBILEGLUES_SRC_DIR="$TMP_DIR/MobileGlues"
+MOBILEGLUES_SRC_DIR="$WORKSPACE/MobileGlues"
 MOBILEGLUES_CPP_DIR="$MOBILEGLUES_SRC_DIR/MobileGlues-cpp"
 MOBILEGLUES_BUILD_DIR="$TMP_DIR/mobileglues-build"
 
-log "Cloning MobileGlues @ $MOBILEGLUES_REF"
-git clone --depth 1 --branch "$MOBILEGLUES_REF" --recurse-submodules --shallow-submodules "$MOBILEGLUES_REPO" "$MOBILEGLUES_SRC_DIR"
-apply_patch_or_fail "$MOBILEGLUES_SRC_DIR" "$MOBILEGLUES_PATCH" "mobileglues.patch"
+if [ ! -d "$MOBILEGLUES_SRC_DIR/.git" ]; then
+    log "Cloning MobileGlues @ $MOBILEGLUES_REF"
+    git clone --depth 1 --branch "$MOBILEGLUES_REF" --recurse-submodules --shallow-submodules "$MOBILEGLUES_REPO" "$MOBILEGLUES_SRC_DIR"
+else
+    log "MobileGlues source already present, skipping clone."
+fi
+log "Updating MobileGlues submodules"
+git -C "$MOBILEGLUES_SRC_DIR" submodule update --init --recursive
+apply_patch_once "$MOBILEGLUES_SRC_DIR" "$MOBILEGLUES_PATCH" "mobileglues.patch"
 
 log "Configuring MobileGlues"
 if [ "$VARIANT" = "mt" ]; then

@@ -1,0 +1,365 @@
+diff --git a/config/cli/kotlinc.args b/config/cli/kotlinc.args
+index 69dc398..07d43be 100644
+--- a/config/cli/kotlinc.args
++++ b/config/cli/kotlinc.args
+@@ -7,5 +7,5 @@
+ -Xno-param-assertions
+ -Xno-receiver-assertions
+ -Xreport-perf
+--Xbackend-threads=0
+--verbose
+\ No newline at end of file
++-Xbackend-threads=1
++-verbose
+diff --git a/modules/lwjgl/core/src/main/c/common_tools.c b/modules/lwjgl/core/src/main/c/common_tools.c
+index 2b613b6..47e0b83 100644
+--- a/modules/lwjgl/core/src/main/c/common_tools.c
++++ b/modules/lwjgl/core/src/main/c/common_tools.c
+@@ -198,7 +198,7 @@ JNIEnv* getEnv(jboolean *async) {
+ 
+ EXTERN_C_ENTER
+ 
+-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
++JNIEXPORT jint JNICALL __liblwjgl_JNI_OnLoad(JavaVM *vm, void *reserved) {
+     UNUSED_PARAM(reserved)
+ 
+     jvm = vm;
+@@ -208,7 +208,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+     return JNI_VERSION_1_6;
+ }
+ 
+-JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
++JNIEXPORT void JNICALL __liblwjgl_JNI_OnUnload(JavaVM *vm, void *reserved) {
+     UNUSED_PARAMS(vm, reserved);
+     tlsDestroy();
+ }
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
+index 92de410..8ffc752 100644
+--- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
+@@ -3572,6 +3572,8 @@ public final class MemoryUtil {
+ 
+     private static long getAddressOffset() {
+         long MAGIC_ADDRESS = 0xDEADBEEF8BADF00DL & (BITS32 ? 0xFFFF_FFFFL : 0xFFFF_FFFF_FFFF_FFFFL);
++		if (BITS32)
++			System.out.println("[LWJGL] we are bits32 :3");
+ 
+         ByteBuffer bb = Objects.requireNonNull(NewDirectByteBuffer(MAGIC_ADDRESS, 0));
+ 
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java
+index a5efe9e..d46fc51 100644
+--- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java
+@@ -293,6 +293,7 @@ final class SharedLibraryLoader {
+             try {
+                 Files.createDirectories(file.getParent());
+             } catch (IOException ignored) {
++				ignored.printStackTrace();
+                 return false;
+             }
+             testFile = file;
+@@ -317,6 +318,7 @@ final class SharedLibraryLoader {
+ 
+             return true;
+         } catch (Throwable ignored) {
++			ignored.printStackTrace();
+             if (file == testFile) {
+                 canWriteCleanup(root, file);
+             }
+@@ -344,4 +346,4 @@ final class SharedLibraryLoader {
+         }
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
+index 9ddee4d..72e5256 100644
+--- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
+@@ -172,6 +172,7 @@ public final class ThreadLocalUtil {
+     private static native long setupEnvData(int functionCount);
+ 
+     public static void setCapabilities(long capabilities) {
++		System.out.println("[LWJGL] [ThreadLocalUtil] setting capabilities");
+         // Get thread's JNIEnv
+         long env_pp = getThreadJNIEnv();
+         long env_p  = memGetAddress(env_pp);
+@@ -191,6 +192,7 @@ public final class ThreadLocalUtil {
+ 
+     // Ensures FUNCTION_MISSING_ABORT will be called even if no context is current,
+     public static void setFunctionMissingAddresses(int functionCount) {
++		System.out.println("[LWJGL] [ThreadLocalUtil] setting functionmissing");
+         long ptr = JNI_NATIVE_INTERFACE + CAPABILITIES_OFFSET;
+ 
+         long currentTable = memGetAddress(ptr);
+@@ -207,6 +209,7 @@ public final class ThreadLocalUtil {
+             if (currentTable != NULL) {
+                 // check reserved0 to see if this Native Image or EspressoVM.
+                 if (memGetAddress(JNI_NATIVE_INTERFACE) == RESERVED_NULL) { // NativeImage
++                    System.err.println("[LWJGL] [ThreadLocalUtil] Silently aborting. NativeImage detected");
+                     // silently abort on Native Image, the global JNIEnv object lives in read-only memory by default. (see #875)
+                     return;
+                 } else { // EspressoVM
+@@ -241,4 +244,4 @@ public final class ThreadLocalUtil {
+         return false;
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
+index aaab4de..88ee07c 100644
+--- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
+@@ -141,6 +141,7 @@ final class Upcalls {
+         if (errcode != FFI_OK) {
+             DeleteGlobalRef(user_data);
+             ffi_closure_free(closure);
++			System.out.println("[LWJGL] :3 " + closure + " " + descriptor.cif + " " + CALLBACK_HANDLER + " " + user_data + " " + executableAddress + " " + errcode);
+             throw new RuntimeException("Failed to prepare the libffi closure");
+         }
+ 
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
+index 5c4e929..bd82a6f 100644
+--- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
+@@ -8,6 +8,9 @@ import org.jspecify.annotations.*;
+ import org.lwjgl.system.*;
+ 
+ import java.nio.*;
++import java.nio.file.*;
++import java.util.*;
++import java.util.regex.*;
+ 
+ import static org.lwjgl.system.MemoryStack.*;
+ import static org.lwjgl.system.MemoryUtil.*;
+@@ -16,15 +19,87 @@ import static org.lwjgl.system.linux.DynamicLinkLoader.*;
+ /** Implements a {@link SharedLibrary} on the Linux OS. */
+ public class LinuxLibrary extends SharedLibrary.Default {
+ 
++    private static final String STATIC_LINK_LOADER_PROPERTY = "org.lwjgl.system.linux.staticLinkLoader";
++    private static final Pattern SO = Pattern.compile("(?:^|/)[^/]+[.]so(?:[.]\\d+)*$");
++
++    private final boolean staticLinked;
++    private final @Nullable String path;
++
+     public LinuxLibrary(String name) {
+         this(name, loadLibrary(name));
+     }
+ 
+     public LinuxLibrary(String name, long handle) {
+         super(name, handle);
++        this.staticLinked = false;
++        this.path = null;
++    }
++
++    private LinuxLibrary(String name, LoadedLibrary loaded) {
++        super(name, loaded.handle);
++        this.staticLinked = loaded.staticLinked;
++        this.path = loaded.path;
++    }
++
++    private static LoadedLibrary loadLibrary(String name) {
++        if (isStaticLinkLoaderEnabled()) {
++            return loadStaticLibrary(name);
++        }
++        return new LoadedLibrary(loadDynamicLibrary(name), false, null);
++    }
++
++    private static boolean isStaticLinkLoaderEnabled() {
++        return !"false".equalsIgnoreCase(System.getProperty(STATIC_LINK_LOADER_PROPERTY, "true"));
++    }
++
++    private static LoadedLibrary loadStaticLibrary(String name) {
++        UnsatisfiedLinkError firstError = null;
++        for (String candidate : staticLookupCandidates(name)) {
++            long handle;
++            try {
++                handle = StaticLinkLoader.loadLibrary(candidate);
++            } catch (UnsatisfiedLinkError e) {
++                if (firstError == null) {
++                    firstError = e;
++                }
++                continue;
++            }
++
++            if (handle != NULL) {
++                return new LoadedLibrary(handle, true, candidate);
++            }
++        }
++
++        if (firstError != null) {
++            throw firstError;
++        }
++
++        throw new UnsatisfiedLinkError("Failed to load statically-linked library: " + name);
+     }
+ 
+-    private static long loadLibrary(String name) {
++    private static List<String> staticLookupCandidates(String name) {
++        LinkedHashSet<String> candidates = new LinkedHashSet<>(4);
++        candidates.add(name);
++        candidates.add(mapLibraryName(name));
++
++        Path fileName = Paths.get(name).getFileName();
++        if (fileName != null) {
++            String base = fileName.toString();
++            candidates.add(base);
++            candidates.add(mapLibraryName(base));
++        }
++
++        return new ArrayList<>(candidates);
++    }
++
++    private static String mapLibraryName(String name) {
++        if (SO.matcher(name).find()) {
++            return name;
++        }
++        return System.mapLibraryName(name);
++    }
++
++    private static long loadDynamicLibrary(String name) {
+         long handle;
+         try (MemoryStack stack = stackPush()) {
+             handle = dlopen(stack.UTF8(name), RTLD_LAZY | RTLD_LOCAL);
+@@ -37,17 +112,38 @@ public class LinuxLibrary extends SharedLibrary.Default {
+ 
+     @Override
+     public @Nullable String getPath() {
++        if (staticLinked) {
++            return path;
++        }
+         return SharedLibraryUtil.getLibraryPath(address());
+     }
+ 
+     @Override
+     public long getFunctionAddress(ByteBuffer functionName) {
++        if (staticLinked) {
++            return StaticLinkLoader.findLibraryEntry(address(), functionName);
++        }
+         return dlsym(address(), functionName);
+     }
+ 
+     @Override
+     public void free() {
+-        dlclose(address());
++        if (!staticLinked) {
++            dlclose(address());
++        }
++    }
++
++    private static final class LoadedLibrary {
++
++        final long handle;
++        final boolean staticLinked;
++        final @Nullable String path;
++
++        LoadedLibrary(long handle, boolean staticLinked, @Nullable String path) {
++            this.handle = handle;
++            this.staticLinked = staticLinked;
++            this.path = path;
++        }
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c b/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
+new file mode 100644
+index 0000000..293ce84
+--- /dev/null
++++ b/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
+@@ -0,0 +1,41 @@
++/*
++ * Copyright LWJGL. All rights reserved.
++ * License terms: https://www.lwjgl.org/license
++ */
++#include "common_tools.h"
++
++extern void* JVM_LoadLibrary(const char* name) __attribute__((weak));
++extern void* JVM_FindLibraryEntry(void* handle, const char* name) __attribute__((weak));
++
++static void throwUnsatisfiedLinkError(JNIEnv* env, const char* message) {
++    jclass errorClass = (*env)->FindClass(env, "java/lang/UnsatisfiedLinkError");
++    if (errorClass != NULL) {
++        (*env)->ThrowNew(env, errorClass, message);
++    }
++}
++
++EXTERN_C_ENTER
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_linux_StaticLinkLoader_nloadLibrary(JNIEnv *env, jclass clazz, jlong nameAddress) {
++    UNUSED_PARAM(clazz)
++
++    if (JVM_LoadLibrary == NULL) {
++        throwUnsatisfiedLinkError(env, "JVM_LoadLibrary is unavailable in this runtime");
++        return 0;
++    }
++
++    return (jlong)(uintptr_t)JVM_LoadLibrary((const char*)(uintptr_t)nameAddress);
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_linux_StaticLinkLoader_nfindLibraryEntry(JNIEnv *env, jclass clazz, jlong handleAddress, jlong nameAddress) {
++    UNUSED_PARAM(clazz)
++
++    if (JVM_FindLibraryEntry == NULL) {
++        throwUnsatisfiedLinkError(env, "JVM_FindLibraryEntry is unavailable in this runtime");
++        return 0;
++    }
++
++    return (jlong)(uintptr_t)JVM_FindLibraryEntry((void*)(uintptr_t)handleAddress, (const char*)(uintptr_t)nameAddress);
++}
++
++EXTERN_C_EXIT
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/StaticLinkLoader.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/StaticLinkLoader.java
+new file mode 100644
+index 0000000..f8b2a8e
+--- /dev/null
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/StaticLinkLoader.java
+@@ -0,0 +1,45 @@
++/*
++ * Copyright LWJGL. All rights reserved.
++ * License terms: https://www.lwjgl.org/license
++ */
++package org.lwjgl.system.linux;
++
++import java.nio.*;
++
++import org.lwjgl.system.*;
++
++import static org.lwjgl.system.Checks.*;
++import static org.lwjgl.system.MemoryStack.*;
++import static org.lwjgl.system.MemoryUtil.*;
++
++final class StaticLinkLoader {
++
++    static { Library.initialize(); }
++
++    private StaticLinkLoader() {
++        throw new UnsupportedOperationException();
++    }
++
++    private static native long nloadLibrary(long name);
++
++    static long loadLibrary(CharSequence name) {
++        MemoryStack stack = stackGet(); int stackPointer = stack.getPointer();
++        try {
++            stack.nUTF8(name, true);
++            return nloadLibrary(stack.getPointerAddress());
++        } finally {
++            stack.setPointer(stackPointer);
++        }
++    }
++
++    private static native long nfindLibraryEntry(long handle, long name);
++
++    static long findLibraryEntry(long handle, ByteBuffer name) {
++        if (CHECKS) {
++            check(handle);
++            checkNT1(name);
++        }
++        return nfindLibraryEntry(handle, memAddress(name));
++    }
++
++}

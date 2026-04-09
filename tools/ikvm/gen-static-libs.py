@@ -29,17 +29,57 @@ Usage
   # Pairs from a file (one FAKE_PATH:ARCHIVE per line; # comments ignored):
   python3 gen-static-libs.py -o jvm_static_libs.c --list libs.txt
 
-  # Mix both; specify a custom nm binary:
-  python3 gen-static-libs.py --nm llvm-nm-18 --list libs.txt "libextra.so:/tmp/extra.a"
+   # Mix both; specify a custom nm binary:
+   python3 gen-static-libs.py --nm llvm-nm-18 --list libs.txt "libextra.so:/tmp/extra.a"
 
-  # Write to stdout (omit -o):
-  python3 gen-static-libs.py "libjava.so:/path/to/libjava.a"
+   # Write to stdout (omit -o):
+   python3 gen-static-libs.py "libjava.so:/path/to/libjava.a"
+
+    # Manually add symbols to a library:
+    python3 gen-static-libs.py --add-symbol "libjava.so:my_custom_func" \\
+        --add-symbol "libjava.so:another_func" "libjava.so:/path/to/libjava.a"
+
+    # Add alternate library names that resolve to the same archive:
+    python3 gen-static-libs.py --add-alias "libjava.so:libjava" \\
+        --add-alias "libjava.so:java" "libjava.so:/path/to/libjava.a"
+
+    # Rename symbol keys in a library's lookup table:
+    python3 gen-static-libs.py --rename-symbol "libjava.so:old_name:new_name" \\
+        "libjava.so:/path/to/libjava.a"
+
+   # Combine everything:
+   python3 gen-static-libs.py --nm llvm-nm-18 --list libs.txt \\
+       --add-symbol "libjava.so:extra_symbol" \\
+       --rename-symbol "libjava.so:old_name:new_name" -o output.c
 
 List file format (--list)
 --------------------------
-  # comment
-  libjava.so:/path/to/libjava_jni.a
-  libzip.so:/path/to/libzip_jni.a
+   # comment
+   libjava.so:/path/to/libjava_jni.a
+   libzip.so:/path/to/libzip_jni.a
+
+Add symbol format (--add-symbol)
+--------------------------------
+    --add-symbol FAKE_PATH:SYMBOL
+   
+    Manually add a symbol to a library's symbol table. Can be specified multiple
+    times.  Symbols are validated as C identifiers and merged with those extracted
+    from archives.
+
+Library alias format (--add-alias)
+----------------------------------
+    --add-alias FAKE_PATH:ALIAS
+
+    Add an alternate library name to the registry. Aliases are emitted as extra
+    rows in jvm_static_libs[] that point at the same symbol table as the canonical
+    FAKE_PATH entry. Can be specified multiple times.
+
+Rename symbol format (--rename-symbol)
+--------------------------------------
+   --rename-symbol FAKE_PATH:OLD_SYMBOL:NEW_SYMBOL
+
+   Rename the lookup key for a symbol in a library's table without changing the
+   underlying C symbol reference. Can be specified multiple times.
 
 Build snippet (extends build-local.sh step 9)
 ----------------------------------------------
@@ -70,7 +110,6 @@ import re
 import shutil
 import subprocess
 import sys
-from collections import OrderedDict
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +152,20 @@ def _find_nm(hint: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _get_symbols(archive: str, nm_exe: str) -> list[str]:
+def _get_symbols(archive: str, nm_exe: str) -> list[tuple[str, str]]:
     """
     Run `nm_exe --defined-only --extern-only archive` and return a list of
-    globally-defined symbol names that are valid C identifiers.
+    `(symbol_name, symbol_type)` pairs for globally-defined symbols that are
+    valid C identifiers.
 
     nm output format (both GNU nm and llvm-nm):
         [address]  TYPE  name
     Lines without a type column (archive-member headers, blank lines) are
-    silently skipped.  Only uppercase TYPE letters are kept (lowercase = local
-    scope), and U/u (undefined) are discarded even though --defined-only should
-    already exclude them.
+    silently skipped.  Only a subset of uppercase TYPE letters is kept:
+      - T: function symbols
+      - B/D/G/R/S/C/V: globally-defined data symbols (V = weak object)
+    Lowercase symbols (local scope), U/u (undefined), and ambiguous weak
+    symbols (W) are discarded.
     """
     try:
         proc = subprocess.run(
@@ -141,7 +183,8 @@ def _get_symbols(archive: str, nm_exe: str) -> list[str]:
             f"nm failed on {archive!r} (exit {exc.returncode}):\n{exc.stderr}"
         ) from exc
 
-    symbols: list[str] = []
+    symbols: list[tuple[str, str]] = []
+    allowed_types = {"T", "B", "D", "G", "R", "S", "C", "V"}
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line or line.endswith(":"):
@@ -158,12 +201,11 @@ def _get_symbols(archive: str, nm_exe: str) -> list[str]:
         else:
             continue
 
-        # Keep only globally-defined function symbols (type 'T' = text/code)
-        if sym_type != "T":
+        if sym_type not in allowed_types:
             continue
 
         if _is_valid_c_ident(sym_name):
-            symbols.append(sym_name)
+            symbols.append((sym_name, sym_type))
 
     return symbols
 
@@ -184,6 +226,24 @@ def _parse_pair(token: str) -> tuple[str, str]:
     idx = token.rfind(":")
     if idx <= 0:
         raise ValueError(f"Invalid library spec {token!r}: expected FAKE_PATH:ARCHIVE")
+    return token[:idx], token[idx + 1 :]
+
+
+def _parse_rename_spec(token: str) -> tuple[str, str, str]:
+    """Parse a 'fake_path:old_symbol:new_symbol' token."""
+    parts = token.rsplit(":", 2)
+    if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:
+        raise ValueError(
+            f"Invalid rename spec {token!r}: expected FAKE_PATH:OLD_SYMBOL:NEW_SYMBOL"
+        )
+    return parts[0], parts[1], parts[2]
+
+
+def _parse_alias_spec(token: str) -> tuple[str, str]:
+    """Parse a 'fake_path:alias' token."""
+    idx = token.rfind(":")
+    if idx <= 0 or idx == len(token) - 1:
+        raise ValueError(f"Invalid alias spec {token!r}: expected FAKE_PATH:ALIAS")
     return token[:idx], token[idx + 1 :]
 
 
@@ -223,7 +283,9 @@ _FILE_HEADER = """\
 
 
 def generate(
-    libraries: list[tuple[str, list[str]]],  # [(fake_path, [sym, ...]), ...]
+    libraries: list[tuple[str, list[tuple[str, str]]]],  # [(fake_path, [(sym, type), ...]), ...]
+    library_aliases: dict[str, list[str]],
+    rename_symbols: dict[str, dict[str, str]],
     args_repr: str,
     nm_exe: str,
 ) -> str:
@@ -239,10 +301,11 @@ def generate(
     out.append("\n\n")
 
     # --- Collect all symbols (deduped across libraries for the extern block) --
-    all_syms: dict[str, None] = {}  # ordered set
+    all_syms: dict[str, str] = {}  # ordered map: symbol -> type
     for _, syms in libraries:
-        for s in syms:
-            all_syms[s] = None
+        for s, sym_type in syms:
+            if s not in all_syms:
+                all_syms[s] = sym_type
 
     if all_syms:
         out.append(
@@ -257,32 +320,57 @@ def generate(
         out.append("#pragma clang diagnostic push\n")
         out.append('#pragma clang diagnostic ignored "-Wpedantic"\n')
         out.append('#pragma clang diagnostic ignored "-Wstrict-prototypes"\n\n')
-        for sym in all_syms:
-            out.append(f"extern void {sym}();\n")
+        for sym, sym_type in all_syms.items():
+            if sym_type == "T":
+                out.append(f"extern void {sym}();\n")
+            else:
+                out.append(f"extern char {sym};\n")
         out.append("\n")
 
     # --- Per-library symbol tables -------------------------------------------
+    registry_entries: list[tuple[str, str]] = []
+    seen_registry_names: set[str] = set()
+
     for fake_path, syms in libraries:
         # Build a C-safe identifier for the table variable name from the path.
         # Strip leading path components and replace non-ident chars with _.
         basename = os.path.basename(fake_path)
         table_id = re.sub(r"[^A-Za-z0-9_]", "_", basename)
 
+        def add_registry_name(name: str) -> None:
+            if name in seen_registry_names:
+                print(
+                    f"warning: duplicate registry name {name!r} ignored",
+                    file=sys.stderr,
+                )
+                return
+            seen_registry_names.add(name)
+            registry_entries.append((name, table_id))
+
         if syms:
+            renames = rename_symbols.get(fake_path, {})
             out.append(
                 f'/* Symbol table for "{_c_str(fake_path)}" '
                 f"({len(syms)} symbol{'s' if len(syms) != 1 else ''}) */\n"
             )
             out.append(f"static const jvm_symbol_entry_t _syms_{table_id}[] = {{\n")
-            for sym in syms:
+            for sym, sym_type in syms:
+                # Renames override the built-in JNI_OnLoad/JNI_OnUnload aliasing.
+                if sym in renames:
+                    key = renames[sym]
                 # If the symbol follows the __lib<NAME>_JNI_OnLoad pattern,
                 # expose it under the canonical "JNI_OnLoad" key so that
                 # JVM_FindLibraryEntry("JNI_OnLoad") still works per-library.
-                if re.match(r"^__[A-Za-z0-9_]+_JNI_OnLoad$", sym):
+                elif re.match(r"^__[A-Za-z0-9_]+_JNI_OnLoad$", sym):
                     key = "JNI_OnLoad"
+                elif re.match(r"^__[A-Za-z0-9_]+_JNI_OnUnload$", sym):
+                    key = "JNI_OnUnload"
                 else:
                     key = sym
-                out.append(f'    {{ "{_c_str(key)}", (void*){sym} }},\n')
+                if sym_type == "T":
+                    out.append(f'    {{ "{_c_str(key)}", (void*){sym} }},\n')
+                else:
+                    out.append(f'    {{ "{_c_str(key)}", (void*)&{sym} }},\n')
             out.append("    { NULL, NULL }  /* sentinel */\n")
             out.append("};\n\n")
         else:
@@ -292,6 +380,10 @@ def generate(
                 "    { NULL, NULL }  /* sentinel */\n"
                 "};\n\n"
             )
+
+        add_registry_name(fake_path)
+        for alias in library_aliases.get(fake_path, []):
+            add_registry_name(alias)
 
     if all_syms:
         out.append("#pragma clang diagnostic pop\n\n")
@@ -303,14 +395,12 @@ def generate(
         " * JVM_FindLibraryEntry then searches that entry's symbol table. */\n"
     )
     out.append("const jvm_static_lib_entry_t jvm_static_libs[] = {\n")
-    for fake_path, _ in libraries:
-        basename = os.path.basename(fake_path)
-        table_id = re.sub(r"[^A-Za-z0-9_]", "_", basename)
-        out.append(f'    {{ "{_c_str(fake_path)}", _syms_{table_id} }},\n')
+    for name, table_id in registry_entries:
+        out.append(f'    {{ "{_c_str(name)}", _syms_{table_id} }},\n')
     out.append("    { NULL, NULL }  /* sentinel */\n")
     out.append("};\n\n")
 
-    out.append(f"const int jvm_static_libs_count = {len(libraries)};\n")
+    out.append(f"const int jvm_static_libs_count = {len(registry_entries)};\n")
 
     return "".join(out)
 
@@ -362,6 +452,41 @@ def main() -> int:
             "E.g. --nm llvm-nm-18"
         ),
     )
+    parser.add_argument(
+        "--add-symbol",
+        action="append",
+        dest="add_symbols",
+        metavar="FAKE_PATH:SYMBOL",
+        default=[],
+        help=(
+            "Manually add a symbol to a library's symbol table. Format: FAKE_PATH:SYMBOL. "
+            "Can be specified multiple times. Symbols are merged with those extracted "
+            "from archives."
+        ),
+    )
+    parser.add_argument(
+        "--add-alias",
+        action="append",
+        dest="library_aliases",
+        metavar="FAKE_PATH:ALIAS",
+        default=[],
+        help=(
+            "Add an alternate library name to the registry. Can be specified "
+            "multiple times. Aliases point at the same symbol table as the "
+            "canonical FAKE_PATH entry."
+        ),
+    )
+    parser.add_argument(
+        "--rename-symbol",
+        action="append",
+        dest="rename_symbols",
+        metavar="FAKE_PATH:OLD_SYMBOL:NEW_SYMBOL",
+        default=[],
+        help=(
+            "Rename a symbol key in a library's table. Format: FAKE_PATH:OLD_SYMBOL:NEW_SYMBOL. "
+            "Can be specified multiple times. Renames apply after extraction and before emission."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -403,6 +528,62 @@ def main() -> int:
             )
     pairs = unique_pairs
 
+    # Parse manually added symbols
+    manual_symbols: dict[str, set[str]] = {}  # {fake_path: {symbol, ...}}
+    for spec in args.add_symbols:
+        try:
+            fake_path, symbol = _parse_pair(spec)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not _is_valid_c_ident(symbol):
+            print(
+                f"error: invalid symbol name {symbol!r}: must be a valid C identifier",
+                file=sys.stderr,
+            )
+            return 1
+        if fake_path not in manual_symbols:
+            manual_symbols[fake_path] = set()
+        manual_symbols[fake_path].add(symbol)
+
+    # Parse library aliases
+    library_aliases: dict[str, list[str]] = {}
+    for spec in args.library_aliases:
+        try:
+            fake_path, alias = _parse_alias_spec(spec)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not alias:
+            print(
+                "error: invalid alias name '': aliases must be non-empty",
+                file=sys.stderr,
+            )
+            return 1
+        library_aliases.setdefault(fake_path, []).append(alias)
+
+    # Parse rename mappings
+    rename_symbols: dict[str, dict[str, str]] = {}
+    for spec in args.rename_symbols:
+        try:
+            fake_path, old_symbol, new_symbol = _parse_rename_spec(spec)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not _is_valid_c_ident(old_symbol):
+            print(
+                f"error: invalid old symbol name {old_symbol!r}: must be a valid C identifier",
+                file=sys.stderr,
+            )
+            return 1
+        if not _is_valid_c_ident(new_symbol):
+            print(
+                f"error: invalid new symbol name {new_symbol!r}: must be a valid C identifier",
+                file=sys.stderr,
+            )
+            return 1
+        rename_symbols.setdefault(fake_path, {})[old_symbol] = new_symbol
+
     # Locate nm
     try:
         nm_exe = _find_nm(args.nm)
@@ -412,7 +593,7 @@ def main() -> int:
     print(f"Using nm: {nm_exe}", file=sys.stderr)
 
     # Extract symbols from each archive
-    libraries: list[tuple[str, list[str]]] = []
+    libraries: list[tuple[str, list[tuple[str, str]]]] = []
     total_syms = 0
     for fake_path, archive in pairs:
         if not os.path.exists(archive):
@@ -430,7 +611,22 @@ def main() -> int:
 
         # Deduplicate symbols within a single library (should be rare)
         seen: set[str] = set()
-        unique_syms = [s for s in syms if not (s in seen or seen.add(s))]  # type: ignore[func-returns-value]
+        unique_syms = [s for s in syms if not (s[0] in seen or seen.add(s[0]))]  # type: ignore[func-returns-value]
+
+        # Merge manually added symbols for this library
+        if fake_path in manual_symbols:
+            for manual_sym in manual_symbols[fake_path]:
+                if manual_sym not in seen:
+                    unique_syms.append((manual_sym, "T"))
+                    seen.add(manual_sym)
+
+        if fake_path in rename_symbols:
+            for old_symbol in rename_symbols[fake_path]:
+                if old_symbol not in seen:
+                    print(
+                        f"warning: rename target {old_symbol!r} not found for {fake_path!r}",
+                        file=sys.stderr,
+                    )
 
         print(
             f"    {fake_path}: {len(unique_syms)} symbol"
@@ -440,6 +636,16 @@ def main() -> int:
         libraries.append((fake_path, unique_syms))
         total_syms += len(unique_syms)
 
+    # Ignore aliases for libraries that were dropped during pair deduplication.
+    known_paths = {fake_path for fake_path, _ in libraries}
+    for fake_path in list(library_aliases):
+        if fake_path not in known_paths:
+            print(
+                f"warning: alias spec for unknown library {fake_path!r} ignored",
+                file=sys.stderr,
+            )
+            del library_aliases[fake_path]
+
     # Build a compact args_repr for the file header comment
     repr_parts: list[str] = []
     if args.nm:
@@ -448,10 +654,13 @@ def main() -> int:
         repr_parts.append(f"-o {args.output}")
     if args.list:
         repr_parts.append(f"--list {args.list}")
+    repr_parts.extend(f"--add-symbol {spec}" for spec in args.add_symbols)
+    repr_parts.extend(f"--add-alias {spec}" for spec in args.library_aliases)
+    repr_parts.extend(f"--rename-symbol {spec}" for spec in args.rename_symbols)
     repr_parts.extend(args.pairs)
     args_repr = " ".join(repr_parts) if repr_parts else "(no arguments)"
 
-    source = generate(libraries, args_repr, nm_exe)
+    source = generate(libraries, library_aliases, rename_symbols, args_repr, nm_exe)
 
     if args.output == "-":
         sys.stdout.write(source)

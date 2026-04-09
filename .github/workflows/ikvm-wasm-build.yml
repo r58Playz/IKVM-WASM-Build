@@ -118,17 +118,25 @@ jobs:
 
       - name: build glfw
         shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}" --output-dir="$GITHUB_WORKSPACE/out/java-native-deps/${{ matrix.variant }}"
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}"
 
       - name: build lwjgl3
         shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-lwjgl3.sh" --variant="${{ matrix.variant }}" --output-dir="$GITHUB_WORKSPACE/out/java-native-deps/${{ matrix.variant }}"
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-lwjgl3.sh" --variant="${{ matrix.variant }}"
+
+      - name: build jemalloc
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-jemalloc.sh" --variant="${{ matrix.variant }}"
+
+      - name: build libffi
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-libffi.sh" --variant="${{ matrix.variant }}"
 
       - name: Upload Java/native dependency artifacts
         uses: actions/upload-artifact@v4
         with:
           name: java-native-deps-${{ matrix.variant }}
-          path: out/java-native-deps/${{ matrix.variant }}/*
+          path: tools/native-deps/out/${{ matrix.variant }}/*
           if-no-files-found: error
 
   release:
@@ -218,8 +226,16 @@ jobs:
 
           cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
           cp java-native-deps/mt/liblwjgl3.a release/liblwjgl3-mt.a
+          cp java-native-deps/mt/liblwjgl_stb.a release/liblwjgl_stb-mt.a
           cp java-native-deps/st/lwjgl3.jar release/lwjgl3-st.jar
           cp java-native-deps/st/liblwjgl3.a release/liblwjgl3-st.a
+          cp java-native-deps/st/liblwjgl_stb.a release/liblwjgl_stb-st.a
+
+          cp java-native-deps/mt/libjemalloc.a release/libjemalloc-mt.a
+          cp java-native-deps/st/libjemalloc.a release/libjemalloc-st.a
+
+          cp java-native-deps/mt/libffi.a release/libffi-mt.a
+          cp java-native-deps/st/libffi.a release/libffi-st.a
 
           mkdir -p /tmp/st-native
           cp native/ST-libjvm.a /tmp/st-native/libjvm.a

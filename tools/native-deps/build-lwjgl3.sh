@@ -4,14 +4,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WORKSPACE="$SCRIPT_DIR"
 
 LWJGL_REPO="https://github.com/LWJGL/lwjgl3.git"
 # 3.4.1 is the latest LWJGL release and compiles with emsdk 3.1.56.
 LWJGL_REF="${LWJGL_REF:-3.4.1}"
+LWJGL_PATCH="${LWJGL_PATCH:-$SCRIPT_DIR/lwjgl3.patch}"
 EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-3.1.56}"
 ANT_VERSION="${ANT_VERSION:-1.10.15}"
 ANT_BASE_URL="${ANT_BASE_URL:-https://archive.apache.org/dist/ant/binaries}"
+ANT_CACHE_ROOT="${ANT_CACHE_ROOT:-$WORKSPACE/.cache}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 VARIANT="${VARIANT:-mt}"
@@ -24,8 +26,10 @@ Usage: build-lwjgl3.sh [options]
 
 Options:
   --variant=<mt|st>            Build variant (default: mt).
-  --output-dir=<path>          Output directory (default: out/java-native-deps/<variant>).
+  --output-dir=<path>          Output directory (default: tools/native-deps/out/<variant>).
   --lwjgl-ref=<ref>            LWJGL git ref/tag (default: 3.4.1).
+  --lwjgl-patch=<path>         Optional patch to apply to lwjgl clone.
+  --ant-cache-root=<path>      Persistent Apache Ant cache root.
   --tmp-dir=<path>             Temporary build directory (default: mktemp).
   --keep-tmp                   Keep temporary build directory.
   -h, --help                   Show this help message.
@@ -34,7 +38,9 @@ Environment overrides:
   VARIANT
   OUTPUT_DIR
   LWJGL_REF
+  LWJGL_PATCH
   EXPECTED_EMSDK_VERSION
+  ANT_CACHE_ROOT
 EOF
 }
 
@@ -43,6 +49,8 @@ for arg in "$@"; do
         --variant=*) VARIANT="${arg#*=}" ;;
         --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
         --lwjgl-ref=*) LWJGL_REF="${arg#*=}" ;;
+        --lwjgl-patch=*) LWJGL_PATCH="${arg#*=}" ;;
+        --ant-cache-root=*) ANT_CACHE_ROOT="${arg#*=}" ;;
         --tmp-dir=*) TMP_DIR="${arg#*=}" ;;
         --keep-tmp) KEEP_TMP="true" ;;
         -h|--help)
@@ -61,9 +69,31 @@ log() {
     echo "[build-lwjgl3/$VARIANT] $*"
 }
 
+shopt -s nullglob
+
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "ERROR: required command '$1' not found" >&2
+        exit 1
+    fi
+}
+
+apply_patch_once() {
+    local repo_dir="$1"
+    local patch_file="$2"
+    local patch_name="$3"
+
+    if [ ! -f "$patch_file" ]; then
+        return 0
+    fi
+
+    if git -C "$repo_dir" apply --check "$patch_file" >/dev/null 2>&1; then
+        log "Applying $patch_name"
+        git -C "$repo_dir" apply "$patch_file"
+    elif git -C "$repo_dir" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+        log "$patch_name already applied, skipping."
+    else
+        echo "ERROR: $patch_name cannot be applied cleanly in $repo_dir" >&2
         exit 1
     fi
 }
@@ -74,12 +104,20 @@ setup_ant() {
         return 0
     fi
 
-    local ant_root="$TMP_DIR/apache-ant-$ANT_VERSION"
-    local ant_archive="$TMP_DIR/apache-ant-$ANT_VERSION-bin.tar.gz"
+    local ant_root="$ANT_CACHE_ROOT/apache-ant-$ANT_VERSION"
+    local ant_archive="$ANT_CACHE_ROOT/apache-ant-$ANT_VERSION-bin.tar.gz"
+    mkdir -p "$ANT_CACHE_ROOT"
+
     if [ ! -x "$ant_root/bin/ant" ]; then
-        log "Downloading Apache Ant $ANT_VERSION" >&2
-        curl -fsSL -o "$ant_archive" "$ANT_BASE_URL/apache-ant-$ANT_VERSION-bin.tar.gz"
-        tar -xzf "$ant_archive" -C "$TMP_DIR"
+        if [ ! -f "$ant_archive" ]; then
+            log "Downloading Apache Ant $ANT_VERSION" >&2
+            curl -fsSL -o "$ant_archive" "$ANT_BASE_URL/apache-ant-$ANT_VERSION-bin.tar.gz"
+        else
+            log "Using cached Apache Ant archive: $ant_archive" >&2
+        fi
+
+        rm -rf "$ant_root"
+        tar -xzf "$ant_archive" -C "$ANT_CACHE_ROOT"
     fi
 
     if [ ! -x "$ant_root/bin/ant" ]; then
@@ -169,7 +207,7 @@ case "$VARIANT" in
 esac
 
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_DIR="$REPO_ROOT/out/java-native-deps/$VARIANT"
+    OUTPUT_DIR="$WORKSPACE/out/$VARIANT"
 fi
 
 if [ -n "$TMP_DIR" ]; then
@@ -187,20 +225,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-LWJGL_SRC_DIR="$TMP_DIR/lwjgl3"
+LWJGL_SRC_DIR="$WORKSPACE/lwjgl3"
 NATIVE_BUILD_DIR="$TMP_DIR/native-build"
 
 mkdir -p "$NATIVE_BUILD_DIR/obj" "$OUTPUT_DIR"
 
-log "Cloning lwjgl3 @ $LWJGL_REF"
-git clone --depth 1 --branch "$LWJGL_REF" "$LWJGL_REPO" "$LWJGL_SRC_DIR"
+if [ ! -d "$LWJGL_SRC_DIR/.git" ]; then
+    log "Cloning lwjgl3 @ $LWJGL_REF"
+    git clone --depth 1 --branch "$LWJGL_REF" "$LWJGL_REPO" "$LWJGL_SRC_DIR"
+else
+    log "lwjgl3 source already present, skipping clone."
+fi
+apply_patch_once "$LWJGL_SRC_DIR" "$LWJGL_PATCH" "$(basename "$LWJGL_PATCH")"
 
 ANT_CMD="$(setup_ant)"
 
 declare -a TEMPLATE_BINDING_ARGS
 declare -a COMPILE_BINDING_ARGS
-build_binding_args "glfw,egl,opengl,opengles,vulkan" TEMPLATE_BINDING_ARGS
-build_binding_args "glfw" COMPILE_BINDING_ARGS
+build_binding_args "glfw,egl,opengl,opengles,stb,vulkan" TEMPLATE_BINDING_ARGS
+build_binding_args "glfw,egl,opengl,stb" COMPILE_BINDING_ARGS
 
 log "Compiling lwjgl3 Java classes with Ant"
 (cd "$LWJGL_SRC_DIR" && "$ANT_CMD" "${TEMPLATE_BINDING_ARGS[@]}" compile-templates)
@@ -208,7 +251,10 @@ log "Compiling lwjgl3 Java classes with Ant"
 
 CORE_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/core"
 GLFW_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/glfw"
-if [ ! -d "$CORE_CLASSES_DIR" ] || [ ! -d "$GLFW_CLASSES_DIR" ]; then
+EGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/egl"
+OPENGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/opengl"
+STB_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/stb"
+if [ ! -d "$CORE_CLASSES_DIR" ] || [ ! -d "$GLFW_CLASSES_DIR" ] || [ ! -d "$EGL_CLASSES_DIR" ] || [ ! -d "$OPENGL_CLASSES_DIR" ] || [ ! -d "$STB_CLASSES_DIR" ]; then
     echo "ERROR: expected Ant compile outputs not found under $LWJGL_SRC_DIR/bin/classes/lwjgl" >&2
     exit 1
 fi
@@ -218,6 +264,9 @@ rm -rf "$JAR_STAGING_DIR"
 mkdir -p "$JAR_STAGING_DIR"
 cp -a "$CORE_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$GLFW_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
+cp -a "$EGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
+cp -a "$OPENGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
+cp -a "$STB_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 jar cf "$OUTPUT_DIR/lwjgl3.jar" -C "$JAR_STAGING_DIR" .
 
 log "Compiling lwjgl3 native sources"
@@ -227,24 +276,26 @@ NATIVE_SOURCES=(
     modules/lwjgl/core/src/main/c/org_lwjgl_system_SharedLibraryUtil.c
     modules/lwjgl/core/src/main/c/org_lwjgl_system_ThreadLocalUtil.c
     modules/lwjgl/core/src/main/c/org_lwjgl_system_Upcalls.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_JNI.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_MemoryAccessJNI.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_jni_JNINativeInterface.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libc_LibCErrno.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libc_LibCLocale.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libc_LibCStdio.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libc_LibCStdlib.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libc_LibCString.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libffi_FFICIF.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libffi_FFIClosure.c
-    modules/lwjgl/core/src/generated/c/org_lwjgl_system_libffi_LibFFI.c
-    modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_DynamicLinkLoader.c
-    modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_FCNTL.c
-    modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_MMAN.c
-    modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_PThread.c
-    modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_Socket.c
-    modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_Stat.c
+    modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
 )
+
+STB_NATIVE_SOURCES=()
+
+for src in "$LWJGL_SRC_DIR"/modules/lwjgl/core/src/generated/c/org_lwjgl_system_*.c; do
+    NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
+done
+
+for src in "$LWJGL_SRC_DIR"/modules/lwjgl/opengl/src/generated/c/org_lwjgl_opengl_*.c; do
+    if [ "$(basename "$src")" = "org_lwjgl_opengl_WGL.c" ]; then
+        continue
+    fi
+
+    NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
+done
+
+for src in "$LWJGL_SRC_DIR"/modules/lwjgl/stb/src/generated/c/org_lwjgl_stb_*.c; do
+    STB_NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
+done
 
 COMMON_NATIVE_FLAGS=(
     -O2
@@ -256,10 +307,15 @@ COMMON_NATIVE_FLAGS=(
     -I"$JAVA_HOME_DETECTED/include"
     -I"$JAVA_HOME_DETECTED/include/linux"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c"
+    -I"$LWJGL_SRC_DIR/modules/lwjgl/opengl/src/main/c"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/linux"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/libffi"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/libffi/x86"
+    -I"$LWJGL_SRC_DIR/modules/lwjgl/stb/src/main/c"
 )
+
+NATIVE_OBJECTS=()
+STB_NATIVE_OBJECTS=()
 
 for rel in "${NATIVE_SOURCES[@]}"; do
     src="$LWJGL_SRC_DIR/$rel"
@@ -271,9 +327,24 @@ for rel in "${NATIVE_SOURCES[@]}"; do
     obj_name="$(basename "${rel%.c}").o"
     obj="$NATIVE_BUILD_DIR/obj/$obj_name"
     emcc -c "$src" -o "$obj" "${COMMON_NATIVE_FLAGS[@]}" "${PTHREAD_FLAGS[@]}"
+    NATIVE_OBJECTS+=("$obj")
 done
 
-emar rcs "$OUTPUT_DIR/liblwjgl3.a" "$NATIVE_BUILD_DIR"/obj/*.o
+for rel in "${STB_NATIVE_SOURCES[@]}"; do
+    src="$LWJGL_SRC_DIR/$rel"
+    if [ ! -f "$src" ]; then
+        echo "ERROR: expected source file not found: $src" >&2
+        exit 1
+    fi
+
+    obj_name="$(basename "${rel%.c}").o"
+    obj="$NATIVE_BUILD_DIR/obj/$obj_name"
+    emcc -c "$src" -o "$obj" "${COMMON_NATIVE_FLAGS[@]}" "${PTHREAD_FLAGS[@]}"
+    STB_NATIVE_OBJECTS+=("$obj")
+done
+
+emar rcs "$OUTPUT_DIR/liblwjgl3.a" "${NATIVE_OBJECTS[@]}"
+emar rcs "$OUTPUT_DIR/liblwjgl_stb.a" "${STB_NATIVE_OBJECTS[@]}"
 
 log "Artifacts written to: $OUTPUT_DIR"
 ls -lh "$OUTPUT_DIR"

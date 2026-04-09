@@ -1,0 +1,205 @@
+diff --git a/configure.ac b/configure.ac
+index f6d25f3..aa6a9de 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1972,10 +1972,14 @@ if test "x$enable_syscall" = "x1" ; then
+ fi
+ 
+ dnl Check if the GNU-specific secure_getenv function exists.
+-AC_CHECK_FUNC([secure_getenv],
+-              [have_secure_getenv="1"],
+-              [have_secure_getenv="0"]
+-             )
++if test "x${host}" = "xwasm32-unknown-emscripten" ; then
++  have_secure_getenv="0"
++else
++  AC_CHECK_FUNC([secure_getenv],
++                [have_secure_getenv="1"],
++                [have_secure_getenv="0"]
++               )
++fi
+ if test "x$have_secure_getenv" = "x1" ; then
+   AC_DEFINE([JEMALLOC_HAVE_SECURE_GETENV], [ ], [ ])
+ fi
+@@ -2413,7 +2417,7 @@ dnl ============================================================================
+ dnl Enable background threads if possible.
+ 
+ if test "x${have_pthread}" = "x1" -a "x${je_cv_os_unfair_lock}" != "xyes" -a \
+-       "x${abi}" != "xmacho" ; then
++       "x${abi}" != "xmacho" -a "x${host}" != "xwasm32-unknown-emscripten" ; then
+   AC_DEFINE([JEMALLOC_BACKGROUND_THREAD], [ ], [ ])
+ fi
+ 
+diff --git a/include/jemalloc/internal/malloc_io.h b/include/jemalloc/internal/malloc_io.h
+index a375bda..fc3aa77 100644
+--- a/include/jemalloc/internal/malloc_io.h
++++ b/include/jemalloc/internal/malloc_io.h
+@@ -3,6 +3,10 @@
+ 
+ #include "jemalloc/internal/jemalloc_internal_types.h"
+ 
++#ifdef __EMSCRIPTEN__
++#  include <emscripten/console.h>
++#endif
++
+ #ifdef _WIN32
+ #  ifdef _WIN64
+ #    define FMT64_PREFIX "ll"
+@@ -68,6 +72,17 @@ void malloc_printf(const char *format, ...) JEMALLOC_FORMAT_PRINTF(1, 2);
+ 
+ static inline ssize_t
+ malloc_write_fd(int fd, const void *buf, size_t count) {
++#ifdef __EMSCRIPTEN__
++	if (fd == 2) {
++		emscripten_errn((const char *)buf, count);
++		return (ssize_t)count;
++	}
++	if (fd == 1) {
++		emscripten_outn((const char *)buf, count);
++		return (ssize_t)count;
++	}
++	return -1;
++#else
+ #if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_write)
+ 	/*
+ 	 * Use syscall(2) rather than write(2) when possible in order to avoid
+@@ -86,10 +101,17 @@ malloc_write_fd(int fd, const void *buf, size_t count) {
+ 	    count);
+ #endif
+ 	return (ssize_t)result;
++#endif
+ }
+ 
+ static inline ssize_t
+ malloc_read_fd(int fd, void *buf, size_t count) {
++#ifdef __EMSCRIPTEN__
++	(void)fd;
++	(void)buf;
++	(void)count;
++	return -1;
++#else
+ #if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_read)
+ 	long result = syscall(SYS_read, fd, buf, count);
+ #else
+@@ -100,6 +122,7 @@ malloc_read_fd(int fd, void *buf, size_t count) {
+ 	    count);
+ #endif
+ 	return (ssize_t)result;
++#endif
+ }
+ 
+ #endif /* JEMALLOC_INTERNAL_MALLOC_IO_H */
+diff --git a/src/jemalloc.c b/src/jemalloc.c
+index 7655de4..fa34d15 100644
+--- a/src/jemalloc.c
++++ b/src/jemalloc.c
+@@ -1003,6 +1003,10 @@ obtain_malloc_conf(unsigned which_source, char buf[PATH_MAX + 1]) {
+ 		}
+ 		break;
+ 	case 2: {
++#ifdef __EMSCRIPTEN__
++		ret = NULL;
++		break;
++#else
+ 		ssize_t linklen = 0;
+ #ifndef _WIN32
+ 		int saved_errno = errno;
+@@ -1033,6 +1037,7 @@ obtain_malloc_conf(unsigned which_source, char buf[PATH_MAX + 1]) {
+ 		buf[linklen] = '\0';
+ 		ret = buf;
+ 		break;
++#endif
+ 	} case 3: {
+ 		const char *envname =
+ #ifdef JEMALLOC_PREFIX
+@@ -1042,6 +1047,10 @@ obtain_malloc_conf(unsigned which_source, char buf[PATH_MAX + 1]) {
+ #endif
+ 		    ;
+ 
++#ifdef __EMSCRIPTEN__
++		ret = NULL;
++#else
++
+ 		if ((ret = jemalloc_secure_getenv(envname)) != NULL) {
+ 			/*
+ 			 * Do nothing; opts is already initialized to the value
+@@ -1051,6 +1060,7 @@ obtain_malloc_conf(unsigned which_source, char buf[PATH_MAX + 1]) {
+ 			/* No configuration specified. */
+ 			ret = NULL;
+ 		}
++#endif
+ 		break;
+ 	} case 4: {
+ 		ret = je_malloc_conf_2_conf_harder;
+diff --git a/src/malloc_io.c b/src/malloc_io.c
+index b76885c..c481946 100644
+--- a/src/malloc_io.c
++++ b/src/malloc_io.c
+@@ -4,6 +4,10 @@
+ #include "jemalloc/internal/malloc_io.h"
+ #include "jemalloc/internal/util.h"
+ 
++#ifdef __EMSCRIPTEN__
++#  include <emscripten/console.h>
++#endif
++
+ #ifdef assert
+ #  undef assert
+ #endif
+@@ -68,7 +72,14 @@ static char *x2s(uintmax_t x, bool alt_form, bool uppercase, char *s,
+ /* malloc_message() setup. */
+ void
+ wrtmessage(void *cbopaque, const char *s) {
++	(void)cbopaque;
++#ifdef __EMSCRIPTEN__
++	if (s != NULL) {
++		emscripten_err(s);
++	}
++#else
+ 	malloc_write_fd(STDERR_FILENO, s, strlen(s));
++#endif
+ }
+ 
+ JEMALLOC_EXPORT void	(*je_malloc_message)(void *, const char *s);
+diff --git a/src/pages.c b/src/pages.c
+index 8c83a7d..7ee7820 100644
+--- a/src/pages.c
++++ b/src/pages.c
+@@ -622,6 +622,10 @@ os_overcommits_proc(void) {
+ 	int fd;
+ 	char buf[1];
+ 
++#ifdef __EMSCRIPTEN__
++	return false;
++#endif
++
+ #if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_open)
+ 	#if defined(O_CLOEXEC)
+ 		fd = (int)syscall(SYS_open, "/proc/sys/vm/overcommit_memory", O_RDONLY |
+@@ -706,6 +710,12 @@ init_thp_state(void) {
+ 		}
+ 		goto label_error;
+ 	}
++
++#ifdef __EMSCRIPTEN__
++	opt_thp = init_system_thp_mode = thp_mode_not_supported;
++	return;
++#endif
++
+ #if defined(JEMALLOC_HAVE_MADVISE_HUGE)
+ 	static const char sys_state_madvise[] = "always [madvise] never\n";
+ 	static const char sys_state_always[] = "[always] madvise never\n";
+diff --git a/src/prof_sys.c b/src/prof_sys.c
+index b5f1f5b..bdb3f10 100644
+--- a/src/prof_sys.c
++++ b/src/prof_sys.c
+@@ -451,6 +451,9 @@ prof_dump_open_maps_impl() {
+ 	int mfd;
+ 
+ 	cassert(config_prof);
++#ifdef __EMSCRIPTEN__
++	return -1;
++#endif
+ #if defined(__FreeBSD__) || defined(__DragonFly__)
+ 	mfd = prof_open_maps_internal("/proc/curproc/map");
+ #elif defined(_WIN32)

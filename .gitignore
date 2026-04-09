@@ -3,4 +3,11 @@
 /.nuget
 /tools/ikvm/ikvm
 /tools/ikvm/out
+/tools/native-deps/emscripten-glfw
+/tools/native-deps/MobileGlues
+/tools/native-deps/jemalloc
+/tools/native-deps/libffi
+/tools/native-deps/lwjgl3
+/tools/native-deps/out
+/tools/native-deps/.cache
 /out

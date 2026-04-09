@@ -71,3 +71,63 @@ index b03bd6ac8f..4114a25983 100644
  #ifdef MACOSX
      sprops.sun_jnu_encoding = "UTF-8";
  #else
+diff --git a/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c b/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c
+index 9b3ff8194e..a1edb76bc8 100644
+--- a/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c
++++ b/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c
+@@ -72,7 +72,7 @@ Java_sun_nio_ch_FileDispatcherImpl_init(JNIEnv *env, jclass cl)
+ {
+     int sp[2];
+     if (socketpair(PF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+-        JNU_ThrowIOExceptionWithLastError(env, "socketpair failed");
++		printf("[IKVM] socketpair failed\n");
+         return;
+     }
+     preCloseFD = sp[0];
+@@ -225,6 +225,16 @@ Java_sun_nio_ch_FileDispatcherImpl_lock0(JNIEnv *env, jobject this, jobject fdo,
+                                       jboolean block, jlong pos, jlong size,
+                                       jboolean shared)
+ {
++#if defined(__EMSCRIPTEN__)
++    (void)env;
++    (void)this;
++    (void)fdo;
++    (void)block;
++    (void)pos;
++    (void)size;
++    (void)shared;
++    return sun_nio_ch_FileDispatcherImpl_LOCKED;
++#else
+     jint fd = fdval(env, fdo);
+     jint lockResult = 0;
+     int cmd = 0;
+@@ -256,12 +266,21 @@ Java_sun_nio_ch_FileDispatcherImpl_lock0(JNIEnv *env, jobject this, jobject fdo,
+         JNU_ThrowIOExceptionWithLastError(env, "Lock failed");
+     }
+     return 0;
++#endif
+ }
+ 
+ JNIEXPORT void JNICALL
+ Java_sun_nio_ch_FileDispatcherImpl_release0(JNIEnv *env, jobject this,
+                                          jobject fdo, jlong pos, jlong size)
+ {
++#if defined(__EMSCRIPTEN__)
++    (void)env;
++    (void)this;
++    (void)fdo;
++    (void)pos;
++    (void)size;
++    return;
++#else
+     jint fd = fdval(env, fdo);
+     jint lockResult = 0;
+     struct flock64 fl;
+@@ -279,6 +298,7 @@ Java_sun_nio_ch_FileDispatcherImpl_release0(JNIEnv *env, jobject this,
+     if (lockResult < 0) {
+         JNU_ThrowIOExceptionWithLastError(env, "Release failed");
+     }
++#endif
+ }
+ 
+ 

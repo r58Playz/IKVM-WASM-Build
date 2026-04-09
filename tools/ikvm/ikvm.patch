@@ -20,6 +20,72 @@ index b826bb4fb..60450f1d4 100644
      </ItemGroup>
  
      <Target Name="Publish">
+diff --git a/src/IKVM.Java.runtime.linux/UnixConstants.java b/src/IKVM.Java.runtime.linux/UnixConstants.java
+index 8cfa61fe6..0bd71d2cf 100644
+--- a/src/IKVM.Java.runtime.linux/UnixConstants.java
++++ b/src/IKVM.Java.runtime.linux/UnixConstants.java
+@@ -45,41 +45,42 @@ class UnixConstants {
+     static final int W_OK = 2;
+     static final int X_OK = 1;
+     static final int F_OK = 0;
+-    static final int ENOENT = 2;
+-    static final int ENXIO = 6;
+-    static final int EACCES = 13;
+-    static final int EEXIST = 17;
+-    static final int ENOTDIR = 20;
+-    static final int EINVAL = 22;
+-    static final int EXDEV = 18;
+-    static final int EISDIR = 21;
+-    static final int ENOTEMPTY = 39;
+-    static final int ENOSPC = 28;
+-    static final int EAGAIN = 11;
+-    static final int EWOULDBLOCK = 11;
+-    static final int ENOSYS = 38;
+-    static final int ELOOP = 40;
+-    static final int EROFS = 30;
++    // Emscripten's libc uses WASI errno values, not Linux kernel errno values.
++    static final int ENOENT = 44;
++    static final int ENXIO = 60;
++    static final int EACCES = 2;
++    static final int EEXIST = 20;
++    static final int ENOTDIR = 54;
++    static final int EINVAL = 28;
++    static final int EXDEV = 75;
++    static final int EISDIR = 31;
++    static final int ENOTEMPTY = 55;
++    static final int ENOSPC = 51;
++    static final int EAGAIN = 6;
++    static final int EWOULDBLOCK = 6;
++    static final int ENOSYS = 52;
++    static final int ELOOP = 32;
++    static final int EROFS = 69;
+ 
+ 
+ 
+ 
+ 
+-    static final int ENODATA = 61;
++    static final int ENODATA = 116;
+ 
+ 
+ 
+ 
+ 
+ 
+-    static final int XATTR_NOT_FOUND = 61;
++    static final int XATTR_NOT_FOUND = 116;
+ 
+ 
+ 
+ 
+ 
+-    static final int ERANGE = 34;
+-    static final int EMFILE = 24;
++    static final int ERANGE = 68;
++    static final int EMFILE = 33;
+ 
+ 
+ 
 diff --git a/src/IKVM.Java/IKVM.Java.runtime.targets b/src/IKVM.Java/IKVM.Java.runtime.targets
 index bfef3bb82..21221ff72 100644
 --- a/src/IKVM.Java/IKVM.Java.runtime.targets
@@ -42,20 +108,8 @@ index bfef3bb82..21221ff72 100644
      </Target>
  
      <Target Name="ResolveJava" DependsOnTargets="FindJdk" Condition=" '$(JavaPath)' == '' ">
-diff --git a/src/IKVM.Runtime/ExceptionHelper.cs b/src/IKVM.Runtime/ExceptionHelper.cs
-index f54199cef..50e855485 100644
---- a/src/IKVM.Runtime/ExceptionHelper.cs
-+++ b/src/IKVM.Runtime/ExceptionHelper.cs
-@@ -863,6 +863,7 @@ Exception UnmapExceptionImpl(Exception e)
-         [HideFromJava]
-         Exception MapTypeInitializeException(TypeInitializationException t, Type handler)
-         {
-+			Console.Error.WriteLine($"[IKVM internal] MapTypeInitializeException {t}");
- #if FIRST_PASS
-             throw new NotImplementedException();
- #else
 diff --git a/src/IKVM.Runtime/JNI/JNIEnv.cs b/src/IKVM.Runtime/JNI/JNIEnv.cs
-index 87f4359c1..0f5b2c856 100644
+index 87f4359c1..efb3c273f 100644
 --- a/src/IKVM.Runtime/JNI/JNIEnv.cs
 +++ b/src/IKVM.Runtime/JNI/JNIEnv.cs
 @@ -1,4 +1,4 @@
@@ -1364,7 +1418,7 @@ index 87f4359c1..0f5b2c856 100644
          internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
          {
              if (IsGlobalRef(obj))
-@@ -3047,11 +3212,13 @@ internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
+@@ -3047,11 +3212,29 @@ internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
          /// </summary>
          /// <param name="pEnv"></param>
          /// <returns></returns>
@@ -1374,11 +1428,36 @@ index 87f4359c1..0f5b2c856 100644
              return JVM.GetPendingException() != null ? JNI_TRUE : JNI_FALSE;
          }
  
++        static long IntPtrToJLongAddress(IntPtr address)
++        {
++            if (IntPtr.Size == sizeof(long))
++                return address.ToInt64();
++
++            return unchecked((long)(uint)address.ToInt32());
++        }
++
++        static IntPtr JLongAddressToIntPtr(long address)
++        {
++            if (IntPtr.Size == sizeof(long))
++                return (IntPtr)address;
++
++            return unchecked((IntPtr)(int)(uint)address);
++        }
++
 +        [MonoPInvokeCallback(typeof(JNINativeInterface.NewDirectByteBufferDelegateType))]
          internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong capacity)
          {
  #if FIRST_PASS
-@@ -3075,6 +3242,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+@@ -3065,7 +3248,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+                     return IntPtr.Zero;
+                 }
+ 
+-                return pEnv->MakeLocalRef(global::java.nio.DirectByteBuffer.__new(address.ToInt64(), (int)capacity));
++                return pEnv->MakeLocalRef(global::java.nio.DirectByteBuffer.__new(IntPtrToJLongAddress(address), (int)capacity));
+             }
+             catch (Exception x)
+             {
+@@ -3075,11 +3258,12 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
  #endif
          }
  
@@ -1386,7 +1465,13 @@ index 87f4359c1..0f5b2c856 100644
          internal static void* GetDirectBufferAddress(JNIEnv* pEnv, nint buf)
          {
              try
-@@ -3088,6 +3256,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+             {
+-                return (void*)(IntPtr)((sun.nio.ch.DirectBuffer)pEnv->UnwrapRef(buf)).address();
++                return (void*)JLongAddressToIntPtr(((sun.nio.ch.DirectBuffer)pEnv->UnwrapRef(buf)).address());
+             }
+             catch (Exception x)
+             {
+@@ -3088,6 +3272,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
              }
          }
  
@@ -1394,7 +1479,7 @@ index 87f4359c1..0f5b2c856 100644
          internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
          {
              try
-@@ -3101,6 +3270,7 @@ internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
+@@ -3101,6 +3286,7 @@ internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
              }
          }
  
@@ -1944,18 +2029,26 @@ index 79a7c736c..468b86512 100644
          internal static jint AttachCurrentThreadAsDaemon(JavaVM* pJVM, void** penv, void* args)
          {
              return AttachCurrentThreadImpl(pJVM, penv, (JavaVMAttachArgs*)args, true);
-diff --git a/src/IKVM.Runtime/JVM.cs b/src/IKVM.Runtime/JVM.cs
-index b3c9d17bc..1a30bef1d 100644
---- a/src/IKVM.Runtime/JVM.cs
-+++ b/src/IKVM.Runtime/JVM.cs
-@@ -169,6 +169,7 @@ internal static Exception GetPendingException()
-         /// <param name="e"></param>
-         internal static void SetPendingException(Exception e)
-         {
-+			Console.WriteLine($"[IKVM] PENDING EXCEPTION! {e}");
-             pendingException = e != null ? ikvm.runtime.Util.mapException(e) : null;
-         }
+diff --git a/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs b/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs
+index 61d1566a4..e93c68c32 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs
+@@ -36,7 +36,7 @@ static class FileInputStream
+         static __jniDelegate__skip __jniPtr__skip0;
+         delegate int __jniDelegate__available(IntPtr jniEnv, IntPtr self);
+         static __jniDelegate__available __jniPtr__available0;
+-        delegate int __jniDelegate__close0(IntPtr jniEnv, IntPtr self);
++        delegate void __jniDelegate__close0(IntPtr jniEnv, IntPtr self);
+         static __jniDelegate__close0 __jniPtr__close0;
  
+ #endif
+@@ -415,4 +415,4 @@ public static void close0(object self)
+ 
+     }
+ 
+-}
+\ No newline at end of file
++}
 diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
 index 0322f2275..c9db1de29 100644
 --- a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
@@ -1977,6 +2070,535 @@ index 0322f2275..c9db1de29 100644
  		private static bool ConsoleCtrlCheck(CtrlTypes ctrlType)
  		{
  #if !FIRST_PASS
+diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
+index 50a0078d2..ddfb51259 100644
+--- a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
++++ b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
+@@ -132,6 +132,24 @@ public static void registerNatives()
+ 
+         }
+ 
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        static long IntPtrToJLongAddress(IntPtr value)
++        {
++            if (IntPtr.Size == sizeof(long))
++                return value.ToInt64();
++
++            return unchecked((long)(uint)value.ToInt32());
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        static IntPtr JLongAddressToIntPtr(long value)
++        {
++            if (IntPtr.Size == sizeof(long))
++                return (IntPtr)value;
++
++            return unchecked((IntPtr)(int)(uint)value);
++        }
++
+         /// <summary>
+         /// Implements the logic to get a field by offset.
+         /// </summary>
+@@ -265,7 +283,7 @@ public static bool getBoolean(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Marshal.ReadByte((IntPtr)offset) != 0,
++                    null => getByte(self, offset) != 0,
+                     RuntimeJavaType w => GetField<bool>(null, offset),
+                     Array array => Buffer.GetByte(array, (int)offset) != 0,
+                     _ => GetField<bool>(o, offset)
+@@ -295,7 +313,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteByte((IntPtr)offset, x ? (byte)1 : (byte)0);
++                        putByte(self, offset, x ? (byte)1 : (byte)0);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -331,7 +349,7 @@ public static byte getByte(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Marshal.ReadByte((IntPtr)offset),
++                    null => getByte(self, offset),
+                     RuntimeJavaType w => GetField<byte>(null, offset),
+                     Array array => Buffer.GetByte(array, (int)offset),
+                     _ => GetField<byte>(o, offset)
+@@ -361,7 +379,7 @@ public static void putByte(object self, object o, long offset, byte x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteByte((IntPtr)offset, x);
++                        putByte(self, offset, x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -397,7 +415,7 @@ public static short getShort(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Marshal.ReadInt16((IntPtr)offset),
++                    null => getShort(self, offset),
+                     RuntimeJavaType w => GetField<short>(null, offset),
+                     Array array => ReadInt16(array, offset),
+                     _ => GetField<short>(o, offset)
+@@ -427,7 +445,7 @@ public static void putShort(object self, object o, long offset, short x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteInt16((IntPtr)offset, x);
++                        putShort(self, offset, x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -463,7 +481,7 @@ public static char getChar(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => (char)Marshal.ReadInt16((IntPtr)offset),
++                    null => getChar(self, offset),
+                     RuntimeJavaType w => GetField<char>(null, offset),
+                     Array array => (char)ReadInt16(array, offset),
+                     _ => GetField<char>(o, offset)
+@@ -493,7 +511,7 @@ public static void putChar(object self, object o, long offset, char x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteInt16((IntPtr)offset, (short)x);
++                        putChar(self, offset, x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -529,7 +547,7 @@ public static int getInt(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Marshal.ReadInt32((IntPtr)offset),
++                    null => getInt(self, offset),
+                     RuntimeJavaType w => GetField<int>(null, offset),
+                     Array array => ReadInt32(array, offset),
+                     _ => GetField<int>(o, offset)
+@@ -559,7 +577,7 @@ public static void putInt(object self, object o, long offset, int x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteInt32((IntPtr)offset, x);
++                        putInt(self, offset, x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -595,7 +613,7 @@ public static long getLong(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Marshal.ReadInt64((IntPtr)offset),
++                    null => getLong(self, offset),
+                     RuntimeJavaType w => GetField<long>(null, offset),
+                     Array array => ReadInt64(array, offset),
+                     _ => GetField<long>(o, offset)
+@@ -625,7 +643,7 @@ public static void putLong(object self, object o, long offset, long x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteInt64((IntPtr)offset, x);
++                        putLong(self, offset, x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -661,7 +679,7 @@ public static float getFloat(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => global::java.lang.Float.intBitsToFloat(Marshal.ReadInt32((IntPtr)offset)),
++                    null => getFloat(self, offset),
+                     RuntimeJavaType w => GetField<float>(null, offset),
+                     Array array => global::java.lang.Float.intBitsToFloat(ReadInt32(array, offset)),
+                     _ => GetField<float>(o, offset)
+@@ -691,7 +709,7 @@ public static void putFloat(object self, object o, long offset, float x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteInt32((IntPtr)offset, global::java.lang.Float.floatToRawIntBits(x));
++                        putFloat(self, offset, x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -727,7 +745,7 @@ public static double getDouble(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => global::java.lang.Double.longBitsToDouble(Marshal.ReadInt64((IntPtr)offset)),
++                    null => getDouble(self, offset),
+                     RuntimeJavaType w => GetField<double>(null, offset),
+                     Array array => global::java.lang.Double.longBitsToDouble(ReadInt64(array, offset)),
+                     _ => GetField<double>(o, offset)
+@@ -757,7 +775,7 @@ public static void putDouble(object self, object o, long offset, double x)
+                 switch (o)
+                 {
+                     case null:
+-                        Marshal.WriteInt64((IntPtr)offset, global::java.lang.Double.doubleToRawLongBits(x));
++                        putDouble(self, offset, x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutField(w, offset, x);
+@@ -790,7 +808,7 @@ public static byte getByte(object self, long address)
+ #else
+             try
+             {
+-                return Marshal.ReadByte((IntPtr)address);
++                return Marshal.ReadByte(JLongAddressToIntPtr(address));
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -812,7 +830,7 @@ public static void putByte(object self, long address, byte x)
+ #else
+             try
+             {
+-                Marshal.WriteByte((IntPtr)address, x);
++                Marshal.WriteByte(JLongAddressToIntPtr(address), x);
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -834,7 +852,7 @@ public static short getShort(object self, long address)
+ #else
+             try
+             {
+-                return Marshal.ReadInt16((IntPtr)address);
++                return Marshal.ReadInt16(JLongAddressToIntPtr(address));
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -856,7 +874,7 @@ public static void putShort(object self, long address, short x)
+ #else
+             try
+             {
+-                Marshal.WriteInt16((IntPtr)address, x);
++                Marshal.WriteInt16(JLongAddressToIntPtr(address), x);
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -878,7 +896,7 @@ public static char getChar(object self, long address)
+ #else
+             try
+             {
+-                return (char)Marshal.ReadInt16((IntPtr)address);
++                return (char)Marshal.ReadInt16(JLongAddressToIntPtr(address));
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -900,7 +918,7 @@ public static void putChar(object self, long address, char x)
+ #else
+             try
+             {
+-                Marshal.WriteInt16((IntPtr)address, (short)x);
++                Marshal.WriteInt16(JLongAddressToIntPtr(address), (short)x);
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -922,7 +940,7 @@ public static int getInt(object self, long address)
+ #else
+             try
+             {
+-                return Marshal.ReadInt32((IntPtr)address);
++                return Marshal.ReadInt32(JLongAddressToIntPtr(address));
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -944,7 +962,7 @@ public static void putInt(object self, long address, int x)
+ #else
+             try
+             {
+-                Marshal.WriteInt32((IntPtr)address, x);
++                Marshal.WriteInt32(JLongAddressToIntPtr(address), x);
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -966,7 +984,7 @@ public static long getLong(object self, long address)
+ #else
+             try
+             {
+-                return Marshal.ReadInt64((IntPtr)address);
++                return Marshal.ReadInt64(JLongAddressToIntPtr(address));
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -988,7 +1006,7 @@ public static void putLong(object self, long address, long x)
+ #else
+             try
+             {
+-                Marshal.WriteInt64((IntPtr)address, x);
++                Marshal.WriteInt64(JLongAddressToIntPtr(address), x);
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -1084,7 +1102,7 @@ public static long getAddress(object self, long address)
+ #else
+             try
+             {
+-                return Marshal.ReadIntPtr((IntPtr)address).ToInt64();
++                return IntPtrToJLongAddress(Marshal.ReadIntPtr(JLongAddressToIntPtr(address)));
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -1106,7 +1124,7 @@ public static void putAddress(object self, long address, long x)
+ #else
+             try
+             {
+-                Marshal.WriteIntPtr((IntPtr)address, (IntPtr)x);
++                Marshal.WriteIntPtr(JLongAddressToIntPtr(address), JLongAddressToIntPtr(x));
+             }
+             catch (Exception e) when (e is not global::java.lang.Throwable)
+             {
+@@ -1136,7 +1154,7 @@ public static unsafe long allocateMemory(object self, long bytes)
+                 var ptr = Marshal.AllocHGlobal(len);
+                 Marshal.WriteIntPtr(ptr, len);
+                 System.GC.AddMemoryPressure((long)len);
+-                return (long)ptr + sizeof(IntPtr);
++                return IntPtrToJLongAddress(IntPtr.Add(ptr, IntPtr.Size));
+             }
+             catch (OutOfMemoryException e)
+             {
+@@ -1171,7 +1189,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+                 }
+ 
+                 // remove memory pressure
+-                var ptr = (IntPtr)address - sizeof(IntPtr);
++                var ptr = IntPtr.Subtract(JLongAddressToIntPtr(address), IntPtr.Size);
+                 var len = Marshal.ReadIntPtr(ptr);
+                 System.GC.RemoveMemoryPressure((long)len);
+ 
+@@ -1180,7 +1198,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+                 ptr = Marshal.ReAllocHGlobal(ptr, len);
+                 Marshal.WriteIntPtr(ptr, len);
+                 System.GC.AddMemoryPressure((long)len);
+-                return (long)ptr + sizeof(IntPtr);
++                return IntPtrToJLongAddress(IntPtr.Add(ptr, IntPtr.Size));
+             }
+             catch (OutOfMemoryException e)
+             {
+@@ -1210,7 +1228,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
+             try
+             {
+                 if (o == null)
+-                    new Span<byte>((void*)(IntPtr)offset, (int)bytes).Fill(value);
++                    new Span<byte>((void*)JLongAddressToIntPtr(offset), (int)bytes).Fill(value);
+                 else if (o is byte[] array)
+                     ((Span<byte>)array).Slice((int)offset, (int)bytes).Fill(value);
+                 else if (o is Array array2)
+@@ -1259,7 +1277,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+                 {
+                     if (destBase is byte[] byteArray)
+                     {
+-                        Marshal.Copy((IntPtr)srcOffset, byteArray, (int)destOffset, (int)bytes);
++                        Marshal.Copy(JLongAddressToIntPtr(srcOffset), byteArray, (int)destOffset, (int)bytes);
+                     }
+                     else if (destBase is bool[])
+                     {
+@@ -1269,31 +1287,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+                     }
+                     else if (destBase is short[] shortArray)
+                     {
+-                        Marshal.Copy((IntPtr)srcOffset, shortArray, (int)(destOffset >> 1), (int)(bytes >> 1));
++                        Marshal.Copy(JLongAddressToIntPtr(srcOffset), shortArray, (int)(destOffset >> 1), (int)(bytes >> 1));
+                     }
+                     else if (destBase is char[] charArray)
+                     {
+-                        Marshal.Copy((IntPtr)srcOffset, charArray, (int)(destOffset >> 1), (int)(bytes >> 1));
++                        Marshal.Copy(JLongAddressToIntPtr(srcOffset), charArray, (int)(destOffset >> 1), (int)(bytes >> 1));
+                     }
+                     else if (destBase is int[] intArray)
+                     {
+-                        Marshal.Copy((IntPtr)srcOffset, intArray, (int)(destOffset >> 2), (int)(bytes >> 2));
++                        Marshal.Copy(JLongAddressToIntPtr(srcOffset), intArray, (int)(destOffset >> 2), (int)(bytes >> 2));
+                     }
+                     else if (destBase is float[] floatArray)
+                     {
+-                        Marshal.Copy((IntPtr)srcOffset, floatArray, (int)(destOffset >> 2), (int)(bytes >> 2));
++                        Marshal.Copy(JLongAddressToIntPtr(srcOffset), floatArray, (int)(destOffset >> 2), (int)(bytes >> 2));
+                     }
+                     else if (destBase is long[] longArray)
+                     {
+-                        Marshal.Copy((IntPtr)srcOffset, longArray, (int)(destOffset >> 3), (int)(bytes >> 3));
++                        Marshal.Copy(JLongAddressToIntPtr(srcOffset), longArray, (int)(destOffset >> 3), (int)(bytes >> 3));
+                     }
+                     else if (destBase is double[] doubleArray)
+                     {
+-                        Marshal.Copy((IntPtr)srcOffset, doubleArray, (int)(destOffset >> 3), (int)(bytes >> 3));
++                        Marshal.Copy(JLongAddressToIntPtr(srcOffset), doubleArray, (int)(destOffset >> 3), (int)(bytes >> 3));
+                     }
+                     else if (destBase == null)
+                     {
+-                        Buffer.MemoryCopy((void*)(IntPtr)srcOffset, (void*)(IntPtr)destOffset, long.MaxValue, bytes);
++                        Buffer.MemoryCopy((void*)JLongAddressToIntPtr(srcOffset), (void*)JLongAddressToIntPtr(destOffset), long.MaxValue, bytes);
+                     }
+                     else
+                     {
+@@ -1308,7 +1326,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+                 {
+                     if (srcBase is byte[] byteArray)
+                     {
+-                        Marshal.Copy(byteArray, (int)srcOffset, (IntPtr)destOffset, (int)bytes);
++                        Marshal.Copy(byteArray, (int)srcOffset, JLongAddressToIntPtr(destOffset), (int)bytes);
+                     }
+                     else if (srcBase is bool[])
+                     {
+@@ -1318,27 +1336,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+                     }
+                     else if (srcBase is short[] shortArray)
+                     {
+-                        Marshal.Copy(shortArray, (int)(srcOffset >> 1), (IntPtr)(destOffset), (int)(bytes >> 1));
++                        Marshal.Copy(shortArray, (int)(srcOffset >> 1), JLongAddressToIntPtr(destOffset), (int)(bytes >> 1));
+                     }
+                     else if (srcBase is char[] charArray)
+                     {
+-                        Marshal.Copy(charArray, (int)(srcOffset >> 1), (IntPtr)(destOffset), (int)(bytes >> 1));
++                        Marshal.Copy(charArray, (int)(srcOffset >> 1), JLongAddressToIntPtr(destOffset), (int)(bytes >> 1));
+                     }
+                     else if (srcBase is int[] intArray)
+                     {
+-                        Marshal.Copy(intArray, (int)(srcOffset >> 2), (IntPtr)(destOffset), (int)(bytes >> 2));
++                        Marshal.Copy(intArray, (int)(srcOffset >> 2), JLongAddressToIntPtr(destOffset), (int)(bytes >> 2));
+                     }
+                     else if (srcBase is float[] floatArray)
+                     {
+-                        Marshal.Copy(floatArray, (int)(srcOffset >> 2), (IntPtr)(destOffset), (int)(bytes >> 2));
++                        Marshal.Copy(floatArray, (int)(srcOffset >> 2), JLongAddressToIntPtr(destOffset), (int)(bytes >> 2));
+                     }
+                     else if (srcBase is long[] longArray)
+                     {
+-                        Marshal.Copy(longArray, (int)(srcOffset >> 3), (IntPtr)(destOffset), (int)(bytes >> 3));
++                        Marshal.Copy(longArray, (int)(srcOffset >> 3), JLongAddressToIntPtr(destOffset), (int)(bytes >> 3));
+                     }
+                     else if (srcBase is double[] doubleArray)
+                     {
+-                        Marshal.Copy(doubleArray, (int)(srcOffset >> 3), (IntPtr)(destOffset), (int)(bytes >> 3));
++                        Marshal.Copy(doubleArray, (int)(srcOffset >> 3), JLongAddressToIntPtr(destOffset), (int)(bytes >> 3));
+                     }
+                     else
+                     {
+@@ -1360,11 +1378,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+         /// <param name="address"></param>
+         public static unsafe void freeMemory(object self, long address)
+         {
+-            var adr = (nint)address;
+-            if (adr == 0)
++            var adr = JLongAddressToIntPtr(address);
++            if (adr == IntPtr.Zero)
+                 return;
+ 
+-            var ptr = adr - sizeof(nint);
++            var ptr = IntPtr.Subtract(adr, IntPtr.Size);
+             var len = Marshal.ReadIntPtr(ptr);
+             Marshal.FreeHGlobal(ptr);
+             System.GC.RemoveMemoryPressure((long)len);
+@@ -1904,7 +1922,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Volatile.Read(ref System.Runtime.CompilerServices.Unsafe.AsRef<int>((void*)(IntPtr)offset)),
++                    null => Volatile.Read(ref System.Runtime.CompilerServices.Unsafe.AsRef<int>((void*)JLongAddressToIntPtr(offset))),
+                     RuntimeJavaType w => GetFieldVolatile<int>(null, offset),
+                     Array array => ReadInt32Volatile(array, offset),
+                     _ => GetFieldVolatile<int>(o, offset)
+@@ -1934,7 +1952,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<int>((void*)(IntPtr)offset), x);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<int>((void*)JLongAddressToIntPtr(offset)), x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -1970,7 +1988,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Volatile.Read(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)(IntPtr)offset)) != 0,
++                    null => Volatile.Read(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)JLongAddressToIntPtr(offset))) != 0,
+                     RuntimeJavaType w => GetFieldVolatile<bool>(null, offset),
+                     Array array => ReadByteVolatile(array, offset) != 0,
+                     _ => GetFieldVolatile<bool>(o, offset)
+@@ -2000,7 +2018,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)(IntPtr)offset), x ? (byte)1 : (byte)0);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)JLongAddressToIntPtr(offset)), x ? (byte)1 : (byte)0);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -2036,7 +2054,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
+             {
+                 return o switch
+                 {
+-                    null => Volatile.Read(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)(IntPtr)offset)),
++                    null => Volatile.Read(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)JLongAddressToIntPtr(offset))),
+                     RuntimeJavaType w => GetFieldVolatile<byte>(null, offset),
+                     Array array => ReadByteVolatile(array, offset),
+                     _ => GetFieldVolatile<byte>(o, offset)
+@@ -2066,7 +2084,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)(IntPtr)offset), x);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((void*)JLongAddressToIntPtr(offset)), x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -2130,7 +2148,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<short>((void*)(IntPtr)offset), x);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<short>((void*)JLongAddressToIntPtr(offset)), x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -2194,7 +2212,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<short>((void*)(IntPtr)offset), (short)x);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<short>((void*)JLongAddressToIntPtr(offset)), (short)x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -2258,7 +2276,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<long>((void*)(IntPtr)offset), x);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<long>((void*)JLongAddressToIntPtr(offset)), x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -2323,7 +2341,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<float>((void*)(IntPtr)offset), x);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<float>((void*)JLongAddressToIntPtr(offset)), x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -2388,7 +2406,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
+                 switch (o)
+                 {
+                     case null:
+-                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<double>((void*)(IntPtr)offset), x);
++                        Volatile.Write(ref System.Runtime.CompilerServices.Unsafe.AsRef<double>((void*)JLongAddressToIntPtr(offset)), x);
+                         break;
+                     case RuntimeJavaType w:
+                         PutFieldVolatile(w, offset, x);
+@@ -3351,4 +3369,4 @@ static void InterlockedWrite(ref double location, double value)
+ 
+     }
+ 
+-}
+\ No newline at end of file
++}
 diff --git a/src/IKVM.Runtime/LibJVM.cs b/src/IKVM.Runtime/LibJVM.cs
 index 2fa4d5bcd..db0a84758 100644
 --- a/src/IKVM.Runtime/LibJVM.cs
@@ -2322,10 +2944,10 @@ index d216f2238..e8578ed6f 100644
  }
 diff --git a/src/libjvm/jvm_emscripten_dynlib.c b/src/libjvm/jvm_emscripten_dynlib.c
 new file mode 100644
-index 000000000..cee6b07b8
+index 000000000..ce9f6d363
 --- /dev/null
 +++ b/src/libjvm/jvm_emscripten_dynlib.c
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,114 @@
 +/*
 + * jvm_emscripten_dynlib.c
 + *
@@ -2409,6 +3031,7 @@ index 000000000..cee6b07b8
 +                 "%s: not found in Emscripten static library registry"
 +                 " (add it to the gen-static-libs.py input list)",
 +                 name);
++		printf("%s\n", msg);
 +        JVM_ThrowException("java/lang/UnsatisfiedLinkError", msg);
 +    }
 +    return NULL;

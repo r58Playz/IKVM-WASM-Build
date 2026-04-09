@@ -15,8 +15,182 @@ index 2d9df93..d06fd66 100644
  
  if(CMAKE_CURRENT_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
    ### create archive/emscripten-glfw3-${emscripten-glfw_VERSION}.zip for the port
+diff --git a/include/GLFW/emscripten_glfw3.h b/include/GLFW/emscripten_glfw3.h
+index 12a17bc..8da763b 100644
+--- a/include/GLFW/emscripten_glfw3.h
++++ b/include/GLFW/emscripten_glfw3.h
+@@ -307,6 +307,14 @@ void emscripten_glfw_open_url(char const *url, char const *target);
+  * @return `true` if running on an Apple platform only */
+ EM_BOOL emscripten_glfw_is_runtime_platform_apple();
+ 
++/**
++ * Returns the MobileGlues-backed OpenGL procedure for the given symbol.
++ *
++ * This mirrors `glfwGetProcAddress`, but uses a distinct symbol so it can coexist
++ * with Emscripten's built-in proc-address shim.
++ */
++GLFWglproc emscripten_glfw3_get_proc_address(char const *procname);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/cpp/emscripten/glfw3/Config.h b/src/cpp/emscripten/glfw3/Config.h
+index c539cdc..7e04f64 100644
+--- a/src/cpp/emscripten/glfw3/Config.h
++++ b/src/cpp/emscripten/glfw3/Config.h
+@@ -35,7 +35,7 @@ constexpr inline char const *boolToString(bool b) { return b ? "true" : "false";
+ struct Config
+ {
+   // For backward compatibility with emscripten, defaults to getting the canvas from Module
+-  static constexpr char const *kDefaultCanvasSelector = "Module['canvas']";
++  static constexpr char const *kDefaultCanvasSelector = "#canvas";
+ 
+   // GL Context
+   int fClientAPI{GLFW_OPENGL_API}; // GLFW_CLIENT_API
+diff --git a/src/cpp/emscripten/glfw3/Context.cpp b/src/cpp/emscripten/glfw3/Context.cpp
+index afb6ea7..028e8e0 100644
+--- a/src/cpp/emscripten/glfw3/Context.cpp
++++ b/src/cpp/emscripten/glfw3/Context.cpp
+@@ -130,6 +130,10 @@ Context::Context()
+                                 ContextClipboardStringCallback,
+                                 emscripten_glfw_request_fullscreen,
+                                 ContextErrorHandler);
++
++  // Initialize video modes for the monitor
++  initializeVideoModes();
++
+   addOrRemoveEventListeners(true);
+ }
+ 
+@@ -1043,7 +1047,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
+ }
+ 
+ //------------------------------------------------------------------------
+-// Context::getMonitorContentScale
++// Context::getMonitor (for window)
+ //------------------------------------------------------------------------
+ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
+ {
+@@ -1054,6 +1058,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
+     return nullptr;
+ }
+ 
++//------------------------------------------------------------------------
++// Context::getVideoModes
++//------------------------------------------------------------------------
++const GLFWvidmode* Context::getVideoModes(GLFWmonitor* iMonitor, int* oCount)
++{
++  auto monitor = getMonitor(iMonitor);
++  if(monitor)
++  {
++    auto modes = monitor->getVideoModes();
++    *oCount = monitor->getVideoModeCount();
++    return monitor->getVideoModesPtr();
++  }
++  *oCount = 0;
++  return nullptr;
++}
++
++//------------------------------------------------------------------------
++// Context::getVideoMode
++//------------------------------------------------------------------------
++const GLFWvidmode* Context::getVideoMode(GLFWmonitor* iMonitor)
++{
++  auto monitor = getMonitor(iMonitor);
++  if(monitor && monitor->getVideoModeCount() > 0)
++  {
++    return &monitor->getVideoModes()[0];
++  }
++  return nullptr;
++}
++
++//------------------------------------------------------------------------
++// Context::initializeVideoModes
++//------------------------------------------------------------------------
++void Context::initializeVideoModes()
++{
++  int width, height;
++  emscripten_get_screen_size(&width, &height);
++
++  // Create a single video mode with screen dimensions
++  // 1 byte (8 bits) for each RGBA channel
++  // 60Hz refresh rate
++  GLFWvidmode mode{
++    .width = width,
++    .height = height,
++    .redBits = 8,
++    .greenBits = 8,
++    .blueBits = 8,
++    .refreshRate = 60
++  };
++
++  fCurrentMonitor->addVideoMode(mode);
++}
++
+ //------------------------------------------------------------------------
+ // Context::createStandardCursor
+ //------------------------------------------------------------------------
+@@ -1256,4 +1312,4 @@ bool Context::isRuntimePlatformApple() const
+   return emscripten_glfw3_context_is_runtime_platform_apple();
+ }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/cpp/emscripten/glfw3/Context.h b/src/cpp/emscripten/glfw3/Context.h
+index f7ecca2..8121ca2 100644
+--- a/src/cpp/emscripten/glfw3/Context.h
++++ b/src/cpp/emscripten/glfw3/Context.h
+@@ -76,6 +76,10 @@ public:
+   GLFWmonitorfun setMonitorCallback(GLFWmonitorfun iCallback) { return std::exchange(fMonitorCallback, iCallback); }
+   GLFWmonitor *getMonitor(GLFWwindow *iWindow) const;
+ 
++  // video modes
++  const GLFWvidmode* getVideoModes(GLFWmonitor* iMonitor, int* oCount);
++  const GLFWvidmode* getVideoMode(GLFWmonitor* iMonitor);
++
+   // cursor
+   GLFWcursor *createStandardCursor(int iShape);
+   GLFWcursor* createCursor(GLFWimage const *iImage, int iXHot, int iYHot);
+@@ -138,6 +142,7 @@ private:
+   bool onPointerUnlock();
+   std::shared_ptr<Window> findFocusedOrSingleWindow() const;
+   void computeWindowPos();
++  void initializeVideoModes();
+ 
+   // touch
+   constexpr bool isTrackingTouch() const { return fTouchPointId.has_value(); }
+diff --git a/src/cpp/emscripten/glfw3/Monitor.h b/src/cpp/emscripten/glfw3/Monitor.h
+index 3b88ced..b4826a5 100644
+--- a/src/cpp/emscripten/glfw3/Monitor.h
++++ b/src/cpp/emscripten/glfw3/Monitor.h
+@@ -21,6 +21,7 @@
+ 
+ #include <GLFW/glfw3.h>
+ #include "Object.h"
++#include <vector>
+ 
+ namespace emscripten::glfw3 {
+ 
+@@ -32,8 +33,16 @@ public:
+   inline void setUserPointer(void *iPointer) { fUserPointer = iPointer; }
+   char const *getName() const { return "Browser"; }
+ 
++  // video modes
++  inline const std::vector<GLFWvidmode>& getVideoModes() const { return fVideoModes; }
++  inline const GLFWvidmode* getVideoModesPtr() const { return fVideoModes.data(); }
++  inline int getVideoModeCount() const { return static_cast<int>(fVideoModes.size()); }
++  inline void setVideoModes(const std::vector<GLFWvidmode>& modes) { fVideoModes = modes; }
++  inline void addVideoMode(const GLFWvidmode& mode) { fVideoModes.push_back(mode); }
++
+ private:
+   void *fUserPointer{};
++  std::vector<GLFWvidmode> fVideoModes{};
+ };
+ 
+ }
 diff --git a/src/cpp/emscripten/glfw3/Window.cpp b/src/cpp/emscripten/glfw3/Window.cpp
-index cfa866b..545c8ae 100644
+index cfa866b..c164f3c 100644
 --- a/src/cpp/emscripten/glfw3/Window.cpp
 +++ b/src/cpp/emscripten/glfw3/Window.cpp
 @@ -41,6 +41,12 @@ int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
@@ -59,3 +233,103 @@ index cfa866b..545c8ae 100644
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot make GL context current for [%s]", getCanvasSelector());
    }
  }
+diff --git a/src/cpp/glfw3.cpp b/src/cpp/glfw3.cpp
+index 8475a25..c1b30ca 100644
+--- a/src/cpp/glfw3.cpp
++++ b/src/cpp/glfw3.cpp
+@@ -19,6 +19,7 @@
+ #include "../../include/GLFW/emscripten_glfw3.h"
+ #include "../../include/GLFW/emscripten_glfw3_version.h"
+ #include "emscripten/glfw3/Context.h"
++#include <emscripten/html5_webgl.h>
+ #include <memory>
+ #include "emscripten/glfw3/ErrorHandler.h"
+ #include "emscripten/glfw3/Keyboard.h"
+@@ -117,6 +118,8 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
+ extern "C" {
+ #endif
+ 
++void* mobileglues_get_proc_address(const char* name);
++
+ //------------------------------------------------------------------------
+ // glfwInit
+ //------------------------------------------------------------------------
+@@ -1310,11 +1313,21 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
+ //------------------------------------------------------------------------
+ GLFWAPI const GLFWvidmode* glfwGetVideoModes(GLFWmonitor* monitor, int* count)
+ {
+-  logNotImplemented("glfwGetVideoModes");
++  auto context = getContext();
++  if(context)
++    return context->getVideoModes(monitor, count);
++
+   *count = 0;
+   return nullptr;
+ }
+-GLFWAPI const GLFWvidmode* glfwGetVideoMode(GLFWmonitor* monitor) { return nullptr; }
++GLFWAPI const GLFWvidmode* glfwGetVideoMode(GLFWmonitor* monitor)
++{
++  auto context = getContext();
++  if(context)
++    return context->getVideoMode(monitor);
++
++  return nullptr;
++}
+ GLFWAPI GLFWcharmodsfun glfwSetCharModsCallback(GLFWwindow* window, GLFWcharmodsfun callback)
+ {
+   ErrorHandler::instance().logWarning("glfwSetCharModsCallback is deprecated.");
+@@ -1336,7 +1349,46 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
+ GLFWAPI GLFWwindowiconifyfun glfwSetWindowIconifyCallback(GLFWwindow* window, GLFWwindowiconifyfun callback) { logNotImplemented("glfwSetWindowIconifyCallback"); return callback; }
+ GLFWAPI GLFWwindowmaximizefun glfwSetWindowMaximizeCallback(GLFWwindow* window, GLFWwindowmaximizefun callback) { logNotImplemented("glfwSetWindowMaximizeCallback"); return callback; }
+ GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* window, GLFWdropfun callback) { logNotImplemented("glfwSetDropCallback"); return callback; }
+-GLFWAPI void glfwSwapBuffers(GLFWwindow* window) { logNotImplemented("glfwSwapBuffers"); }
++GLFWAPI void glfwSwapBuffers(GLFWwindow* window)
++{
++  auto w = getWindow(window);
++  if(!w)
++    return;
++
++  if(!w->hasGLContext())
++  {
++    ErrorHandler::instance().logError(GLFW_NO_WINDOW_CONTEXT,
++                                      "Cannot swap buffers for a window without an OpenGL or OpenGL ES context");
++    return;
++  }
++
++  auto context = getContext();
++  if(!context)
++    return;
++
++  if(context->getCurrentContext() != window)
++  {
++    ErrorHandler::instance().logError(GLFW_NO_CURRENT_CONTEXT,
++                                      "Cannot swap buffers without a current OpenGL or OpenGL ES context");
++    return;
++  }
++
++  glFlush();
++
++  auto const result = emscripten_webgl_commit_frame();
++  if(result != EMSCRIPTEN_RESULT_SUCCESS &&
++     result != EMSCRIPTEN_RESULT_DEFERRED &&
++     result != EMSCRIPTEN_RESULT_INVALID_TARGET)
++  {
++    ErrorHandler::instance().logError(GLFW_PLATFORM_ERROR, "Failed to commit WebGL frame [%d]", result);
++  }
++}
++
++GLFWAPI GLFWglproc emscripten_glfw3_get_proc_address(const char* procname)
++{
++  return reinterpret_cast<GLFWglproc>(mobileglues_get_proc_address(procname));
++}
++
+ // GLFWAPI GLFWglproc glfwGetProcAddress(const char* procname) { logNotImplemented("glfwGetProcAddress"); } implemented by emscripten GL
+ GLFWAPI int glfwVulkanSupported(void) { return GLFW_FALSE; }
+ GLFWAPI const char** glfwGetRequiredInstanceExtensions(uint32_t* count) { logNotImplemented("glfwGetRequiredInstanceExtensions"); *count = 0; return nullptr; }
+@@ -1509,4 +1561,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
+   };
+ }
+ 
+-}
+\ No newline at end of file
++}
