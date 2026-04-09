@@ -171,6 +171,73 @@ detect_java_home() {
     return 1
 }
 
+parse_java_major() {
+    local version="$1"
+
+    case "$version" in
+        1.*)
+            printf '%s' "${version#1.}" | cut -d. -f1
+            ;;
+        *)
+            printf '%s' "$version" | cut -d. -f1
+            ;;
+    esac
+}
+
+detect_java8_home() {
+    local -a candidates=()
+    local javac_path
+    local guessed_home
+    local candidate
+    local javac_version
+    local major
+    local -A seen=()
+
+    if [ -n "${JAVA8_HOME:-}" ]; then
+        candidates+=("$JAVA8_HOME")
+    fi
+
+    if [ -n "${JAVA_HOME:-}" ]; then
+        candidates+=("$JAVA_HOME")
+    fi
+
+    if command -v javac >/dev/null 2>&1; then
+        javac_path="$(readlink -f "$(command -v javac)")"
+        guessed_home="$(dirname "$(dirname "$javac_path")")"
+        candidates+=("$guessed_home")
+    fi
+
+    for candidate in /usr/lib/jvm/*; do
+        [ -d "$candidate" ] || continue
+        candidates+=("$candidate")
+    done
+
+    for candidate in "${candidates[@]}"; do
+        [ -n "$candidate" ] || continue
+        candidate="$(readlink -f "$candidate" 2>/dev/null || printf '%s' "$candidate")"
+        [ -d "$candidate" ] || continue
+
+        if [ -n "${seen[$candidate]:-}" ]; then
+            continue
+        fi
+        seen["$candidate"]=1
+
+        if [ ! -x "$candidate/bin/javac" ] || [ ! -f "$candidate/include/jni.h" ] || [ ! -f "$candidate/jre/lib/rt.jar" ]; then
+            continue
+        fi
+
+        javac_version="$("$candidate/bin/javac" -version 2>&1 | awk '{print $2}')"
+        major="$(parse_java_major "$javac_version")"
+
+        if [ "$major" = "8" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 require_cmd git
 require_cmd emcc
 require_cmd emar
@@ -188,6 +255,12 @@ fi
 JAVA_HOME_DETECTED="$(detect_java_home || true)"
 if [ -z "$JAVA_HOME_DETECTED" ]; then
     echo "ERROR: unable to find a JDK with JNI headers. Set JAVA_HOME to a JDK path." >&2
+    exit 1
+fi
+
+JAVA8_HOME_DETECTED="$(detect_java8_home || true)"
+if [ -z "$JAVA8_HOME_DETECTED" ]; then
+    echo "ERROR: unable to find a JDK 8 installation with rt.jar. Set JAVA8_HOME to a JDK 8 path." >&2
     exit 1
 fi
 
@@ -246,8 +319,8 @@ build_binding_args "glfw,egl,opengl,opengles,stb,vulkan" TEMPLATE_BINDING_ARGS
 build_binding_args "glfw,egl,opengl,stb" COMPILE_BINDING_ARGS
 
 log "Compiling lwjgl3 Java classes with Ant"
-(cd "$LWJGL_SRC_DIR" && "$ANT_CMD" "${TEMPLATE_BINDING_ARGS[@]}" compile-templates)
-(cd "$LWJGL_SRC_DIR" && "$ANT_CMD" "${COMPILE_BINDING_ARGS[@]}" compile)
+(cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${TEMPLATE_BINDING_ARGS[@]}" compile-templates)
+(cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${COMPILE_BINDING_ARGS[@]}" compile)
 
 CORE_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/core"
 GLFW_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/glfw"
