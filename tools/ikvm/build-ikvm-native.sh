@@ -37,6 +37,13 @@ esac
 
 log() { echo "[build-ikvm-native/$VARIANT] $*"; }
 
+create_archive() {
+	local archive="$1"
+	shift
+	rm -f "$archive"
+	emar rcs "$archive" "$@"
+}
+
 LIBJVM_SRC="$IKVM_SRC/src/libjvm"
 LIBIKVM_SRC="$IKVM_SRC/src/libikvm"
 OPENJDK_DIR="$IKVM_SRC/ext/openjdk"
@@ -74,14 +81,14 @@ emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni.c"      -o "
 emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm_emscripten_dynlib.c"      -o "$TMP_DIR/jvm_emscripten_dynlib.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
 emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni_vargs.c" -o "$TMP_DIR/jni_vargs.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
 em++  -O2 -fPIC -std=c++11 -Wno-error -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm.cpp" -o "$TMP_DIR/jvm.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-emar rcs "$OUT_DIR/native/${PREFIX}libjvm.a" "$TMP_DIR/jni.o" "$TMP_DIR/jni_vargs.o" "$TMP_DIR/jvm.o" "$TMP_DIR/jvm_emscripten_dynlib.o"
+create_archive "$OUT_DIR/native/${PREFIX}libjvm.a" "$TMP_DIR/jni.o" "$TMP_DIR/jni_vargs.o" "$TMP_DIR/jvm.o" "$TMP_DIR/jvm_emscripten_dynlib.o"
 
 # ── libikvm ───────────────────────────────────────────────────────────────────
 
 log "Building ${PREFIX}libikvm ..."
 emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c"  -o "$TMP_DIR/dl.o"
 emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o "$TMP_DIR/sig.o"
-emar rcs "$OUT_DIR/native/${PREFIX}libikvm.a" "$TMP_DIR/dl.o" "$TMP_DIR/sig.o"
+create_archive "$OUT_DIR/native/${PREFIX}libikvm.a" "$TMP_DIR/dl.o" "$TMP_DIR/sig.o"
 
 # ── libiava ───────────────────────────────────────────────────────────────────
 # Source directories (linux uses solaris as the OS API dir per OpenJDK 8 convention)
@@ -151,7 +158,7 @@ for dir in "${LIBIAVA_SRCDIRS[@]}"; do
         fi
     done
 done
-emar rcs "$OUT_DIR/native/${PREFIX}libiava.a" "${LIBIAVA_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libiava.a" "${LIBIAVA_OBJS[@]}"
 
 # ── Shared defines/includes for remaining OpenJDK-derived native libraries ───
 # These mirror the defines from openjdk.lib.props + lib.props for a linux-x64 target.
@@ -193,7 +200,7 @@ for src in "$JPEG_SRC"/*.c; do
         -c "$src" -o "$obj"
     LIBJPEG_OBJS+=("$obj")
 done
-emar rcs "$OUT_DIR/native/${PREFIX}libjpeg.a" "${LIBJPEG_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libjpeg.a" "${LIBJPEG_OBJS[@]}"
 
 # ── libsunec ──────────────────────────────────────────────────────────────────
 
@@ -231,7 +238,7 @@ emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     -c "$IKVM_SRC/src/libsunec/jni_onload.c" -o "$TMP_DIR/libsunec/jni_onload.o"
 LIBSUNEC_OBJS+=("$TMP_DIR/libsunec/jni_onload.o")
 
-emar rcs "$OUT_DIR/native/${PREFIX}libsunec.a" "${LIBSUNEC_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libsunec.a" "${LIBSUNEC_OBJS[@]}"
 
 # ── libunpack ─────────────────────────────────────────────────────────────────
 
@@ -270,7 +277,7 @@ emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     -c "$IKVM_SRC/src/libunpack/jni_onload.c" -o "$TMP_DIR/libunpack/jni_onload.o"
 LIBUNPACK_OBJS+=("$TMP_DIR/libunpack/jni_onload.o")
 
-emar rcs "$OUT_DIR/native/${PREFIX}libunpack.a" "${LIBUNPACK_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libunpack.a" "${LIBUNPACK_OBJS[@]}"
 
 # ── libzip ────────────────────────────────────────────────────────────────────
 
@@ -310,7 +317,7 @@ for src in "$ZIP_SRC/zlib"/*.c; do
     LIBZIP_OBJS+=("$obj")
 done
 
-emar rcs "$OUT_DIR/native/${PREFIX}libzip.a" "${LIBZIP_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libzip.a" "${LIBZIP_OBJS[@]}"
 
 # ── libmanagement ─────────────────────────────────────────────────────────────
 # Sources: local *.c glob (management.c + jni_onload.c) plus linux-specific
@@ -356,7 +363,7 @@ for src in \
     LIBMGMT_OBJS+=("$obj")
 done
 
-emar rcs "$OUT_DIR/native/${PREFIX}libmanagement.a" "${LIBMGMT_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libmanagement.a" "${LIBMGMT_OBJS[@]}"
 
 # ── libnio ────────────────────────────────────────────────────────────────────
 # JoinPathsAndFiles cross-product: (solaris/java/nio, solaris/sun/nio/ch,
@@ -435,7 +442,7 @@ if [ "$VARIANT" = "st" ]; then
     LIBNIO_OBJS+=("$TMP_DIR/libnio/pthread_stubs.o")
 fi
 
-emar rcs "$OUT_DIR/native/${PREFIX}libnio.a" "${LIBNIO_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libnio.a" "${LIBNIO_OBJS[@]}"
 
 # ── libnet ────────────────────────────────────────────────────────────────────
 
@@ -503,7 +510,7 @@ else
     LIBNET_OBJS+=("$obj")
 fi
 
-emar rcs "$OUT_DIR/native/${PREFIX}libnet.a" "${LIBNET_OBJS[@]}"
+create_archive "$OUT_DIR/native/${PREFIX}libnet.a" "${LIBNET_OBJS[@]}"
 
 log "Done! Artifacts written to $OUT_DIR/native/"
 ls -lh "$OUT_DIR/native/${PREFIX}"*.a

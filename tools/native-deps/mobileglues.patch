@@ -217,14 +217,20 @@ index aa685aa..782fcdc 100644
 +    eglTerminate(eglDisplay);
 +}
 diff --git a/MobileGlues-cpp/gl/buffer.cpp b/MobileGlues-cpp/gl/buffer.cpp
-index b2c551a..9733e25 100644
+index b2c551a..9846b86 100644
 --- a/MobileGlues-cpp/gl/buffer.cpp
 +++ b/MobileGlues-cpp/gl/buffer.cpp
-@@ -739,13 +739,16 @@ void* glMapBuffer(GLenum target, GLenum access) {
+@@ -739,13 +739,22 @@ void* glMapBuffer(GLenum target, GLenum access) {
  #if !defined(__APPLE__)
  extern "C"
  {
 -    GLAPI GLAPIENTRY void* glMapBufferARB(GLenum target, GLenum access) __attribute__((alias("glMapBuffer")));
++    GLAPI GLAPIENTRY void glDeleteBuffersARB(GLsizei n, const GLuint* buffers)
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glDeleteBuffers))));
++    GLAPI GLAPIENTRY void glGenBuffersARB(GLsizei n, GLuint* buffers)
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glGenBuffers))));
++    GLAPI GLAPIENTRY GLboolean glIsBufferARB(GLuint buffer)
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glIsBuffer))));
 +    GLAPI GLAPIENTRY void* glMapBufferARB(GLenum target, GLenum access)
 +        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glMapBuffer))));
      GLAPI GLAPIENTRY void glBufferDataARB(GLenum target, GLsizeiptr size, const void* data, GLenum usage)
@@ -294,6 +300,55 @@ index 935d969..816319f 100644
  STUB_FUNCTION_HEAD(void, glGetActiveUniformName, GLuint program, GLuint uniformIndex, GLsizei bufSize, GLsizei* length, GLchar* uniformName); STUB_FUNCTION_END_NO_RETURN(void, glGetActiveUniformName,program,uniformIndex,bufSize,length,uniformName)
  //STUB_FUNCTION_HEAD(void, glMultiDrawElementsBaseVertex, GLenum mode, const GLsizei* count, GLenum type, const void* const*indices, GLsizei drawcount, const GLint* basevertex); STUB_FUNCTION_END_NO_RETURN(void, glMultiDrawElementsBaseVertex,mode,count,type,indices,drawcount,basevertex)
  STUB_FUNCTION_HEAD(void, glProvokingVertex, GLenum mode); STUB_FUNCTION_END_NO_RETURN(void, glProvokingVertex,mode)
+diff --git a/MobileGlues-cpp/gl/log.h b/MobileGlues-cpp/gl/log.h
+index 0e67498..d557a26 100644
+--- a/MobileGlues-cpp/gl/log.h
++++ b/MobileGlues-cpp/gl/log.h
+@@ -11,7 +11,7 @@
+ 
+ #define FORCE_SYNC_WITH_LOG_FILE 0
+ 
+-#define GLOBAL_DEBUG 0
++#define GLOBAL_DEBUG 1
+ 
+ #define LOG_CALLED_FUNCS 0
+ 
+@@ -72,7 +72,7 @@ int __android_log_print(int prio, const char* tag, const char* fmt, ...);
+ void log_unique_function(const char* func_name);
+ #else
+ #define LOG()                                                                                                          \
+-    if (DEBUG || GLOBAL_DEBUG) {                                                                                       \
++    if (DEBUG || GLOBAL_DEBUG && false) {                                                                                       \
+         __android_log_print(ANDROID_LOG_DEBUG, RENDERERNAME, "\nUse function: %s", __FUNCTION__);                      \
+         printf("\nUse function: %s\n", __FUNCTION__);                                                                  \
+         write_log("\nUse function: %s\n", __FUNCTION__);                                                               \
+@@ -139,4 +139,4 @@ void log_unique_function(const char* func_name);
+ 
+ #define MOBILEGLUES_LOG_H
+ 
+-#endif // MOBILEGLUES_LOG_H
+\ No newline at end of file
++#endif // MOBILEGLUES_LOG_H
+diff --git a/MobileGlues-cpp/gl/shader.cpp b/MobileGlues-cpp/gl/shader.cpp
+index 1a2d934..d310e6c 100644
+--- a/MobileGlues-cpp/gl/shader.cpp
++++ b/MobileGlues-cpp/gl/shader.cpp
+@@ -76,7 +76,7 @@ void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, c
+ 
+     bool is_sampler_buffer_emulated = hardware->emulate_texture_buffer && check_if_sampler_buffer_used(glsl_src);
+ 
+-    if (is_direct_shader(glsl_src.c_str())) {
++    if (is_direct_shader(glsl_src.c_str()) || true) {
+         LOG_D("[INFO] [Shader] Direct shader source: ")
+         LOG_D("%s", glsl_src.c_str())
+         essl_src = glsl_src;
+@@ -135,4 +135,4 @@ GLuint glCreateShader(GLenum shaderType) {
+     if (shader != 0 && hardware->emulate_texture_buffer) shader_map_is_sampler_buffer_emulated[shader] = false;
+     CHECK_GL_ERROR
+     return shader;
+-}
+\ No newline at end of file
++}
 diff --git a/MobileGlues-cpp/gl/texture.cpp b/MobileGlues-cpp/gl/texture.cpp
 index fe02cad..e30d0b9 100644
 --- a/MobileGlues-cpp/gl/texture.cpp
@@ -347,9 +402,18 @@ index 9e42471..d340b01 100644
  
  void set_hardware() {
 diff --git a/MobileGlues-cpp/gles/loader.h b/MobileGlues-cpp/gles/loader.h
-index bccd3ab..14b73ae 100644
+index bccd3ab..3577a31 100644
 --- a/MobileGlues-cpp/gles/loader.h
 +++ b/MobileGlues-cpp/gles/loader.h
+@@ -27,7 +27,7 @@ extern "C"
+ 
+     void load_libs();
+ 
+-#if GLOBAL_DEBUG
++#if 0 
+ #define INIT_GLES_FUNC(name)                                                                                           \
+     {                                                                                                                  \
+         LOG_D("INIT_GLES_FUNC(%s)", #name);                                                                            \
 @@ -91,9 +91,13 @@ extern "C"
  
  #define INIT_CHECK_GL_ERROR_FORCE GLenum ERR = GL_NO_ERROR;
@@ -442,7 +506,7 @@ index be5bc23..9d51cac 100644
 \ No newline at end of file
 +static static_block_t static_block;
 diff --git a/MobileGlues-cpp/main.cpp b/MobileGlues-cpp/main.cpp
-index cf981f0..0182609 100644
+index cf981f0..f427aa9 100644
 --- a/MobileGlues-cpp/main.cpp
 +++ b/MobileGlues-cpp/main.cpp
 @@ -12,6 +12,7 @@
@@ -491,7 +555,7 @@ index cf981f0..0182609 100644
      load_libs();
      init_target_egl();
      init_target_gles();
-@@ -76,3 +94,48 @@ void proc_init() {
+@@ -76,3 +94,50 @@ void proc_init() {
  #endif
      g_initialized = 1;
  }
@@ -507,10 +571,11 @@ index cf981f0..0182609 100644
 +
 +EMSCRIPTEN_WEBGL_CONTEXT_HANDLE mobileglues_webgl_create_context(
 +    const char* target,
-+    const EmscriptenWebGLContextAttributes* attributes) {
++    EmscriptenWebGLContextAttributes* attributes) {
 +    if (!g_initialized) {
 +        proc_init();
 +    }
++	attributes->proxyContextToMainThread = EMSCRIPTEN_WEBGL_CONTEXT_PROXY_ALWAYS;
 +    return emscripten_webgl_create_context(target, attributes);
 +}
 +
@@ -519,6 +584,7 @@ index cf981f0..0182609 100644
 +        proc_init();
 +    }
 +    EMSCRIPTEN_RESULT result = emscripten_webgl_make_context_current(context);
++	printf("made context current!\n");
 +    if (result == EMSCRIPTEN_RESULT_SUCCESS && !g_gl_initialized) {
 +        load_libs();
 +        init_target_gles();

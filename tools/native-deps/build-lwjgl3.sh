@@ -416,6 +416,7 @@ for rel in "${STB_NATIVE_SOURCES[@]}"; do
     STB_NATIVE_OBJECTS+=("$obj")
 done
 
+rm -f "$OUTPUT_DIR/liblwjgl3.a" "$OUTPUT_DIR/liblwjgl_stb.a"
 emar rcs "$OUTPUT_DIR/liblwjgl3.a" "${NATIVE_OBJECTS[@]}"
 emar rcs "$OUTPUT_DIR/liblwjgl_stb.a" "${STB_NATIVE_OBJECTS[@]}"
 

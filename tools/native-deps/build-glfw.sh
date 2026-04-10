@@ -300,6 +300,7 @@ else
 fi
 
 mkdir -p "$OUTPUT_DIR"
+rm -f "$OUTPUT_DIR/libglfw3.a"
 emar rcs "$OUTPUT_DIR/libglfw3.a" "$COMBINED_OBJ"
 cp "$GLFW_SRC_DIR/src/js/lib_emscripten_glfw3.js" "$OUTPUT_DIR/lib_emscripten_glfw3.js"
 
