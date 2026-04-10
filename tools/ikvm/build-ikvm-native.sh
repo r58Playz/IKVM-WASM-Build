@@ -513,4 +513,19 @@ fi
 create_archive "$OUT_DIR/native/${PREFIX}libnet.a" "${LIBNET_OBJS[@]}"
 
 log "Done! Artifacts written to $OUT_DIR/native/"
-ls -lh "$OUT_DIR/native/${PREFIX}"*.a
+
+nullglob_was_set=0
+if shopt -q nullglob; then
+    nullglob_was_set=1
+else
+    shopt -s nullglob
+fi
+
+archives=("$OUT_DIR/native/${PREFIX}"*.a)
+if [ "${#archives[@]}" -gt 0 ]; then
+    ls -lh "${archives[@]}"
+fi
+
+if [ "$nullglob_was_set" -eq 0 ]; then
+    shopt -u nullglob
+fi

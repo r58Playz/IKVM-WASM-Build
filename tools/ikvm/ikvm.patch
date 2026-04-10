@@ -2049,6 +2049,26 @@ index 61d1566a4..e93c68c32 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs b/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
+index e9f3aa23d..e46bd67d5 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
+@@ -419,7 +419,7 @@ public static long objectFieldOffset(global::java.lang.invoke.MemberName self)
+             if (fw.IsStatic)
+                 throw new global::java.lang.IllegalArgumentException();
+ 
+-            return (long)fw.Cookie;
++            return IKVM.Java.Externs.sun.misc.Unsafe.GetObjectFieldOffset(fw);
+ #endif
+         }
+ 
+@@ -538,4 +538,4 @@ public static int getNamedCon(int which, object[] name)
+ 
+     }
+ 
+-}
+\ No newline at end of file
++}
 diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
 index 0322f2275..c9db1de29 100644
 --- a/src/IKVM.Runtime/Java/Externs/sun/misc/Signal.cs
@@ -2071,10 +2091,449 @@ index 0322f2275..c9db1de29 100644
  		{
  #if !FIRST_PASS
 diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
-index 50a0078d2..ddfb51259 100644
+index 50a0078d2..d62eabff7 100644
 --- a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
 +++ b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
-@@ -132,6 +132,24 @@ public static void registerNatives()
+@@ -1,4 +1,7 @@
+-﻿using System;
++using System;
++using System.Buffers.Binary;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
+ using System.Linq;
+ using System.Linq.Expressions;
+ using System.Reflection;
+@@ -68,6 +71,429 @@ public ArrayDelegateRef(RuntimeJavaType type)
+             .Where(i => i.Name == nameof(CompareAndSwapArray) && i.IsGenericMethodDefinition && i.GetGenericArguments().Length == 1)
+             .FirstOrDefault();
+ 
++        const int ObjectFieldOffsetTag = 0x40000000;
++        const int ObjectFieldOffsetTagMask = 0x40000000;
++        const int ObjectFieldOffsetTypeIdShift = 16;
++        const int ObjectFieldOffsetTypeIdMask = 0x3FFF;
++        const int ObjectFieldOffsetValueMask = 0xFFFF;
++        const int ObjectFieldOffsetMaxValue = ObjectFieldOffsetValueMask;
++        const int ObjectFieldOffsetMaxTypeId = ObjectFieldOffsetTypeIdMask;
++
++        sealed class ObjectFieldOffsetInfo
++        {
++
++            readonly Dictionary<RuntimeJavaField, int> fieldOffsets;
++            readonly Dictionary<int, RuntimeJavaField> offsetFields;
++            readonly int[] fieldStartOffsets;
++            readonly int[] fieldSizes;
++
++            /// <summary>
++            /// Initializes a new instance.
++            /// </summary>
++            /// <param name="typeId"></param>
++            /// <param name="fields"></param>
++            public ObjectFieldOffsetInfo(int typeId, RuntimeJavaField[] fields)
++            {
++                TypeId = typeId;
++                Fields = fields;
++
++                fieldOffsets = new Dictionary<RuntimeJavaField, int>(fields.Length);
++                offsetFields = new Dictionary<int, RuntimeJavaField>(fields.Length);
++
++                var offset = 0;
++                fieldStartOffsets = new int[fields.Length];
++                fieldSizes = new int[fields.Length];
++                for (var i = 0; i < fields.Length; i++)
++                {
++                    var field = fields[i];
++                    var size = GetObjectFieldStorageSize(field);
++                    if ((uint)offset > ObjectFieldOffsetMaxValue)
++                        throw new InvalidOperationException("Object field offset space exhausted.");
++
++                    fieldOffsets[field] = offset;
++                    offsetFields[offset] = field;
++                    fieldStartOffsets[i] = offset;
++                    fieldSizes[i] = size;
++                    offset = checked(offset + size);
++                }
++            }
++
++            /// <summary>
++            /// Gets the identifier for the declaring type.
++            /// </summary>
++            public int TypeId { get; }
++
++            /// <summary>
++            /// Gets the instance fields in offset order.
++            /// </summary>
++            public RuntimeJavaField[] Fields { get; }
++
++            /// <summary>
++            /// Tries to get the encoded byte offset for the specified field.
++            /// </summary>
++            /// <param name="field"></param>
++            /// <param name="offset"></param>
++            /// <returns></returns>
++            public bool TryGetOffset(RuntimeJavaField field, out int offset)
++            {
++                return fieldOffsets.TryGetValue(field, out offset);
++            }
++
++            /// <summary>
++            /// Tries to get the field for the specified encoded byte offset.
++            /// </summary>
++            /// <param name="offset"></param>
++            /// <param name="field"></param>
++            /// <returns></returns>
++            public bool TryGetField(int offset, out RuntimeJavaField field)
++            {
++                return offsetFields.TryGetValue(offset, out field);
++            }
++
++            public bool TryGetFieldSegment(int offset, out RuntimeJavaField field, out int fieldOffset, out int fieldSize)
++            {
++                var index = FindFieldSegmentIndex(offset);
++                if (index >= 0)
++                {
++                    field = Fields[index];
++                    fieldOffset = fieldStartOffsets[index];
++                    fieldSize = fieldSizes[index];
++                    return true;
++                }
++
++                field = null;
++                fieldOffset = 0;
++                fieldSize = 0;
++                return false;
++            }
++
++            int FindFieldSegmentIndex(int offset)
++            {
++                var lo = 0;
++                var hi = fieldStartOffsets.Length - 1;
++
++                while (lo <= hi)
++                {
++                    var mid = lo + ((hi - lo) >> 1);
++                    var start = fieldStartOffsets[mid];
++                    var end = start + fieldSizes[mid];
++
++                    if (offset < start)
++                    {
++                        hi = mid - 1;
++                    }
++                    else if (offset >= end)
++                    {
++                        lo = mid + 1;
++                    }
++                    else
++                    {
++                        return mid;
++                    }
++                }
++
++                return -1;
++            }
++
++        }
++
++        static int nextObjectFieldTypeId;
++        static readonly object objectFieldOffsetSync = new object();
++        static readonly ConditionalWeakTable<RuntimeJavaType, ObjectFieldOffsetInfo> objectFieldOffsetsByType = new ConditionalWeakTable<RuntimeJavaType, ObjectFieldOffsetInfo>();
++        static readonly ConcurrentDictionary<int, WeakReference<ObjectFieldOffsetInfo>> objectFieldOffsetsByTypeId = new ConcurrentDictionary<int, WeakReference<ObjectFieldOffsetInfo>>();
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        static bool IsEncodedObjectFieldOffset(long offset)
++        {
++            if (offset < 0 || offset > int.MaxValue)
++                return false;
++
++            return (((int)offset) & ObjectFieldOffsetTagMask) == ObjectFieldOffsetTag;
++        }
++
++        static ObjectFieldOffsetInfo GetObjectFieldOffsetInfo(RuntimeJavaType type)
++        {
++            if (objectFieldOffsetsByType.TryGetValue(type, out var info))
++                return info;
++
++            lock (objectFieldOffsetSync)
++            {
++                if (objectFieldOffsetsByType.TryGetValue(type, out info))
++                    return info;
++
++                var typeId = checked(Interlocked.Increment(ref nextObjectFieldTypeId));
++                if (typeId > ObjectFieldOffsetMaxTypeId)
++                    throw new InvalidOperationException("Object field offset type id space exhausted.");
++
++                var fields = type.GetFields().Where(i => i.IsStatic == false).ToArray();
++                info = new ObjectFieldOffsetInfo(typeId, fields);
++
++                objectFieldOffsetsByType.Add(type, info);
++                objectFieldOffsetsByTypeId[typeId] = new WeakReference<ObjectFieldOffsetInfo>(info);
++
++                return info;
++            }
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        static long EncodeObjectFieldOffset(int typeId, int offset)
++        {
++            return ObjectFieldOffsetTag | (typeId << ObjectFieldOffsetTypeIdShift) | offset;
++        }
++
++        static int GetObjectFieldStorageSize(RuntimeJavaField field)
++        {
++            field.Link();
++
++            var ft = field.FieldTypeWrapper;
++            var p = field.DeclaringType.Context.PrimitiveJavaTypeFactory;
++
++            if (ft == p.BYTE || ft == p.BOOLEAN)
++                return 1;
++            if (ft == p.CHAR || ft == p.SHORT)
++                return 2;
++            if (ft == p.INT || ft == p.FLOAT)
++                return 4;
++            if (ft == p.LONG || ft == p.DOUBLE)
++                return 8;
++            if (ft.IsPrimitive == false && ft.IsNonPrimitiveValueType)
++                return Marshal.SizeOf(ft.TypeAsTBD);
++
++            return IntPtr.Size;
++        }
++
++        static RuntimeJavaField GetFieldByOffset(object target, long offset)
++        {
++            if (IsEncodedObjectFieldOffset(offset))
++            {
++                if (target == null)
++                    return RuntimeJavaField.FromCookie((IntPtr)offset);
++
++                var value = (int)offset;
++                var typeId = (value >> ObjectFieldOffsetTypeIdShift) & ObjectFieldOffsetTypeIdMask;
++                var fieldOffset = value & ObjectFieldOffsetValueMask;
++
++                if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out var infoRef) && infoRef.TryGetTarget(out var info) && info.TryGetField(fieldOffset, out var field))
++                    return field;
++
++                if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out infoRef) && infoRef.TryGetTarget(out _) == false)
++                    objectFieldOffsetsByTypeId.TryRemove(typeId, out _);
++
++                throw new global::java.lang.IllegalArgumentException();
++            }
++
++            return RuntimeJavaField.FromCookie((IntPtr)offset);
++        }
++
++#if !FIRST_PASS
++        static bool TryGetEncodedObjectFieldOffsetInfo(object target, long offset, out ObjectFieldOffsetInfo info, out int fieldOffset)
++        {
++            info = null;
++            fieldOffset = 0;
++
++            if (target == null || IsEncodedObjectFieldOffset(offset) == false)
++                return false;
++
++            var value = (int)offset;
++            var typeId = (value >> ObjectFieldOffsetTypeIdShift) & ObjectFieldOffsetTypeIdMask;
++            fieldOffset = value & ObjectFieldOffsetValueMask;
++
++            if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out var infoRef) && infoRef.TryGetTarget(out info))
++                return true;
++
++            if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out infoRef) && infoRef.TryGetTarget(out _) == false)
++                objectFieldOffsetsByTypeId.TryRemove(typeId, out _);
++
++            throw new global::java.lang.IllegalArgumentException();
++        }
++
++        static bool IsPrimitiveField(RuntimeJavaField field)
++        {
++            field.Link();
++            return field.FieldTypeWrapper.IsPrimitive;
++        }
++
++        static void GetPrimitiveFieldBytes(RuntimeJavaField field, object target, Span<byte> bytes)
++        {
++            field.Link();
++            var ft = field.FieldTypeWrapper;
++            var p = field.DeclaringType.Context.PrimitiveJavaTypeFactory;
++
++            if (ft == p.BOOLEAN)
++                bytes[0] = field.UnsafeGetValue<bool>(target) ? (byte)1 : (byte)0;
++            else if (ft == p.BYTE)
++                bytes[0] = field.UnsafeGetValue<byte>(target);
++            else if (ft == p.CHAR)
++            {
++                var v = field.UnsafeGetValue<char>(target);
++                if (BitConverter.IsLittleEndian)
++                    BinaryPrimitives.WriteUInt16LittleEndian(bytes, v);
++                else
++                    BinaryPrimitives.WriteUInt16BigEndian(bytes, v);
++            }
++            else if (ft == p.SHORT)
++            {
++                var v = field.UnsafeGetValue<short>(target);
++                if (BitConverter.IsLittleEndian)
++                    BinaryPrimitives.WriteInt16LittleEndian(bytes, v);
++                else
++                    BinaryPrimitives.WriteInt16BigEndian(bytes, v);
++            }
++            else if (ft == p.INT)
++            {
++                var v = field.UnsafeGetValue<int>(target);
++                if (BitConverter.IsLittleEndian)
++                    BinaryPrimitives.WriteInt32LittleEndian(bytes, v);
++                else
++                    BinaryPrimitives.WriteInt32BigEndian(bytes, v);
++            }
++            else if (ft == p.FLOAT)
++            {
++                var v = global::java.lang.Float.floatToRawIntBits(field.UnsafeGetValue<float>(target));
++                if (BitConverter.IsLittleEndian)
++                    BinaryPrimitives.WriteInt32LittleEndian(bytes, v);
++                else
++                    BinaryPrimitives.WriteInt32BigEndian(bytes, v);
++            }
++            else if (ft == p.LONG)
++            {
++                var v = field.UnsafeGetValue<long>(target);
++                if (BitConverter.IsLittleEndian)
++                    BinaryPrimitives.WriteInt64LittleEndian(bytes, v);
++                else
++                    BinaryPrimitives.WriteInt64BigEndian(bytes, v);
++            }
++            else if (ft == p.DOUBLE)
++            {
++                var v = global::java.lang.Double.doubleToRawLongBits(field.UnsafeGetValue<double>(target));
++                if (BitConverter.IsLittleEndian)
++                    BinaryPrimitives.WriteInt64LittleEndian(bytes, v);
++                else
++                    BinaryPrimitives.WriteInt64BigEndian(bytes, v);
++            }
++            else
++            {
++                throw new global::java.lang.IllegalArgumentException();
++            }
++        }
++
++        static void SetPrimitiveFieldBytes(RuntimeJavaField field, object target, ReadOnlySpan<byte> bytes)
++        {
++            field.Link();
++            var ft = field.FieldTypeWrapper;
++            var p = field.DeclaringType.Context.PrimitiveJavaTypeFactory;
++
++            if (ft == p.BOOLEAN)
++            {
++                field.UnsafeSetValue(target, bytes[0] != 0);
++            }
++            else if (ft == p.BYTE)
++            {
++                field.UnsafeSetValue(target, bytes[0]);
++            }
++            else if (ft == p.CHAR)
++            {
++                var v = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadUInt16LittleEndian(bytes) : BinaryPrimitives.ReadUInt16BigEndian(bytes);
++                field.UnsafeSetValue(target, (char)v);
++            }
++            else if (ft == p.SHORT)
++            {
++                var v = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt16LittleEndian(bytes) : BinaryPrimitives.ReadInt16BigEndian(bytes);
++                field.UnsafeSetValue(target, v);
++            }
++            else if (ft == p.INT)
++            {
++                var v = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt32LittleEndian(bytes) : BinaryPrimitives.ReadInt32BigEndian(bytes);
++                field.UnsafeSetValue(target, v);
++            }
++            else if (ft == p.FLOAT)
++            {
++                var v = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt32LittleEndian(bytes) : BinaryPrimitives.ReadInt32BigEndian(bytes);
++                field.UnsafeSetValue(target, global::java.lang.Float.intBitsToFloat(v));
++            }
++            else if (ft == p.LONG)
++            {
++                var v = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt64LittleEndian(bytes) : BinaryPrimitives.ReadInt64BigEndian(bytes);
++                field.UnsafeSetValue(target, v);
++            }
++            else if (ft == p.DOUBLE)
++            {
++                var v = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt64LittleEndian(bytes) : BinaryPrimitives.ReadInt64BigEndian(bytes);
++                field.UnsafeSetValue(target, global::java.lang.Double.longBitsToDouble(v));
++            }
++            else
++            {
++                throw new global::java.lang.IllegalArgumentException();
++            }
++        }
++
++        static bool TryReadEncodedObjectPrimitive(object target, long offset, Span<byte> destination)
++        {
++            if (TryGetEncodedObjectFieldOffsetInfo(target, offset, out var info, out var readOffset) == false)
++                return false;
++
++            var remaining = destination.Length;
++            var destinationOffset = 0;
++            Span<byte> fieldBytes = stackalloc byte[8];
++
++            while (remaining > 0)
++            {
++                if (info.TryGetFieldSegment(readOffset, out var field, out var fieldStartOffset, out var fieldSize) == false || IsPrimitiveField(field) == false)
++                    throw new global::java.lang.IllegalArgumentException();
++
++                var withinFieldOffset = readOffset - fieldStartOffset;
++                var bytesToCopy = Math.Min(fieldSize - withinFieldOffset, remaining);
++
++                GetPrimitiveFieldBytes(field, target, fieldBytes.Slice(0, fieldSize));
++                fieldBytes.Slice(withinFieldOffset, bytesToCopy).CopyTo(destination.Slice(destinationOffset, bytesToCopy));
++
++                readOffset += bytesToCopy;
++                destinationOffset += bytesToCopy;
++                remaining -= bytesToCopy;
++            }
++
++            return true;
++        }
++
++        static bool TryWriteEncodedObjectPrimitive(object target, long offset, ReadOnlySpan<byte> source)
++        {
++            if (TryGetEncodedObjectFieldOffsetInfo(target, offset, out var info, out var writeOffset) == false)
++                return false;
++
++            var remaining = source.Length;
++            var sourceOffset = 0;
++            Span<byte> fieldBytes = stackalloc byte[8];
++
++            while (remaining > 0)
++            {
++                if (info.TryGetFieldSegment(writeOffset, out var field, out var fieldStartOffset, out var fieldSize) == false || IsPrimitiveField(field) == false)
++                    throw new global::java.lang.IllegalArgumentException();
++
++                var withinFieldOffset = writeOffset - fieldStartOffset;
++                var bytesToCopy = Math.Min(fieldSize - withinFieldOffset, remaining);
++
++                GetPrimitiveFieldBytes(field, target, fieldBytes.Slice(0, fieldSize));
++                source.Slice(sourceOffset, bytesToCopy).CopyTo(fieldBytes.Slice(withinFieldOffset, bytesToCopy));
++                SetPrimitiveFieldBytes(field, target, fieldBytes.Slice(0, fieldSize));
++
++                writeOffset += bytesToCopy;
++                sourceOffset += bytesToCopy;
++                remaining -= bytesToCopy;
++            }
++
++            return true;
++        }
++#endif
++
++        internal static long GetObjectFieldOffset(RuntimeJavaField field)
++        {
++            var info = GetObjectFieldOffsetInfo(field.DeclaringType);
++            if (info.TryGetOffset(field, out var offset))
++                return EncodeObjectFieldOffset(info.TypeId, offset);
++
++            throw new global::java.lang.IllegalArgumentException();
++        }
++
+         /// <summary>
+         /// Emits the appropriate ldind opcode for the given type.
+         /// </summary>
+@@ -132,6 +558,24 @@ public static void registerNatives()
  
          }
  
@@ -2099,7 +2558,25 @@ index 50a0078d2..ddfb51259 100644
          /// <summary>
          /// Implements the logic to get a field by offset.
          /// </summary>
-@@ -265,7 +283,7 @@ public static bool getBoolean(object self, object o, long offset)
+@@ -145,7 +589,7 @@ static T GetField<T>(object o, long offset)
+ #if FIRST_PASS
+             throw new NotImplementedException();
+ #else
+-            var f = RuntimeJavaField.FromCookie((IntPtr)offset);
++            var f = GetFieldByOffset(o, offset);
+             if (o is RuntimeJavaType w)
+             {
+                 if (w != f.DeclaringType)
+@@ -171,7 +615,7 @@ static void PutField<T>(object o, long offset, T value)
+ #if FIRST_PASS
+             throw new NotImplementedException();
+ #else
+-            var f = RuntimeJavaField.FromCookie((IntPtr)offset);
++            var f = GetFieldByOffset(o, offset);
+             if (o is RuntimeJavaType w)
+             {
+                 if (w != f.DeclaringType)
+@@ -265,7 +709,7 @@ public static bool getBoolean(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2108,7 +2585,7 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<bool>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset) != 0,
                      _ => GetField<bool>(o, offset)
-@@ -295,7 +313,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
+@@ -295,7 +739,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
                  switch (o)
                  {
                      case null:
@@ -2117,7 +2594,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -331,7 +349,7 @@ public static byte getByte(object self, object o, long offset)
+@@ -331,7 +775,7 @@ public static byte getByte(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2126,7 +2603,7 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<byte>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset),
                      _ => GetField<byte>(o, offset)
-@@ -361,7 +379,7 @@ public static void putByte(object self, object o, long offset, byte x)
+@@ -361,7 +805,7 @@ public static void putByte(object self, object o, long offset, byte x)
                  switch (o)
                  {
                      case null:
@@ -2135,8 +2612,17 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -397,7 +415,7 @@ public static short getShort(object self, object o, long offset)
+@@ -395,9 +839,16 @@ public static short getShort(object self, object o, long offset)
+ #else
+             try
              {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(short)];
++                    if (TryReadEncodedObjectPrimitive(o, offset, raw))
++                        return BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt16LittleEndian(raw) : BinaryPrimitives.ReadInt16BigEndian(raw);
++                }
++
                  return o switch
                  {
 -                    null => Marshal.ReadInt16((IntPtr)offset),
@@ -2144,7 +2630,22 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<short>(null, offset),
                      Array array => ReadInt16(array, offset),
                      _ => GetField<short>(o, offset)
-@@ -427,7 +445,7 @@ public static void putShort(object self, object o, long offset, short x)
+@@ -424,10 +875,22 @@ public static void putShort(object self, object o, long offset, short x)
+ #else
+             try
+             {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(short)];
++                    if (BitConverter.IsLittleEndian)
++                        BinaryPrimitives.WriteInt16LittleEndian(raw, x);
++                    else
++                        BinaryPrimitives.WriteInt16BigEndian(raw, x);
++
++                    if (TryWriteEncodedObjectPrimitive(o, offset, raw))
++                        return;
++                }
++
                  switch (o)
                  {
                      case null:
@@ -2153,8 +2654,20 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -463,7 +481,7 @@ public static char getChar(object self, object o, long offset)
+@@ -461,9 +924,19 @@ public static char getChar(object self, object o, long offset)
+ #else
+             try
              {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(char)];
++                    if (TryReadEncodedObjectPrimitive(o, offset, raw))
++                    {
++                        var v = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadUInt16LittleEndian(raw) : BinaryPrimitives.ReadUInt16BigEndian(raw);
++                        return (char)v;
++                    }
++                }
++
                  return o switch
                  {
 -                    null => (char)Marshal.ReadInt16((IntPtr)offset),
@@ -2162,7 +2675,22 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<char>(null, offset),
                      Array array => (char)ReadInt16(array, offset),
                      _ => GetField<char>(o, offset)
-@@ -493,7 +511,7 @@ public static void putChar(object self, object o, long offset, char x)
+@@ -490,10 +963,22 @@ public static void putChar(object self, object o, long offset, char x)
+ #else
+             try
+             {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(char)];
++                    if (BitConverter.IsLittleEndian)
++                        BinaryPrimitives.WriteUInt16LittleEndian(raw, x);
++                    else
++                        BinaryPrimitives.WriteUInt16BigEndian(raw, x);
++
++                    if (TryWriteEncodedObjectPrimitive(o, offset, raw))
++                        return;
++                }
++
                  switch (o)
                  {
                      case null:
@@ -2171,8 +2699,17 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -529,7 +547,7 @@ public static int getInt(object self, object o, long offset)
+@@ -527,9 +1012,16 @@ public static int getInt(object self, object o, long offset)
+ #else
+             try
              {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(int)];
++                    if (TryReadEncodedObjectPrimitive(o, offset, raw))
++                        return BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt32LittleEndian(raw) : BinaryPrimitives.ReadInt32BigEndian(raw);
++                }
++
                  return o switch
                  {
 -                    null => Marshal.ReadInt32((IntPtr)offset),
@@ -2180,7 +2717,22 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<int>(null, offset),
                      Array array => ReadInt32(array, offset),
                      _ => GetField<int>(o, offset)
-@@ -559,7 +577,7 @@ public static void putInt(object self, object o, long offset, int x)
+@@ -556,10 +1048,22 @@ public static void putInt(object self, object o, long offset, int x)
+ #else
+             try
+             {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(int)];
++                    if (BitConverter.IsLittleEndian)
++                        BinaryPrimitives.WriteInt32LittleEndian(raw, x);
++                    else
++                        BinaryPrimitives.WriteInt32BigEndian(raw, x);
++
++                    if (TryWriteEncodedObjectPrimitive(o, offset, raw))
++                        return;
++                }
++
                  switch (o)
                  {
                      case null:
@@ -2189,8 +2741,17 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -595,7 +613,7 @@ public static long getLong(object self, object o, long offset)
+@@ -593,9 +1097,16 @@ public static long getLong(object self, object o, long offset)
+ #else
+             try
              {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(long)];
++                    if (TryReadEncodedObjectPrimitive(o, offset, raw))
++                        return BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt64LittleEndian(raw) : BinaryPrimitives.ReadInt64BigEndian(raw);
++                }
++
                  return o switch
                  {
 -                    null => Marshal.ReadInt64((IntPtr)offset),
@@ -2198,7 +2759,22 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<long>(null, offset),
                      Array array => ReadInt64(array, offset),
                      _ => GetField<long>(o, offset)
-@@ -625,7 +643,7 @@ public static void putLong(object self, object o, long offset, long x)
+@@ -622,10 +1133,22 @@ public static void putLong(object self, object o, long offset, long x)
+ #else
+             try
+             {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(long)];
++                    if (BitConverter.IsLittleEndian)
++                        BinaryPrimitives.WriteInt64LittleEndian(raw, x);
++                    else
++                        BinaryPrimitives.WriteInt64BigEndian(raw, x);
++
++                    if (TryWriteEncodedObjectPrimitive(o, offset, raw))
++                        return;
++                }
++
                  switch (o)
                  {
                      case null:
@@ -2207,8 +2783,20 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -661,7 +679,7 @@ public static float getFloat(object self, object o, long offset)
+@@ -659,9 +1182,19 @@ public static float getFloat(object self, object o, long offset)
+ #else
+             try
              {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(int)];
++                    if (TryReadEncodedObjectPrimitive(o, offset, raw))
++                    {
++                        var bits = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt32LittleEndian(raw) : BinaryPrimitives.ReadInt32BigEndian(raw);
++                        return global::java.lang.Float.intBitsToFloat(bits);
++                    }
++                }
++
                  return o switch
                  {
 -                    null => global::java.lang.Float.intBitsToFloat(Marshal.ReadInt32((IntPtr)offset)),
@@ -2216,7 +2804,23 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<float>(null, offset),
                      Array array => global::java.lang.Float.intBitsToFloat(ReadInt32(array, offset)),
                      _ => GetField<float>(o, offset)
-@@ -691,7 +709,7 @@ public static void putFloat(object self, object o, long offset, float x)
+@@ -688,10 +1221,23 @@ public static void putFloat(object self, object o, long offset, float x)
+ #else
+             try
+             {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(int)];
++                    var bits = global::java.lang.Float.floatToRawIntBits(x);
++                    if (BitConverter.IsLittleEndian)
++                        BinaryPrimitives.WriteInt32LittleEndian(raw, bits);
++                    else
++                        BinaryPrimitives.WriteInt32BigEndian(raw, bits);
++
++                    if (TryWriteEncodedObjectPrimitive(o, offset, raw))
++                        return;
++                }
++
                  switch (o)
                  {
                      case null:
@@ -2225,8 +2829,20 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -727,7 +745,7 @@ public static double getDouble(object self, object o, long offset)
+@@ -725,9 +1271,19 @@ public static double getDouble(object self, object o, long offset)
+ #else
+             try
              {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(long)];
++                    if (TryReadEncodedObjectPrimitive(o, offset, raw))
++                    {
++                        var bits = BitConverter.IsLittleEndian ? BinaryPrimitives.ReadInt64LittleEndian(raw) : BinaryPrimitives.ReadInt64BigEndian(raw);
++                        return global::java.lang.Double.longBitsToDouble(bits);
++                    }
++                }
++
                  return o switch
                  {
 -                    null => global::java.lang.Double.longBitsToDouble(Marshal.ReadInt64((IntPtr)offset)),
@@ -2234,7 +2850,23 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetField<double>(null, offset),
                      Array array => global::java.lang.Double.longBitsToDouble(ReadInt64(array, offset)),
                      _ => GetField<double>(o, offset)
-@@ -757,7 +775,7 @@ public static void putDouble(object self, object o, long offset, double x)
+@@ -754,10 +1310,23 @@ public static void putDouble(object self, object o, long offset, double x)
+ #else
+             try
+             {
++                if (o != null)
++                {
++                    Span<byte> raw = stackalloc byte[sizeof(long)];
++                    var bits = global::java.lang.Double.doubleToRawLongBits(x);
++                    if (BitConverter.IsLittleEndian)
++                        BinaryPrimitives.WriteInt64LittleEndian(raw, bits);
++                    else
++                        BinaryPrimitives.WriteInt64BigEndian(raw, bits);
++
++                    if (TryWriteEncodedObjectPrimitive(o, offset, raw))
++                        return;
++                }
++
                  switch (o)
                  {
                      case null:
@@ -2243,7 +2875,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -790,7 +808,7 @@ public static byte getByte(object self, long address)
+@@ -790,7 +1359,7 @@ public static byte getByte(object self, long address)
  #else
              try
              {
@@ -2252,7 +2884,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -812,7 +830,7 @@ public static void putByte(object self, long address, byte x)
+@@ -812,7 +1381,7 @@ public static void putByte(object self, long address, byte x)
  #else
              try
              {
@@ -2261,7 +2893,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -834,7 +852,7 @@ public static short getShort(object self, long address)
+@@ -834,7 +1403,7 @@ public static short getShort(object self, long address)
  #else
              try
              {
@@ -2270,7 +2902,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -856,7 +874,7 @@ public static void putShort(object self, long address, short x)
+@@ -856,7 +1425,7 @@ public static void putShort(object self, long address, short x)
  #else
              try
              {
@@ -2279,7 +2911,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -878,7 +896,7 @@ public static char getChar(object self, long address)
+@@ -878,7 +1447,7 @@ public static char getChar(object self, long address)
  #else
              try
              {
@@ -2288,7 +2920,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -900,7 +918,7 @@ public static void putChar(object self, long address, char x)
+@@ -900,7 +1469,7 @@ public static void putChar(object self, long address, char x)
  #else
              try
              {
@@ -2297,7 +2929,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -922,7 +940,7 @@ public static int getInt(object self, long address)
+@@ -922,7 +1491,7 @@ public static int getInt(object self, long address)
  #else
              try
              {
@@ -2306,7 +2938,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -944,7 +962,7 @@ public static void putInt(object self, long address, int x)
+@@ -944,7 +1513,7 @@ public static void putInt(object self, long address, int x)
  #else
              try
              {
@@ -2315,7 +2947,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -966,7 +984,7 @@ public static long getLong(object self, long address)
+@@ -966,7 +1535,7 @@ public static long getLong(object self, long address)
  #else
              try
              {
@@ -2324,7 +2956,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -988,7 +1006,7 @@ public static void putLong(object self, long address, long x)
+@@ -988,7 +1557,7 @@ public static void putLong(object self, long address, long x)
  #else
              try
              {
@@ -2333,7 +2965,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1084,7 +1102,7 @@ public static long getAddress(object self, long address)
+@@ -1084,7 +1653,7 @@ public static long getAddress(object self, long address)
  #else
              try
              {
@@ -2342,7 +2974,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1106,7 +1124,7 @@ public static void putAddress(object self, long address, long x)
+@@ -1106,7 +1675,7 @@ public static void putAddress(object self, long address, long x)
  #else
              try
              {
@@ -2351,7 +2983,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1136,7 +1154,7 @@ public static unsafe long allocateMemory(object self, long bytes)
+@@ -1136,7 +1705,7 @@ public static unsafe long allocateMemory(object self, long bytes)
                  var ptr = Marshal.AllocHGlobal(len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -2360,7 +2992,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1171,7 +1189,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1171,7 +1740,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  }
  
                  // remove memory pressure
@@ -2369,7 +3001,7 @@ index 50a0078d2..ddfb51259 100644
                  var len = Marshal.ReadIntPtr(ptr);
                  System.GC.RemoveMemoryPressure((long)len);
  
-@@ -1180,7 +1198,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1180,7 +1749,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  ptr = Marshal.ReAllocHGlobal(ptr, len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -2378,7 +3010,7 @@ index 50a0078d2..ddfb51259 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1210,7 +1228,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
+@@ -1210,7 +1779,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
              try
              {
                  if (o == null)
@@ -2387,7 +3019,7 @@ index 50a0078d2..ddfb51259 100644
                  else if (o is byte[] array)
                      ((Span<byte>)array).Slice((int)offset, (int)bytes).Fill(value);
                  else if (o is Array array2)
-@@ -1259,7 +1277,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1259,7 +1828,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (destBase is byte[] byteArray)
                      {
@@ -2396,7 +3028,7 @@ index 50a0078d2..ddfb51259 100644
                      }
                      else if (destBase is bool[])
                      {
-@@ -1269,31 +1287,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1269,31 +1838,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (destBase is short[] shortArray)
                      {
@@ -2435,7 +3067,7 @@ index 50a0078d2..ddfb51259 100644
                      }
                      else
                      {
-@@ -1308,7 +1326,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1308,7 +1877,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (srcBase is byte[] byteArray)
                      {
@@ -2444,7 +3076,7 @@ index 50a0078d2..ddfb51259 100644
                      }
                      else if (srcBase is bool[])
                      {
-@@ -1318,27 +1336,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1318,27 +1887,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (srcBase is short[] shortArray)
                      {
@@ -2478,7 +3110,7 @@ index 50a0078d2..ddfb51259 100644
                      }
                      else
                      {
-@@ -1360,11 +1378,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1360,11 +1929,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
          /// <param name="address"></param>
          public static unsafe void freeMemory(object self, long address)
          {
@@ -2493,7 +3125,34 @@ index 50a0078d2..ddfb51259 100644
              var len = Marshal.ReadIntPtr(ptr);
              Marshal.FreeHGlobal(ptr);
              System.GC.RemoveMemoryPressure((long)len);
-@@ -1904,7 +1922,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
+@@ -1412,7 +1981,7 @@ public static long objectFieldOffset(object self, global::java.lang.reflect.Fiel
+             if (w.IsStatic)
+                 throw new global::java.lang.IllegalArgumentException();
+ 
+-            return (long)w.Cookie;
++            return GetObjectFieldOffset(w);
+         }
+ 
+         /// <summary>
+@@ -1675,7 +2244,7 @@ static T GetFieldVolatile<T>(object o, long offset)
+ #if FIRST_PASS
+             throw new NotImplementedException();
+ #else
+-            var f = RuntimeJavaField.FromCookie((IntPtr)offset);
++            var f = GetFieldByOffset(o, offset);
+             if (o is RuntimeJavaType w)
+             {
+                 if (w != f.DeclaringType)
+@@ -1701,7 +2270,7 @@ static void PutFieldVolatile<T>(object o, long offset, T value)
+ #if FIRST_PASS
+             throw new NotImplementedException();
+ #else
+-            var f = RuntimeJavaField.FromCookie((IntPtr)offset);
++            var f = GetFieldByOffset(o, offset);
+             if (o is RuntimeJavaType w)
+             {
+                 if (w != f.DeclaringType)
+@@ -1904,7 +2473,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2502,7 +3161,7 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetFieldVolatile<int>(null, offset),
                      Array array => ReadInt32Volatile(array, offset),
                      _ => GetFieldVolatile<int>(o, offset)
-@@ -1934,7 +1952,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
+@@ -1934,7 +2503,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
                  switch (o)
                  {
                      case null:
@@ -2511,7 +3170,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -1970,7 +1988,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
+@@ -1970,7 +2539,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2520,7 +3179,7 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetFieldVolatile<bool>(null, offset),
                      Array array => ReadByteVolatile(array, offset) != 0,
                      _ => GetFieldVolatile<bool>(o, offset)
-@@ -2000,7 +2018,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
+@@ -2000,7 +2569,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -2529,7 +3188,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2036,7 +2054,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
+@@ -2036,7 +2605,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2538,7 +3197,7 @@ index 50a0078d2..ddfb51259 100644
                      RuntimeJavaType w => GetFieldVolatile<byte>(null, offset),
                      Array array => ReadByteVolatile(array, offset),
                      _ => GetFieldVolatile<byte>(o, offset)
-@@ -2066,7 +2084,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
+@@ -2066,7 +2635,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
                  switch (o)
                  {
                      case null:
@@ -2547,7 +3206,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2130,7 +2148,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
+@@ -2130,7 +2699,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
                  switch (o)
                  {
                      case null:
@@ -2556,7 +3215,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2194,7 +2212,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
+@@ -2194,7 +2763,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
                  switch (o)
                  {
                      case null:
@@ -2565,7 +3224,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2258,7 +2276,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
+@@ -2258,7 +2827,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
                  switch (o)
                  {
                      case null:
@@ -2574,7 +3233,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2323,7 +2341,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
+@@ -2323,7 +2892,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
                  switch (o)
                  {
                      case null:
@@ -2583,7 +3242,7 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2388,7 +2406,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
+@@ -2388,7 +2957,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -2592,7 +3251,16 @@ index 50a0078d2..ddfb51259 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -3351,4 +3369,4 @@ static void InterlockedWrite(ref double location, double value)
+@@ -2438,7 +3007,7 @@ static bool CompareAndSwapField<T>(object o, long offset, T expected, T value)
+ #if FIRST_PASS
+             throw new NotImplementedException();
+ #else
+-            return RuntimeJavaField.FromCookie((IntPtr)offset).UnsafeCompareAndSwap(o, expected, value);
++            return GetFieldByOffset(o, offset).UnsafeCompareAndSwap(o, expected, value);
+ #endif
+         }
+ 
+@@ -3351,4 +3920,4 @@ static void InterlockedWrite(ref double location, double value)
  
      }
  
@@ -2817,6 +3485,174 @@ index 000000000..bf21a7868
 +
 +    }
 +
++}
+diff --git a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs b/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
+index 6714bea45..1fb144dc5 100644
+--- a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
++++ b/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
+@@ -44,6 +44,156 @@ class TestObject
+ 
+         }
+ 
++        class ObjectFieldOffsetSpacingTestObject
++        {
++
++            public byte b;
++            public short s;
++            public int i;
++            public long l;
++            public object o1;
++            public object o2;
++
++        }
++
++        class Matrix4fLike
++        {
++
++            public float m00, m01, m02, m03;
++            public float m10, m11, m12, m13;
++            public float m20, m21, m22, m23;
++            public float m30, m31, m32, m33;
++
++        }
++
++        class Matrix4dLike
++        {
++
++            public double m00, m01, m02, m03;
++            public double m10, m11, m12, m13;
++            public double m20, m21, m22, m23;
++            public double m30, m31, m32, m33;
++
++        }
++
++        class Matrix4x3fLike
++        {
++
++            public float m00, m01, m02;
++            public float m10, m11, m12;
++            public float m20, m21, m22;
++            public float m30, m31, m32;
++
++        }
++
++        [TestMethod]
++        public void ObjectFieldOffsetsIncreaseByFieldTypeSize()
++        {
++            var t = (Class)typeof(ObjectFieldOffsetSpacingTestObject);
++            var b = u.objectFieldOffset(t.getField("b"));
++            var s = u.objectFieldOffset(t.getField("s"));
++            var i = u.objectFieldOffset(t.getField("i"));
++            var l = u.objectFieldOffset(t.getField("l"));
++            var o1 = u.objectFieldOffset(t.getField("o1"));
++            var o2 = u.objectFieldOffset(t.getField("o2"));
++
++            (s - b).Should().Be(sizeof(byte));
++            (i - s).Should().Be(sizeof(short));
++            (l - i).Should().Be(sizeof(int));
++            (o1 - l).Should().Be(sizeof(long));
++            (o2 - o1).Should().Be(IntPtr.Size);
++        }
++
++        [TestMethod]
++        public void Matrix4fLikeOffsetsFollowFloatStride()
++        {
++            var t = (Class)typeof(Matrix4fLike);
++            var b = u.objectFieldOffset(t.getField("m00"));
++            var names = new[]
++            {
++                "m00", "m01", "m02", "m03",
++                "m10", "m11", "m12", "m13",
++                "m20", "m21", "m22", "m23",
++                "m30", "m31", "m32", "m33",
++            };
++
++            for (var i = 0; i < names.Length; i++)
++                u.objectFieldOffset(t.getField(names[i])).Should().Be(b + (i << 2));
++        }
++
++        [TestMethod]
++        public void Matrix4dLikeOffsetsFollowDoubleStride()
++        {
++            var t = (Class)typeof(Matrix4dLike);
++            var b = u.objectFieldOffset(t.getField("m00"));
++            var names = new[]
++            {
++                "m00", "m01", "m02", "m03",
++                "m10", "m11", "m12", "m13",
++                "m20", "m21", "m22", "m23",
++                "m30", "m31", "m32", "m33",
++            };
++
++            for (var i = 0; i < names.Length; i++)
++                u.objectFieldOffset(t.getField(names[i])).Should().Be(b + (i << 3));
++        }
++
++        [TestMethod]
++        public void Matrix4x3fLikeOffsetsFollowFloatStride()
++        {
++            var t = (Class)typeof(Matrix4x3fLike);
++            var b = u.objectFieldOffset(t.getField("m00"));
++            var names = new[]
++            {
++                "m00", "m01", "m02",
++                "m10", "m11", "m12",
++                "m20", "m21", "m22",
++                "m30", "m31", "m32",
++            };
++
++            for (var i = 0; i < names.Length; i++)
++                u.objectFieldOffset(t.getField(names[i])).Should().Be(b + (i << 2));
++        }
++
++        [TestMethod]
++        public void Matrix4fLikeCanCopyWithLongChunks()
++        {
++            var src = new Matrix4fLike
++            {
++                m00 = 1f, m01 = 2f, m02 = 3f, m03 = 4f,
++                m10 = 5f, m11 = 6f, m12 = 7f, m13 = 8f,
++                m20 = 9f, m21 = 10f, m22 = 11f, m23 = 12f,
++                m30 = 13f, m31 = 14f, m32 = 15f, m33 = 16f,
++            };
++
++            var dst = new Matrix4fLike();
++            var t = (Class)typeof(Matrix4fLike);
++            var m00 = u.objectFieldOffset(t.getField("m00"));
++
++            for (var i = 0; i < 8; i++)
++            {
++                var v = u.getLong(src, m00 + (i << 3));
++                u.putLong(dst, m00 + (i << 3), v);
++            }
++
++            dst.m00.Should().Be(src.m00);
++            dst.m01.Should().Be(src.m01);
++            dst.m02.Should().Be(src.m02);
++            dst.m03.Should().Be(src.m03);
++            dst.m10.Should().Be(src.m10);
++            dst.m11.Should().Be(src.m11);
++            dst.m12.Should().Be(src.m12);
++            dst.m13.Should().Be(src.m13);
++            dst.m20.Should().Be(src.m20);
++            dst.m21.Should().Be(src.m21);
++            dst.m22.Should().Be(src.m22);
++            dst.m23.Should().Be(src.m23);
++            dst.m30.Should().Be(src.m30);
++            dst.m31.Should().Be(src.m31);
++            dst.m32.Should().Be(src.m32);
++            dst.m33.Should().Be(src.m33);
++        }
++
+         [TestMethod]
+         public void CanSetObjectField()
+         {
+@@ -1674,4 +1824,4 @@ public void CanCompareAndSwapLongInIntArrayUnaligned()
+ 
+     }
+ 
+-}
+\ No newline at end of file
 +}
 diff --git a/src/libjsound/jni_onload.c b/src/libjsound/jni_onload.c
 index a66940e94..67ef4c4b9 100644
