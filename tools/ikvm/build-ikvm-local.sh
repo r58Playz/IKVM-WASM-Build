@@ -16,6 +16,8 @@ ENABLED_IMAGE_RUNTIMES="${ENABLED_IMAGE_RUNTIMES:-$BUILD_RUNTIME}"
 ENABLED_IMAGE_BIN_RUNTIMES="${ENABLED_IMAGE_BIN_RUNTIMES:-$BUILD_RUNTIME}"
 ENABLED_TOOL_RUNTIMES="${ENABLED_TOOL_RUNTIMES:-$BUILD_RUNTIME}"
 CLANG_COMPAT_FLAGS="${CLANG_COMPAT_FLAGS:-}"
+FDLIBM_SYMBOL_PREFIX="${FDLIBM_SYMBOL_PREFIX:-fdlibm_}"
+export FDLIBM_SYMBOL_PREFIX
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -452,14 +454,17 @@ else
     case "$NATIVE_VARIANT" in
         mt)
             log "Building WASM native artifacts (mt) ..."
+            log "Using fdlibm symbol prefix: $FDLIBM_SYMBOL_PREFIX"
             bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt
             ;;
         st)
             log "Building WASM native artifacts (st) ..."
+            log "Using fdlibm symbol prefix: $FDLIBM_SYMBOL_PREFIX"
             bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st
             ;;
         both)
             log "Building WASM native artifacts (mt + st in parallel) ..."
+            log "Using fdlibm symbol prefix: $FDLIBM_SYMBOL_PREFIX"
             bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt &
             pid_mt=$!
             bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st &

@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IKVM_SRC="$1"
 OUT_DIR="$2"
 VARIANT="$3"
+FDLIBM_SYMBOL_PREFIX="${FDLIBM_SYMBOL_PREFIX:-fdlibm_}"
 
 case "$VARIANT" in
     mt)
@@ -131,6 +132,7 @@ LIBIAVA_INCLUDES+=("-I$OPENJDK_DIR/jdk/src/share/native/java/lang/fdlibm/include
 LIBIAVA_DEFS=(
     -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux
     -DLINUX -D__linux__ -D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE
+    -D_LITTLE_ENDIAN
     -D_AMD64_ -Damd64
     -DJDK_MAJOR_VERSION='"1"' -DJDK_MINOR_VERSION='"8"'
     -DJDK_MICRO_VERSION='"0"' -DJDK_UPDATE_VERSION='"462"'
@@ -142,7 +144,74 @@ LIBIAVA_DEFS=(
     '-DARCHPROPNAME="amd64"'
 )
 
+FDLIBM_SRC_DIR="$OPENJDK_DIR/jdk/src/share/native/java/lang/fdlibm/src"
+FDLIBM_PREFIX_DEFS=(
+    "-Djacos=${FDLIBM_SYMBOL_PREFIX}jacos"
+    "-Djasin=${FDLIBM_SYMBOL_PREFIX}jasin"
+    "-Djatan=${FDLIBM_SYMBOL_PREFIX}jatan"
+    "-Djatan2=${FDLIBM_SYMBOL_PREFIX}jatan2"
+    "-Djcos=${FDLIBM_SYMBOL_PREFIX}jcos"
+    "-Djexp=${FDLIBM_SYMBOL_PREFIX}jexp"
+    "-Djlog=${FDLIBM_SYMBOL_PREFIX}jlog"
+    "-Djlog10=${FDLIBM_SYMBOL_PREFIX}jlog10"
+    "-Djpow=${FDLIBM_SYMBOL_PREFIX}jpow"
+    "-Djsin=${FDLIBM_SYMBOL_PREFIX}jsin"
+    "-Djsqrt=${FDLIBM_SYMBOL_PREFIX}jsqrt"
+    "-Djcbrt=${FDLIBM_SYMBOL_PREFIX}jcbrt"
+    "-Djtan=${FDLIBM_SYMBOL_PREFIX}jtan"
+    "-Djfloor=${FDLIBM_SYMBOL_PREFIX}jfloor"
+    "-Djceil=${FDLIBM_SYMBOL_PREFIX}jceil"
+    "-Djcosh=${FDLIBM_SYMBOL_PREFIX}jcosh"
+    "-Djmod=${FDLIBM_SYMBOL_PREFIX}jmod"
+    "-Djsinh=${FDLIBM_SYMBOL_PREFIX}jsinh"
+    "-Djfabs=${FDLIBM_SYMBOL_PREFIX}jfabs"
+    "-Djtanh=${FDLIBM_SYMBOL_PREFIX}jtanh"
+    "-Djremainder=${FDLIBM_SYMBOL_PREFIX}jremainder"
+    "-Djhypot=${FDLIBM_SYMBOL_PREFIX}jhypot"
+    "-Djlog1p=${FDLIBM_SYMBOL_PREFIX}jlog1p"
+    "-Djexpm1=${FDLIBM_SYMBOL_PREFIX}jexpm1"
+    "-D__j__ieee754_sqrt=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_sqrt"
+    "-D__j__ieee754_acos=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_acos"
+    "-D__j__ieee754_log=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_log"
+    "-D__j__ieee754_atanh=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_atanh"
+    "-D__j__ieee754_asin=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_asin"
+    "-D__j__ieee754_atan2=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_atan2"
+    "-D__j__ieee754_exp=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_exp"
+    "-D__j__ieee754_cosh=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_cosh"
+    "-D__j__ieee754_fmod=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_fmod"
+    "-D__j__ieee754_pow=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_pow"
+    "-D__j__ieee754_log10=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_log10"
+    "-D__j__ieee754_sinh=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_sinh"
+    "-D__j__ieee754_hypot=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_hypot"
+    "-D__j__ieee754_remainder=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_remainder"
+    "-D__j__ieee754_rem_pio2=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_rem_pio2"
+    "-D__j__ieee754_scalb=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_scalb"
+    "-D__j__kernel_standard=${FDLIBM_SYMBOL_PREFIX}__j__kernel_standard"
+    "-D__j__kernel_sin=${FDLIBM_SYMBOL_PREFIX}__j__kernel_sin"
+    "-D__j__kernel_cos=${FDLIBM_SYMBOL_PREFIX}__j__kernel_cos"
+    "-D__j__kernel_tan=${FDLIBM_SYMBOL_PREFIX}__j__kernel_tan"
+    "-D__j__kernel_rem_pio2=${FDLIBM_SYMBOL_PREFIX}__j__kernel_rem_pio2"
+    "-Datanh=${FDLIBM_SYMBOL_PREFIX}atanh"
+    "-Dcopysign=${FDLIBM_SYMBOL_PREFIX}copysign"
+    "-Dfinite=${FDLIBM_SYMBOL_PREFIX}finite"
+    "-Dfrexp=${FDLIBM_SYMBOL_PREFIX}frexp"
+    "-Dilogb=${FDLIBM_SYMBOL_PREFIX}ilogb"
+    "-Disnan=${FDLIBM_SYMBOL_PREFIX}isnan"
+    "-Dldexp=${FDLIBM_SYMBOL_PREFIX}ldexp"
+    "-D_fdlib_version=${FDLIBM_SYMBOL_PREFIX}_fdlib_version"
+    "-Dlogb=${FDLIBM_SYMBOL_PREFIX}logb"
+    "-Dmatherr=${FDLIBM_SYMBOL_PREFIX}matherr"
+    "-Dmodf=${FDLIBM_SYMBOL_PREFIX}modf"
+    "-Dnextafter=${FDLIBM_SYMBOL_PREFIX}nextafter"
+    "-Drint=${FDLIBM_SYMBOL_PREFIX}rint"
+    "-Dscalb=${FDLIBM_SYMBOL_PREFIX}scalb"
+    "-Dscalbn=${FDLIBM_SYMBOL_PREFIX}scalbn"
+    "-Dsigngam=${FDLIBM_SYMBOL_PREFIX}signgam"
+    "-Dsignificand=${FDLIBM_SYMBOL_PREFIX}significand"
+)
+
 log "Building ${PREFIX}libiava ..."
+log "Using fdlibm symbol prefix: ${FDLIBM_SYMBOL_PREFIX}"
 LIBIAVA_OBJS=()
 for dir in "${LIBIAVA_SRCDIRS[@]}"; do
     [ -d "$dir" ] || continue
@@ -151,8 +220,12 @@ for dir in "${LIBIAVA_SRCDIRS[@]}"; do
         fname="$(basename "$src")"
         if ! echo "$fname" | grep -qE "^($LIBIAVA_EXCLUDES)$"; then
             obj="$TMP_DIR/libiava/${fname%.c}.o"
+            EXTRA_DEFS=()
+            if [ "$dir" = "$FDLIBM_SRC_DIR" ] || [ "$fname" = "StrictMath.c" ]; then
+                EXTRA_DEFS=("${FDLIBM_PREFIX_DEFS[@]}")
+            fi
             emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-                "${LIBIAVA_DEFS[@]}" "${LIBIAVA_INCLUDES[@]}" \
+                "${LIBIAVA_DEFS[@]}" "${LIBIAVA_INCLUDES[@]}" "${EXTRA_DEFS[@]}" \
                 -c "$src" -o "$obj"
             LIBIAVA_OBJS+=("$obj")
         fi
