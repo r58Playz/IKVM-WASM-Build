@@ -49,21 +49,6 @@ index e3fb47e..62c475d 100644
 -}
 \ No newline at end of file
 +}
-diff --git a/MobileGlues-cpp/config/settings.cpp b/MobileGlues-cpp/config/settings.cpp
-index c5dc114..549c9df 100644
---- a/MobileGlues-cpp/config/settings.cpp
-+++ b/MobileGlues-cpp/config/settings.cpp
-@@ -76,8 +76,8 @@ void init_settings() {
-     }
-     if (customGLVersionInt > 46) {
-         customGLVersionInt = 46;
--    } else if (customGLVersionInt < 32 && customGLVersionInt != 0) {
--        customGLVersionInt = 32;
-+    } else if (customGLVersionInt < 30 && customGLVersionInt != 0) {
-+        customGLVersionInt = 30;
-     } else if (customGLVersionInt > 33 && customGLVersionInt < 40) {
-         customGLVersionInt = 33;
-     } else if (customGLVersionInt == 0) {
 diff --git a/MobileGlues-cpp/egl/loader.cpp b/MobileGlues-cpp/egl/loader.cpp
 index aa685aa..782fcdc 100644
 --- a/MobileGlues-cpp/egl/loader.cpp
@@ -217,10 +202,625 @@ index aa685aa..782fcdc 100644
 +    eglTerminate(eglDisplay);
 +}
 diff --git a/MobileGlues-cpp/gl/buffer.cpp b/MobileGlues-cpp/gl/buffer.cpp
-index b2c551a..9846b86 100644
+index b2c551a..caf83d4 100644
 --- a/MobileGlues-cpp/gl/buffer.cpp
 +++ b/MobileGlues-cpp/gl/buffer.cpp
-@@ -739,13 +739,22 @@ void* glMapBuffer(GLenum target, GLenum access) {
+@@ -9,6 +9,9 @@
+ #include "ankerl/unordered_dense.h"
+ #include "texture.h"
+ 
++#include <algorithm>
++#include <cstdint>
++
+ #define DEBUG 0
+ 
+ GLuint bound_array;
+@@ -38,6 +41,7 @@ enum BindingIndex : int {
+     BI_PIXEL_PACK,
+     BI_PIXEL_UNPACK,
+     BI_SHADER_STORAGE,
++    BI_TEXTURE_BUFFER,
+     BI_TRANSFORM_FEEDBACK,
+     BI_UNIFORM_BUFFER,
+     BINDING_COUNT
+@@ -152,6 +156,8 @@ static inline int binding_target_to_index(GLenum target) {
+         return BI_PIXEL_UNPACK;
+     case GL_SHADER_STORAGE_BUFFER:
+         return BI_SHADER_STORAGE;
++    case GL_TEXTURE_BUFFER:
++        return BI_TEXTURE_BUFFER;
+     case GL_TRANSFORM_FEEDBACK_BUFFER:
+         return BI_TRANSFORM_FEEDBACK;
+     case GL_UNIFORM_BUFFER:
+@@ -169,9 +175,11 @@ void set_bound_buffer_by_target(GLenum target, GLuint buffer) {
+ GLuint find_bound_buffer(GLenum key) {
+     GLenum target = 0;
+     switch (key) {
++    case GL_ARRAY_BUFFER:
+     case GL_ARRAY_BUFFER_BINDING:
+         target = GL_ARRAY_BUFFER;
+         break;
++    case GL_ATOMIC_COUNTER_BUFFER:
+     case GL_ATOMIC_COUNTER_BUFFER_BINDING:
+         target = GL_ATOMIC_COUNTER_BUFFER;
+         break;
+@@ -181,27 +189,39 @@ GLuint find_bound_buffer(GLenum key) {
+     case GL_COPY_WRITE_BUFFER_BINDING:
+         target = GL_COPY_WRITE_BUFFER;
+         break;
++    case GL_DRAW_INDIRECT_BUFFER:
+     case GL_DRAW_INDIRECT_BUFFER_BINDING:
+         target = GL_DRAW_INDIRECT_BUFFER;
+         break;
++    case GL_DISPATCH_INDIRECT_BUFFER:
+     case GL_DISPATCH_INDIRECT_BUFFER_BINDING:
+         target = GL_DISPATCH_INDIRECT_BUFFER;
+         break;
++    case GL_ELEMENT_ARRAY_BUFFER:
+     case GL_ELEMENT_ARRAY_BUFFER_BINDING:
+         target = GL_ELEMENT_ARRAY_BUFFER;
+         break;
++    case GL_PIXEL_PACK_BUFFER:
+     case GL_PIXEL_PACK_BUFFER_BINDING:
+         target = GL_PIXEL_PACK_BUFFER;
+         break;
++    case GL_PIXEL_UNPACK_BUFFER:
+     case GL_PIXEL_UNPACK_BUFFER_BINDING:
+         target = GL_PIXEL_UNPACK_BUFFER;
+         break;
++    case GL_SHADER_STORAGE_BUFFER:
+     case GL_SHADER_STORAGE_BUFFER_BINDING:
+         target = GL_SHADER_STORAGE_BUFFER;
+         break;
++    case GL_TEXTURE_BUFFER_BINDING:
++    case GL_TEXTURE_BINDING_BUFFER:
++        target = GL_TEXTURE_BUFFER;
++        break;
++    case GL_TRANSFORM_FEEDBACK_BUFFER:
+     case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
+         target = GL_TRANSFORM_FEEDBACK_BUFFER;
+         break;
++    case GL_UNIFORM_BUFFER:
+     case GL_UNIFORM_BUFFER_BINDING:
+         target = GL_UNIFORM_BUFFER;
+         break;
+@@ -217,6 +237,88 @@ GLuint find_bound_buffer(GLenum key) {
+     return 0;
+ }
+ 
++static inline GLenum map_buffer_target_for_backend(GLenum target);
++
++bool mgReadBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data) {
++    if (size <= 0) return true;
++    if (!data) return false;
++    if (offset < 0) return false;
++
++    GLuint fake_buffer = find_bound_buffer(target);
++    if (!fake_buffer || !has_buffer(fake_buffer)) return false;
++
++    size_t tracked_size = get_buffer_data_size(fake_buffer);
++    if (tracked_size > 0) {
++        const size_t offset_s = static_cast<size_t>(offset);
++        const size_t size_s = static_cast<size_t>(size);
++        if (offset_s > tracked_size || size_s > tracked_size - offset_s) {
++            return false;
++        }
++    }
++
++    GLuint real_buffer = find_real_buffer(fake_buffer);
++    if (!real_buffer) return false;
++
++    const GLenum backend_target = map_buffer_target_for_backend(target);
++    GLint prev_backend_binding = 0;
++    const GLenum backend_binding_query = get_binding_query(backend_target);
++    if (backend_binding_query != 0) {
++        GLES.glGetIntegerv(backend_binding_query, &prev_backend_binding);
++    }
++
++    GLES.glBindBuffer(backend_target, real_buffer);
++
++    bool success = false;
++
++    if (GLES.glGetBufferSubData) {
++        GLES.glGetBufferSubData(backend_target, offset, size, data);
++        success = (GLES.glGetError() == GL_NO_ERROR);
++    }
++
++#ifndef __EMSCRIPTEN__
++    if (!success && g_gles_caps.GL_OES_mapbuffer) {
++        void* mapped = GLES.glMapBufferOES(backend_target, GL_READ_ONLY);
++        if (mapped) {
++            memcpy(data, reinterpret_cast<const uint8_t*>(mapped) + offset, static_cast<size_t>(size));
++            GLES.glUnmapBuffer(backend_target);
++            success = true;
++        }
++    }
++#endif
++
++    if (backend_binding_query != 0) {
++        GLES.glBindBuffer(backend_target, static_cast<GLuint>(prev_backend_binding));
++    }
++
++    return success;
++}
++
++static inline GLenum map_buffer_target_for_backend(GLenum target) {
++    switch (target) {
++    case GL_TEXTURE_BUFFER:
++        // GLES/WebGL do not support GL_TEXTURE_BUFFER as a bind target for glBindBuffer/glBufferData.
++        // Route storage ops through GL_ARRAY_BUFFER while keeping desktop binding state in g_bound_buffers_arr.
++        return GL_ARRAY_BUFFER;
++#ifdef __EMSCRIPTEN__
++    case GL_ATOMIC_COUNTER_BUFFER:
++    case GL_DRAW_INDIRECT_BUFFER:
++    case GL_DISPATCH_INDIRECT_BUFFER:
++#ifdef GL_QUERY_BUFFER
++    case GL_QUERY_BUFFER:
++#endif
++        // WebGL does not expose these desktop/ES3.1+ targets on glBindBuffer/glBufferData.
++        // Keep logical bindings in g_bound_buffers_arr and use ARRAY_BUFFER for backing storage ops.
++        return GL_ARRAY_BUFFER;
++#endif
++    default:
++        return target;
++    }
++}
++
++static inline bool is_emulated_buffer_target(GLenum target) {
++    return map_buffer_target_for_backend(target) != target;
++}
++
+ GLuint gen_array() {
+     if (!g_free_array_ids.empty()) {
+         GLuint id = g_free_array_ids.back();
+@@ -346,8 +448,24 @@ void glBindBuffer(GLenum target, GLuint buffer) {
+         update_vao_ibo_binding(find_bound_array(), buffer);
+     }
+ 
++    if (is_emulated_buffer_target(target)) {
++        if (!has_buffer(buffer) || buffer == 0) {
++            return;
++        }
++        GLuint real_buffer = find_real_buffer(buffer);
++        if (!real_buffer) {
++            GLES.glGenBuffers(1, &real_buffer);
++            modify_buffer(buffer, real_buffer);
++            CHECK_GL_ERROR
++        }
++        LOG_D("glBindBuffer(emulated %s): %d -> %d", glEnumToString(target), buffer, real_buffer)
++        return;
++    }
++
++    const GLenum backend_target = map_buffer_target_for_backend(target);
++
+     if (!has_buffer(buffer) || buffer == 0) {
+-        GLES.glBindBuffer(target, buffer);
++        GLES.glBindBuffer(backend_target, buffer);
+         CHECK_GL_ERROR
+         return;
+     }
+@@ -358,7 +476,7 @@ void glBindBuffer(GLenum target, GLuint buffer) {
+         CHECK_GL_ERROR
+     }
+     LOG_D("glBindBuffer: %d -> %d", buffer, real_buffer)
+-    GLES.glBindBuffer(target, real_buffer);
++    GLES.glBindBuffer(backend_target, real_buffer);
+     CHECK_GL_ERROR
+ }
+ 
+@@ -550,6 +668,133 @@ size_t get_internal_format_size(GLenum internalformat) {
+     }
+ }
+ 
++static bool get_tex_buffer_upload_format(GLenum internalformat, GLenum* format, GLenum* type) {
++    if (!format || !type) return false;
++
++    switch (internalformat) {
++    case GL_R8:
++        *format = GL_RED;
++        *type = GL_UNSIGNED_BYTE;
++        return true;
++    case GL_R8I:
++        *format = GL_RED_INTEGER;
++        *type = GL_BYTE;
++        return true;
++    case GL_R8UI:
++        *format = GL_RED_INTEGER;
++        *type = GL_UNSIGNED_BYTE;
++        return true;
++    case GL_R16I:
++        *format = GL_RED_INTEGER;
++        *type = GL_SHORT;
++        return true;
++    case GL_R16UI:
++        *format = GL_RED_INTEGER;
++        *type = GL_UNSIGNED_SHORT;
++        return true;
++    case GL_R16F:
++        *format = GL_RED;
++        *type = GL_HALF_FLOAT;
++        return true;
++    case GL_R32I:
++        *format = GL_RED_INTEGER;
++        *type = GL_INT;
++        return true;
++    case GL_R32UI:
++        *format = GL_RED_INTEGER;
++        *type = GL_UNSIGNED_INT;
++        return true;
++    case GL_R32F:
++        *format = GL_RED;
++        *type = GL_FLOAT;
++        return true;
++
++    case GL_RG8:
++        *format = GL_RG;
++        *type = GL_UNSIGNED_BYTE;
++        return true;
++    case GL_RG8I:
++        *format = GL_RG_INTEGER;
++        *type = GL_BYTE;
++        return true;
++    case GL_RG8UI:
++        *format = GL_RG_INTEGER;
++        *type = GL_UNSIGNED_BYTE;
++        return true;
++    case GL_RG16I:
++        *format = GL_RG_INTEGER;
++        *type = GL_SHORT;
++        return true;
++    case GL_RG16UI:
++        *format = GL_RG_INTEGER;
++        *type = GL_UNSIGNED_SHORT;
++        return true;
++    case GL_RG16F:
++        *format = GL_RG;
++        *type = GL_HALF_FLOAT;
++        return true;
++    case GL_RG32I:
++        *format = GL_RG_INTEGER;
++        *type = GL_INT;
++        return true;
++    case GL_RG32UI:
++        *format = GL_RG_INTEGER;
++        *type = GL_UNSIGNED_INT;
++        return true;
++    case GL_RG32F:
++        *format = GL_RG;
++        *type = GL_FLOAT;
++        return true;
++
++    case GL_RGB8:
++    case GL_SRGB8:
++        *format = GL_RGB;
++        *type = GL_UNSIGNED_BYTE;
++        return true;
++
++    case GL_RGBA8:
++    case GL_SRGB8_ALPHA8:
++        *format = GL_RGBA;
++        *type = GL_UNSIGNED_BYTE;
++        return true;
++    case GL_RGBA8I:
++        *format = GL_RGBA_INTEGER;
++        *type = GL_BYTE;
++        return true;
++    case GL_RGBA8UI:
++        *format = GL_RGBA_INTEGER;
++        *type = GL_UNSIGNED_BYTE;
++        return true;
++    case GL_RGBA16I:
++        *format = GL_RGBA_INTEGER;
++        *type = GL_SHORT;
++        return true;
++    case GL_RGBA16UI:
++        *format = GL_RGBA_INTEGER;
++        *type = GL_UNSIGNED_SHORT;
++        return true;
++    case GL_RGBA16F:
++        *format = GL_RGBA;
++        *type = GL_HALF_FLOAT;
++        return true;
++    case GL_RGBA32I:
++        *format = GL_RGBA_INTEGER;
++        *type = GL_INT;
++        return true;
++    case GL_RGBA32UI:
++        *format = GL_RGBA_INTEGER;
++        *type = GL_UNSIGNED_INT;
++        return true;
++    case GL_RGBA32F:
++        *format = GL_RGBA;
++        *type = GL_FLOAT;
++        return true;
++
++    default:
++        return false;
++    }
++}
++
+ extern std::string bufSampelerName;
+ // Todo: any glGet* related to this function?
+ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
+@@ -558,80 +803,113 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
+           glEnumToString(internalformat), buffer)
+     if (target != GL_TEXTURE_BUFFER) return;
+ 
+-    if (!has_buffer(buffer) || buffer == 0) {
++    if (!hardware->emulate_texture_buffer && (!has_buffer(buffer) || buffer == 0)) {
+         GLES.glTexBuffer(target, internalformat, buffer);
+         CHECK_GL_ERROR
+         return;
+     }
+-    GLuint real_buffer = find_real_buffer(buffer);
+-    if (!real_buffer) {
+-        GLES.glGenBuffers(1, &real_buffer);
+-        modify_buffer(buffer, real_buffer);
+-        CHECK_GL_ERROR
++
++    GLuint real_buffer = 0;
++    if (has_buffer(buffer) && buffer != 0) {
++        real_buffer = find_real_buffer(buffer);
++        if (!real_buffer) {
++            GLES.glGenBuffers(1, &real_buffer);
++            modify_buffer(buffer, real_buffer);
++            CHECK_GL_ERROR
++        }
+     }
+ 
+     if (hardware->emulate_texture_buffer) {
+         LOG_D("Emulating glTexBuffer");
+ 
+-        GLint boundTexture = 0;
+-        GLint prev_pixel_buffer_binding = 0;
+-
+-        GLES.glActiveTexture(GL_TEXTURE0 + 15);
+-
+-        GLES.glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
+-        LOG_D("Current GL_TEXTURE_BINDING_BUFFER = %d", boundTexture);
+-        GLES.glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &prev_pixel_buffer_binding);
+-        LOG_D("Previous GL_PIXEL_UNPACK_BUFFER_BINDING = %d", prev_pixel_buffer_binding);
+-
+-        if (!boundTexture) {
++        auto tex = mgGetTexObjectByTarget(target);
++        if (!tex || tex->texture == 0) {
+             LOG_D("No texture bound to GL_TEXTURE_BUFFER, skipping emulation.");
+             return;
+         }
+ 
+-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
+-        LOG_D("Bound GL_PIXEL_UNPACK_BUFFER to buffer %u", real_buffer);
+-
+-        GLint bufferSize;
+-        GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &bufferSize);
+-        LOG_D("Buffer size = %d bytes", bufferSize);
+-
+-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+-
+-        GLES.glBindTexture(GL_TEXTURE_2D, boundTexture);
+-        LOG_D("Binding texture %u to GL_TEXTURE_2D", boundTexture);
+-
+-        const GLuint MAX_WIDTH = 8192;
+-        GLuint pixelSize = get_internal_format_size(internalformat);
+-        GLuint numElements = bufferSize / pixelSize;
++        if (!has_buffer(buffer) || buffer == 0) {
++            LOG_D("No source buffer bound to glTexBuffer, skipping emulation.");
++            return;
++        }
+ 
+-        GLuint width = numElements;
+-        GLuint height = 1;
++        GLenum upload_format = 0;
++        GLenum upload_type = 0;
++        if (!get_tex_buffer_upload_format(internalformat, &upload_format, &upload_type)) {
++            LOG_E("Unsupported glTexBuffer internalformat for emulation: %s", glEnumToString(internalformat));
++            return;
++        }
+ 
+-        if (width > MAX_WIDTH) {
+-            width = MAX_WIDTH;
+-            height = (numElements + MAX_WIDTH - 1) / MAX_WIDTH;
++        size_t pixelSize = get_internal_format_size(internalformat);
++        if (pixelSize == 0) {
++            LOG_E("Failed to get texel size for internalformat: %s", glEnumToString(internalformat));
++            return;
+         }
+ 
+-        GLint prev_alignment, prev_row_length, prev_skip_pixels, prev_skip_rows;
++        GLint prev_active_texture = GL_TEXTURE0;
++        GLint prev_pixel_buffer_binding = 0;
++        GLint prev_alignment = 4;
++        GLint prev_row_length = 0;
++        GLint prev_skip_pixels = 0;
++        GLint prev_skip_rows = 0;
++
++        GLES.glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active_texture);
++        GLES.glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &prev_pixel_buffer_binding);
+         GLES.glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_alignment);
+         GLES.glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prev_row_length);
+         GLES.glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &prev_skip_pixels);
+         GLES.glGetIntegerv(GL_UNPACK_SKIP_ROWS, &prev_skip_rows);
+ 
+-        // why do these 2 params not work
+-        // GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+-        // GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, 0)
++        GLint bufferSize = static_cast<GLint>(get_buffer_data_size(buffer));
++        if (bufferSize <= 0) {
++            GLint prev_array_binding = 0;
++            GLES.glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev_array_binding);
++            GLES.glBindBuffer(GL_ARRAY_BUFFER, real_buffer);
++            GLES.glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &bufferSize);
++            GLES.glBindBuffer(GL_ARRAY_BUFFER, prev_array_binding);
++        }
++        if (bufferSize < 0) bufferSize = 0;
++        LOG_D("Buffer size = %d bytes", bufferSize);
++
++        GLES.glActiveTexture(GL_TEXTURE0 + 15);
++        GLES.glBindTexture(GL_TEXTURE_2D, tex->texture);
++
++        const GLuint DEFAULT_MAX_WIDTH = 8192;
++        const size_t MAX_ROW_BYTES = 65536;
++        const size_t numElements = static_cast<size_t>(bufferSize) / pixelSize;
++        GLint maxTextureSize = 0;
++        GLES.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
++        if (maxTextureSize <= 0) maxTextureSize = DEFAULT_MAX_WIDTH;
++
++        size_t widthLimit = std::min(static_cast<size_t>(maxTextureSize), static_cast<size_t>(DEFAULT_MAX_WIDTH));
++        widthLimit = std::min(widthLimit, std::max<size_t>(1, MAX_ROW_BYTES / pixelSize));
++        const GLuint width = numElements == 0 ? 1u : static_cast<GLuint>(std::min(numElements, widthLimit));
++        const GLuint height = numElements == 0 ? 1u : static_cast<GLuint>((numElements + width - 1) / width);
++
++        GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++        GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+         GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+         GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+ 
+-        // TODO: Optimize the glTexImage2D call
+-        GLES.glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, GL_RED_INTEGER, GL_BYTE, nullptr);
++        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++        GLES.glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, upload_format, upload_type, nullptr);
++
++        if (numElements > 0) {
++            GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
++
++            const GLuint fullRows = static_cast<GLuint>(numElements / width);
++            const GLuint lastRowWidth = static_cast<GLuint>(numElements - static_cast<size_t>(fullRows) * width);
+ 
+-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
++            if (fullRows > 0) {
++                GLES.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, fullRows, upload_format, upload_type,
++                                     reinterpret_cast<void*>(0));
++            }
+ 
+-        for (GLuint row = 0; row < height; ++row) {
+-            void* offset = (void*)(row * width * pixelSize);
+-            GLES.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, row, width, 1, GL_RED_INTEGER, GL_BYTE, offset);
++            if (lastRowWidth > 0) {
++                const uintptr_t offsetBytes = static_cast<uintptr_t>(static_cast<size_t>(fullRows) * width * pixelSize);
++                GLES.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, fullRows, lastRowWidth, 1, upload_format, upload_type,
++                                     reinterpret_cast<void*>(offsetBytes));
++            }
+         }
+ 
+         GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, prev_alignment);
+@@ -639,9 +917,9 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
+         GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, prev_skip_pixels);
+         GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, prev_skip_rows);
+ 
+-        auto tex = mgGetTexObjectByTarget(target);
+         tex->target = ConvertGLEnumToTextureTarget(target);
+         tex->internal_format = internalformat;
++        tex->format = upload_format;
+         tex->width = width;
+         tex->height = height;
+         tex->depth = 1;
+@@ -650,7 +928,8 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
+         tex->swizzle_param[2] = GL_BLUE;
+         tex->swizzle_param[3] = GL_ALPHA;
+ 
+-        LOG_D("Called glTexImage2D with internalformat = 0x%X", internalformat);
++        LOG_D("Called glTexImage2D with internalformat = 0x%X, format = 0x%X, type = 0x%X", internalformat,
++              upload_format, upload_type);
+ 
+         GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+         GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+@@ -662,7 +941,7 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
+ 
+         GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, prev_pixel_buffer_binding);
+ 
+-        GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
++        GLES.glActiveTexture(prev_active_texture);
+ 
+         LOG_D("Restored bindings: GL_PIXEL_UNPACK_BUFFER=%d", prev_pixel_buffer_binding);
+ 
+@@ -697,11 +976,86 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
+     LOG()
+     LOG_D("glBufferData, target = %s, size = %d, data = 0x%x, usage = %s", glEnumToString(target), size, data,
+           glEnumToString(usage))
++
++    const GLenum backend_target = map_buffer_target_for_backend(target);
++    if (backend_target != target) {
++        GLuint fake_buffer = find_bound_buffer(target);
++        if (!fake_buffer || !has_buffer(fake_buffer)) {
++            LOG_W("glBufferData(%s): no tracked buffer bound.", glEnumToString(target));
++            return;
++        }
++
++        GLuint real_buffer = find_real_buffer(fake_buffer);
++        if (!real_buffer) {
++            GLES.glGenBuffers(1, &real_buffer);
++            modify_buffer(fake_buffer, real_buffer);
++            CHECK_GL_ERROR
++        }
++
++        GLint prev_backend_binding = 0;
++        const GLenum backend_binding_query = get_binding_query(backend_target);
++        if (backend_binding_query != 0) {
++            GLES.glGetIntegerv(backend_binding_query, &prev_backend_binding);
++        }
++
++        GLES.glBindBuffer(backend_target, real_buffer);
++        GLES.glBufferData(backend_target, size, data, usage);
++
++        if (backend_binding_query != 0) {
++            GLES.glBindBuffer(backend_target, static_cast<GLuint>(prev_backend_binding));
++        }
++
++        set_buffer_data_size(fake_buffer, size);
++        CHECK_GL_ERROR
++        return;
++    }
++
+     GLES.glBufferData(target, size, data, usage);
+     set_buffer_data_size(find_bound_buffer(target), size);
+     CHECK_GL_ERROR
+ }
+ 
++void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
++    LOG()
++    LOG_D("glBufferSubData, target = %s, offset = %p, size = %zi, data = 0x%x", glEnumToString(target), (void*)offset,
++          size, data)
++
++    const GLenum backend_target = map_buffer_target_for_backend(target);
++    if (backend_target != target) {
++        GLuint fake_buffer = find_bound_buffer(target);
++        if (!fake_buffer || !has_buffer(fake_buffer)) {
++            LOG_W("glBufferSubData(%s): no tracked buffer bound.", glEnumToString(target));
++            return;
++        }
++
++        GLuint real_buffer = find_real_buffer(fake_buffer);
++        if (!real_buffer) {
++            GLES.glGenBuffers(1, &real_buffer);
++            modify_buffer(fake_buffer, real_buffer);
++            CHECK_GL_ERROR
++        }
++
++        GLint prev_backend_binding = 0;
++        const GLenum backend_binding_query = get_binding_query(backend_target);
++        if (backend_binding_query != 0) {
++            GLES.glGetIntegerv(backend_binding_query, &prev_backend_binding);
++        }
++
++        GLES.glBindBuffer(backend_target, real_buffer);
++        GLES.glBufferSubData(backend_target, offset, size, data);
++
++        if (backend_binding_query != 0) {
++            GLES.glBindBuffer(backend_target, static_cast<GLuint>(prev_backend_binding));
++        }
++
++        CHECK_GL_ERROR
++        return;
++    }
++
++    GLES.glBufferSubData(target, offset, size, data);
++    CHECK_GL_ERROR
++}
++
+ void* glMapBuffer(GLenum target, GLenum access) {
+     LOG()
+     LOG_D("glMapBuffer, target = %s, access = %s", glEnumToString(target), glEnumToString(access))
+@@ -739,13 +1093,24 @@ void* glMapBuffer(GLenum target, GLenum access) {
  #if !defined(__APPLE__)
  extern "C"
  {
@@ -237,6 +837,8 @@ index b2c551a..9846b86 100644
 -        __attribute__((alias("glBufferData")));
 -    GLAPI GLAPIENTRY GLboolean glUnmapBufferARB(GLenum target) __attribute__((alias("glUnmapBuffer")));
 +        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glBufferData))));
++    GLAPI GLAPIENTRY void glBufferSubDataARB(GLenum target, GLintptrARB offset, GLsizeiptrARB size, const void* data)
++        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glBufferSubData))));
 +    GLAPI GLAPIENTRY GLboolean glUnmapBufferARB(GLenum target)
 +        __attribute__((alias(MOBILEGLUES_ALIAS_STRING(glUnmapBuffer))));
      GLAPI GLAPIENTRY void glBufferStorageARB(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags)
@@ -248,71 +850,671 @@ index b2c551a..9846b86 100644
  }
  #endif
  
+diff --git a/MobileGlues-cpp/gl/buffer.h b/MobileGlues-cpp/gl/buffer.h
+index bf8d176..e36e783 100644
+--- a/MobileGlues-cpp/gl/buffer.h
++++ b/MobileGlues-cpp/gl/buffer.h
+@@ -34,6 +34,8 @@ extern "C"
+ 
+     GLuint find_bound_buffer(GLenum key);
+ 
++    bool mgReadBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data);
++
+     GLuint gen_array();
+ 
+     GLboolean has_array(GLuint key);
 diff --git a/MobileGlues-cpp/gl/drawing.cpp b/MobileGlues-cpp/gl/drawing.cpp
-index debc6b6..30ab0ae 100644
+index debc6b6..50af667 100644
 --- a/MobileGlues-cpp/gl/drawing.cpp
 +++ b/MobileGlues-cpp/gl/drawing.cpp
-@@ -23,6 +23,22 @@ extern UnorderedMap<GLuint, bool> program_map_is_atomic_counter_emulated;
+@@ -11,70 +11,77 @@
+ #include "mg.h"
+ #include "texture.h"
+ #include <ankerl/unordered_dense.h>
++#include <format>
  
- UnorderedMap<GLuint, SamplerInfo> g_samplerCacheForSamplerBuffer;
+ #define DEBUG 0
  
-+void glPrimitiveRestartIndex(GLuint index) {
-+    LOG()
-+    LOG_D("glPrimitiveRestartIndex, index: 0x%x", index)
-+
-+    switch (index) {
-+    case 0xFFu:
-+    case 0xFFFFu:
-+    case 0xFFFFFFFFu:
-+        // GLES 3.0 / WebGL2 only support fixed-index primitive restart.
-+        return;
-+    default:
-+        LOG_W_FORCE("glPrimitiveRestartIndex: unsupported custom restart index 0x%x on GLES fixed-index restart", index)
-+        return;
-+    }
++static bool mgReadElementBufferData(GLintptr offset, GLsizeiptr size, void* data) {
++    return mgReadBufferSubData(GL_ELEMENT_ARRAY_BUFFER, offset, size, data);
 +}
 +
+ GLuint bufSampelerProg;
+ GLuint bufSampelerLoc;
+ std::string bufSampelerName;
+ 
+-extern UnorderedMap<GLuint, bool> program_map_is_sampler_buffer_emulated;
++extern UnorderedMap<GLuint, std::vector<std::string>> program_map_sampler_buffer_emulations;
+ extern UnorderedMap<GLuint, bool> program_map_is_atomic_counter_emulated;
+ 
+-UnorderedMap<GLuint, SamplerInfo> g_samplerCacheForSamplerBuffer;
++UnorderedMap<GLuint, std::vector<SamplerInfo>> g_samplerCacheForSamplerBuffer;
+ 
  void setupBufferTextureUniforms(GLuint program) {
      LOG_D("setupBufferTextureUniforms, program: %d", program);
  
+-    if (!program_map_is_sampler_buffer_emulated[program]) return;
++    if (program_map_sampler_buffer_emulations[program].size() == 0) return;
+ 
+     if (g_samplerCacheForSamplerBuffer.find(program) == g_samplerCacheForSamplerBuffer.end()) {
+         auto& progSamplerInfo = g_samplerCacheForSamplerBuffer[program];
+-        GLint locWidth = GLES.glGetUniformLocation(program, "u_BufferTexWidth");
+-        GLint locHeight = GLES.glGetUniformLocation(program, "u_BufferTexHeight");
+-        if (locWidth == -1) {
+-            LOG_W("u_BufferTexWidth uniform not found in program %d", program);
+-            return;
+-        }
+-
+-        progSamplerInfo.locHeight = locHeight;
+-        progSamplerInfo.locWidth = locWidth;
+-        progSamplerInfo.samplers.clear();
+-
+-        GLint numUniforms = 0;
+-        GLES.glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &numUniforms);
+-        LOG_D("Program %d has %d active uniforms", program, numUniforms);
+-
+-        for (GLint i = 0; i < numUniforms; ++i) {
+-            const GLsizei bufSize = 256;
+-            GLchar name[bufSize];
+-            GLsizei length = 0;
+-            GLint size = 0;
+-            GLenum type = 0;
+-            GLES.glGetActiveUniform(program, i, bufSize, &length, &size, &type, name);
+-
+-            if (type == GL_SAMPLER_2D || type == GL_INT_SAMPLER_2D) {
+-                GLint locSampler = GLES.glGetUniformLocation(program, name);
+-                progSamplerInfo.samplers.push_back(locSampler);
+-            }
+-        }
++		progSamplerInfo.clear();
++
++
++		for (auto sampler : program_map_sampler_buffer_emulations[program]) {
++			auto width_str = std::format("mobileglues_u_width_{}", sampler);
++			auto height_str = std::format("mobileglues_u_height_{}", sampler);
++
++			GLint locWidth = GLES.glGetUniformLocation(program, width_str.c_str());
++			GLint locHeight = GLES.glGetUniformLocation(program, height_str.c_str());
++			GLint locSampler = GLES.glGetUniformLocation(program, sampler.c_str());
++
++			if (locWidth == -1) {
++				LOG_W("%s uniform not found in program %d", width_str.c_str(), program);
++				continue;
++			}
++			if (locHeight == -1) {
++				LOG_W("%s uniform not found in program %d", height_str.c_str(), program);
++				continue;
++			}
++			if (locSampler == -1) {
++				LOG_W("%s uniform not found in program %d", sampler.c_str(), program);
++				continue;
++			}
++
++			progSamplerInfo.push_back(SamplerInfo { .locWidth = locWidth, .locHeight = locHeight, .sampler = locSampler });
++		}
+     }
+ 
+-    auto& progSamplerInfo = g_samplerCacheForSamplerBuffer[program];
+ 
+-    GLint locWidth = progSamplerInfo.locWidth;
+-    GLint locHeight = progSamplerInfo.locHeight;
++    for (auto progSamplerInfo : g_samplerCacheForSamplerBuffer[program]) {
++		GLint locWidth = progSamplerInfo.locWidth;
++		GLint locHeight = progSamplerInfo.locHeight;
++		GLint locSampler = progSamplerInfo.sampler;
+ 
+-    for (auto locSampler : progSamplerInfo.samplers) {
+         if (locSampler < 0) {
+             continue;
+         }
+ 
+-        GLuint prev_unit = gl_state->current_tex_unit;
+-        const GLint unit = 15;
++        GLint unit = 0;
++        GLES.glGetUniformiv(program, locSampler, &unit);
++        if (unit < 0 || unit >= 32) {
++            continue;
++        }
+ 
+-        GLES.glActiveTexture(GL_TEXTURE0 + unit);
+         GLint texId = 0;
++        GLuint prev_unit = gl_state->current_tex_unit;
++        GLES.glActiveTexture(GL_TEXTURE0 + unit);
+         GLES.glGetIntegerv(GL_TEXTURE_BINDING_2D, &texId);
+         if (texId == 0) {
+             GLES.glActiveTexture(GL_TEXTURE0 + prev_unit);
+@@ -82,11 +89,14 @@ void setupBufferTextureUniforms(GLuint program) {
+         }
+ 
+         auto texObject = mgGetTexObjectByID(texId);
++        if (!texObject) {
++            GLES.glActiveTexture(GL_TEXTURE0 + prev_unit);
++            continue;
++        }
+ 
+         GLES.glUniform1i(locSampler, unit);
+         GLES.glUniform1i(locWidth, texObject->width);
+         GLES.glUniform1i(locHeight, texObject->height);
+-
+         GLES.glActiveTexture(GL_TEXTURE0 + prev_unit);
+     }
+ }
+@@ -195,14 +205,7 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const voi
+         }
+ 
+         if (prevElementBuffer != 0) {
+-            GLES.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, prevElementBuffer);
+-            void* srcData =
+-                GLES.glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)indices, count * indexSize, GL_MAP_READ_BIT);
+-
+-            if (srcData) {
+-                memcpy(tempIndices, srcData, count * indexSize);
+-                GLES.glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+-            } else {
++            if (!mgReadElementBufferData((GLintptr)indices, count * indexSize, tempIndices)) {
+                 free(tempIndices);
+                 return;
+             }
 diff --git a/MobileGlues-cpp/gl/drawing.h b/MobileGlues-cpp/gl/drawing.h
-index 61bf524..fee9331 100644
+index 61bf524..75cbbeb 100644
 --- a/MobileGlues-cpp/gl/drawing.h
 +++ b/MobileGlues-cpp/gl/drawing.h
-@@ -36,6 +36,7 @@ extern "C"
-                                                   GLsizei primcount);
-     GLAPI GLAPIENTRY void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices,
-                                                    GLint basevertex);
-+    GLAPI GLAPIENTRY void glPrimitiveRestartIndex(GLuint index);
-     GLAPI GLAPIENTRY void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
-                                               const void* const* indices, GLsizei primcount);
-     GLAPI GLAPIENTRY void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
-diff --git a/MobileGlues-cpp/gl/gl_stub.cpp b/MobileGlues-cpp/gl/gl_stub.cpp
-index 935d969..816319f 100644
---- a/MobileGlues-cpp/gl/gl_stub.cpp
-+++ b/MobileGlues-cpp/gl/gl_stub.cpp
-@@ -500,7 +500,7 @@ STUB_FUNCTION_HEAD(void, glVertexAttrib4sv, GLuint index, const GLshort* v); STU
- STUB_FUNCTION_HEAD(void, glVertexAttrib4ubv, GLuint index, const GLubyte* v); STUB_FUNCTION_END_NO_RETURN(void, glVertexAttrib4ubv,index,v)
- STUB_FUNCTION_HEAD(void, glVertexAttrib4uiv, GLuint index, const GLuint* v); STUB_FUNCTION_END_NO_RETURN(void, glVertexAttrib4uiv,index,v)
- STUB_FUNCTION_HEAD(void, glVertexAttrib4usv, GLuint index, const GLushort* v); STUB_FUNCTION_END_NO_RETURN(void, glVertexAttrib4usv,index,v)
--STUB_FUNCTION_HEAD(void, glPrimitiveRestartIndex, GLuint index); STUB_FUNCTION_END_NO_RETURN(void, glPrimitiveRestartIndex,index)
-+// Implemented in gl/drawing.cpp for GLES fixed-index primitive restart handling.
- STUB_FUNCTION_HEAD(void, glGetActiveUniformName, GLuint program, GLuint uniformIndex, GLsizei bufSize, GLsizei* length, GLchar* uniformName); STUB_FUNCTION_END_NO_RETURN(void, glGetActiveUniformName,program,uniformIndex,bufSize,length,uniformName)
- //STUB_FUNCTION_HEAD(void, glMultiDrawElementsBaseVertex, GLenum mode, const GLsizei* count, GLenum type, const void* const*indices, GLsizei drawcount, const GLint* basevertex); STUB_FUNCTION_END_NO_RETURN(void, glMultiDrawElementsBaseVertex,mode,count,type,indices,drawcount,basevertex)
- STUB_FUNCTION_HEAD(void, glProvokingVertex, GLenum mode); STUB_FUNCTION_END_NO_RETURN(void, glProvokingVertex,mode)
+@@ -24,7 +24,7 @@
+ struct SamplerInfo {
+     GLint locWidth;
+     GLint locHeight;
+-    std::vector<GLint> samplers;
++    GLint sampler;
+ };
+ 
+ #ifdef __cplusplus
+diff --git a/MobileGlues-cpp/gl/gl_native.cpp b/MobileGlues-cpp/gl/gl_native.cpp
+index 35277ee..8a3e56d 100644
+--- a/MobileGlues-cpp/gl/gl_native.cpp
++++ b/MobileGlues-cpp/gl/gl_native.cpp
+@@ -12,9 +12,54 @@
+ #include "../gles/loader.h"
+ #include "mg.h"
+ #include <GLES3/gl32.h>
++#include <cstdint>
+ 
+ #define DEBUG 0
+ 
++#ifdef __EMSCRIPTEN__
++static bool is_webgl_enable_cap(GLenum cap) {
++    switch (cap) {
++    case GL_BLEND:
++    case GL_CULL_FACE:
++    case GL_DEPTH_TEST:
++    case GL_DITHER:
++    case GL_POLYGON_OFFSET_FILL:
++    case GL_SAMPLE_ALPHA_TO_COVERAGE:
++    case GL_SAMPLE_COVERAGE:
++    case GL_SCISSOR_TEST:
++    case GL_STENCIL_TEST:
++    case GL_RASTERIZER_DISCARD:
++        return true;
++    default:
++        return false;
++    }
++}
++#endif
++
++static size_t vertex_attrib_type_size(GLenum type) {
++    switch (type) {
++    case GL_BYTE:
++    case GL_UNSIGNED_BYTE:
++        return 1;
++    case GL_SHORT:
++    case GL_UNSIGNED_SHORT:
++    case GL_HALF_FLOAT:
++        return 2;
++    case GL_INT:
++    case GL_UNSIGNED_INT:
++    case GL_FLOAT:
++    case GL_FIXED:
++    case GL_INT_2_10_10_10_REV:
++    case GL_UNSIGNED_INT_2_10_10_10_REV:
++    case GL_UNSIGNED_INT_10F_11F_11F_REV:
++        return 4;
++    case GL_DOUBLE:
++        return 8;
++    default:
++        return 0;
++    }
++}
++
+ //NATIVE_FUNCTION_HEAD(void, glActiveTexture, GLenum texture) NATIVE_FUNCTION_END_NO_RETURN(void, glActiveTexture, texture)
+ //NATIVE_FUNCTION_HEAD(void, glAttachShader, GLuint program, GLuint shader) NATIVE_FUNCTION_END_NO_RETURN(void, glAttachShader, program,shader)
+ NATIVE_FUNCTION_HEAD(void, glBindAttribLocation, GLuint program, GLuint index, const GLchar *name) NATIVE_FUNCTION_END_NO_RETURN(void, glBindAttribLocation, program,index,name)
+@@ -28,7 +73,7 @@ NATIVE_FUNCTION_HEAD(void, glBlendEquationSeparate, GLenum modeRGB, GLenum modeA
+ NATIVE_FUNCTION_HEAD(void, glBlendFunc, GLenum sfactor, GLenum dfactor) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendFunc, sfactor,dfactor)
+ NATIVE_FUNCTION_HEAD(void, glBlendFuncSeparate, GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha) NATIVE_FUNCTION_END_NO_RETURN(void, glBlendFuncSeparate, sfactorRGB,dfactorRGB,sfactorAlpha,dfactorAlpha)
+ //NATIVE_FUNCTION_HEAD(void, glBufferData, GLenum target, GLsizeiptr size, const void *data, GLenum usage) NATIVE_FUNCTION_END_NO_RETURN(void, glBufferData, target,size,data,usage)
+-NATIVE_FUNCTION_HEAD(void, glBufferSubData, GLenum target, GLintptr offset, GLsizeiptr size, const void *data) NATIVE_FUNCTION_END_NO_RETURN(void, glBufferSubData, target,offset,size,data)
++//NATIVE_FUNCTION_HEAD(void, glBufferSubData, GLenum target, GLintptr offset, GLsizeiptr size, const void *data) NATIVE_FUNCTION_END_NO_RETURN(void, glBufferSubData, target,offset,size,data)
+ //NATIVE_FUNCTION_HEAD(GLenum, glCheckFramebufferStatus, GLenum target) NATIVE_FUNCTION_END(GLenum, glCheckFramebufferStatus, target)
+ //NATIVE_FUNCTION_HEAD(void, glClear, GLbitfield mask) NATIVE_FUNCTION_END_NO_RETURN(void, glClear, mask)
+ NATIVE_FUNCTION_HEAD(void, glClearColor, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) NATIVE_FUNCTION_END_NO_RETURN(void, glClearColor, red,green,blue,alpha)
+@@ -53,11 +98,31 @@ NATIVE_FUNCTION_HEAD(void, glDepthFunc, GLenum func) NATIVE_FUNCTION_END_NO_RETU
+ NATIVE_FUNCTION_HEAD(void, glDepthMask, GLboolean flag) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthMask, flag)
+ NATIVE_FUNCTION_HEAD(void, glDepthRangef, GLfloat n, GLfloat f) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthRangef, n,f)
+ NATIVE_FUNCTION_HEAD(void, glDetachShader, GLuint program, GLuint shader) NATIVE_FUNCTION_END_NO_RETURN(void, glDetachShader, program,shader)
+-NATIVE_FUNCTION_HEAD(void, glDisable, GLenum cap) NATIVE_FUNCTION_END_NO_RETURN(void, glDisable, cap)
++NATIVE_FUNCTION_HEAD(void, glDisable, GLenum cap)
++    LOG_D("glDisable(cap=%s)", glEnumToString(cap));
++#ifdef __EMSCRIPTEN__
++    if (!is_webgl_enable_cap(cap)) {
++        LOG_D("glDisable: ignoring unsupported WebGL cap 0x%x", cap);
++        return;
++    }
++#endif
++    GLES.glDisable(cap);
++    CHECK_GL_ERROR
++}
+ NATIVE_FUNCTION_HEAD(void, glDisableVertexAttribArray, GLuint index) NATIVE_FUNCTION_END_NO_RETURN(void, glDisableVertexAttribArray, index)
+ NATIVE_FUNCTION_HEAD(void, glDrawArrays, GLenum mode, GLint first, GLsizei count) NATIVE_FUNCTION_END_NO_RETURN(void, glDrawArrays, mode,first,count)
+ //NATIVE_FUNCTION_HEAD(void, glDrawElements, GLenum mode, GLsizei count, GLenum type, const void *indices) NATIVE_FUNCTION_END_NO_RETURN(void, glDrawElements, mode,count,type,indices)
+-NATIVE_FUNCTION_HEAD(void, glEnable, GLenum cap) NATIVE_FUNCTION_END_NO_RETURN(void, glEnable, cap)
++NATIVE_FUNCTION_HEAD(void, glEnable, GLenum cap)
++    LOG_D("glEnable(cap=%s)", glEnumToString(cap));
++#ifdef __EMSCRIPTEN__
++    if (!is_webgl_enable_cap(cap)) {
++        LOG_D("glEnable: ignoring unsupported WebGL cap 0x%x", cap);
++        return;
++    }
++#endif
++    GLES.glEnable(cap);
++    CHECK_GL_ERROR
++}
+ NATIVE_FUNCTION_HEAD(void, glEnableVertexAttribArray, GLuint index) NATIVE_FUNCTION_END_NO_RETURN(void, glEnableVertexAttribArray, index)
+ NATIVE_FUNCTION_HEAD(void, glFinish) NATIVE_FUNCTION_END_NO_RETURN(void, glFinish)
+ NATIVE_FUNCTION_HEAD(void, glFlush) NATIVE_FUNCTION_END_NO_RETURN(void, glFlush)
+@@ -96,7 +161,17 @@ NATIVE_FUNCTION_HEAD(void, glGetVertexAttribiv, GLuint index, GLenum pname, GLin
+ NATIVE_FUNCTION_HEAD(void, glGetVertexAttribPointerv, GLuint index, GLenum pname, void **pointer) NATIVE_FUNCTION_END_NO_RETURN(void, glGetVertexAttribPointerv, index,pname,pointer)
+ //NATIVE_FUNCTION_HEAD(void, glHint, GLenum target, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glHint, target,mode)
+ //NATIVE_FUNCTION_HEAD(GLboolean, glIsBuffer, GLuint buffer) NATIVE_FUNCTION_END(GLboolean, glIsBuffer, buffer)
+-NATIVE_FUNCTION_HEAD(GLboolean, glIsEnabled, GLenum cap) NATIVE_FUNCTION_END(GLboolean, glIsEnabled, cap)
++NATIVE_FUNCTION_HEAD(GLboolean, glIsEnabled, GLenum cap)
++#ifdef __EMSCRIPTEN__
++    if (!is_webgl_enable_cap(cap)) {
++        return GL_FALSE;
++    }
++#endif
++    LOG_D("Use native function: %s @ %s(...)", RENDERERNAME, __FUNCTION__);
++    GLboolean ret = GLES.glIsEnabled(cap);
++    CHECK_GL_ERROR
++    return ret;
++}
+ NATIVE_FUNCTION_HEAD(GLboolean, glIsFramebuffer, GLuint framebuffer) NATIVE_FUNCTION_END(GLboolean, glIsFramebuffer, framebuffer)
+ NATIVE_FUNCTION_HEAD(GLboolean, glIsProgram, GLuint program) NATIVE_FUNCTION_END(GLboolean, glIsProgram, program)
+ NATIVE_FUNCTION_HEAD(GLboolean, glIsRenderbuffer, GLuint renderbuffer) NATIVE_FUNCTION_END(GLboolean, glIsRenderbuffer, renderbuffer)
+@@ -194,7 +269,35 @@ NATIVE_FUNCTION_HEAD(void, glEndTransformFeedback) NATIVE_FUNCTION_END_NO_RETURN
+ //NATIVE_FUNCTION_HEAD(void, glBindBufferBase, GLenum target, GLuint index, GLuint buffer) NATIVE_FUNCTION_END_NO_RETURN(void, glBindBufferBase, target,index,buffer)
+ NATIVE_FUNCTION_HEAD(void, glTransformFeedbackVaryings, GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode) NATIVE_FUNCTION_END_NO_RETURN(void, glTransformFeedbackVaryings, program,count,varyings,bufferMode)
+ NATIVE_FUNCTION_HEAD(void, glGetTransformFeedbackVarying, GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name) NATIVE_FUNCTION_END_NO_RETURN(void, glGetTransformFeedbackVarying, program,index,bufSize,length,size,type,name)
+-NATIVE_FUNCTION_HEAD(void, glVertexAttribIPointer, GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer) NATIVE_FUNCTION_END_NO_RETURN(void, glVertexAttribIPointer, index,size,type,stride,pointer)
++NATIVE_FUNCTION_HEAD(void, glVertexAttribIPointer, GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer)
++    size_t type_size = vertex_attrib_type_size(type);
++    uintptr_t raw_offset = reinterpret_cast<uintptr_t>(pointer);
++    uintptr_t adjusted_offset = raw_offset;
++    GLsizei adjusted_stride = stride;
++
++#ifdef __EMSCRIPTEN__
++    if (type_size > 1) {
++        if ((raw_offset % type_size) != 0) {
++            adjusted_offset = raw_offset - (raw_offset % type_size);
++        }
++
++        if (stride > 0 && (static_cast<size_t>(stride) % type_size) != 0) {
++            adjusted_stride = static_cast<GLsizei>(stride + static_cast<GLsizei>(type_size -
++                                      (static_cast<size_t>(stride) % type_size)));
++        }
++
++        if (adjusted_offset != raw_offset || adjusted_stride != stride) {
++            LOG_W("glVertexAttribIPointer: adjusted index=%u type=%s offset=%p->%p stride=%d->%d",
++                  index, glEnumToString(type), reinterpret_cast<const void*>(raw_offset),
++                  reinterpret_cast<const void*>(adjusted_offset), stride, adjusted_stride);
++        }
++    }
++#endif
++
++    LOG_D("Use native function: %s @ %s(...)", RENDERERNAME, __FUNCTION__);
++    GLES.glVertexAttribIPointer(index, size, type, adjusted_stride, reinterpret_cast<const void*>(adjusted_offset));
++    CHECK_GL_ERROR
++}
+ NATIVE_FUNCTION_HEAD(void, glGetVertexAttribIiv, GLuint index, GLenum pname, GLint *params) NATIVE_FUNCTION_END_NO_RETURN(void, glGetVertexAttribIiv, index,pname,params)
+ NATIVE_FUNCTION_HEAD(void, glGetVertexAttribIuiv, GLuint index, GLenum pname, GLuint *params) NATIVE_FUNCTION_END_NO_RETURN(void, glGetVertexAttribIuiv, index,pname,params)
+ NATIVE_FUNCTION_HEAD(void, glVertexAttribI4i, GLuint index, GLint x, GLint y, GLint z, GLint w) NATIVE_FUNCTION_END_NO_RETURN(void, glVertexAttribI4i, index,x,y,z,w)
+diff --git a/MobileGlues-cpp/gl/glsl/glsl_for_es.cpp b/MobileGlues-cpp/gl/glsl/glsl_for_es.cpp
+index 3f1cecd..1aac5cd 100644
+--- a/MobileGlues-cpp/gl/glsl/glsl_for_es.cpp
++++ b/MobileGlues-cpp/gl/glsl/glsl_for_es.cpp
+@@ -19,7 +19,9 @@
+ #include <strstream>
+ #include <algorithm>
+ #include <sstream>
++#include <vector>
+ #include "cache.h"
++#include <format>
+ #include "../../version.h"
+ 
+ #define DEBUG 0
+@@ -328,31 +330,6 @@ bool checkIfAtomicCounterBufferEmulated(const std::string& glslCode) {
+     return glslCode.find(atomicCounterEmulatedWatermark) != std::string::npos;
+ }
+ 
+-std::string GLSLtoGLSLES(const char* glsl_code, GLenum glsl_type, uint essl_version, uint glsl_version,
+-                         int& return_code) {
+-    std::string sha256_string(glsl_code);
+-    sha256_string += "\n//" + std::to_string(MAJOR) + "." + std::to_string(MINOR) + "." + std::to_string(REVISION) +
+-                     "|" + std::to_string(essl_version);
+-    const char* cachedESSL = Cache::get_instance().get(sha256_string.c_str());
+-    if (cachedESSL) {
+-        LOG_D("GLSL Hit Cache:\n%s\n-->\n%s", glsl_code, cachedESSL)
+-        bool atomicCounterEmulated = checkIfAtomicCounterBufferEmulated(std::string(cachedESSL));
+-        return_code = atomicCounterEmulated ? 1 : 0;
+-        return (char*)cachedESSL;
+-    }
+-
+-    return_code = -1;
+-    // std::string converted = glsl_version<140? GLSLtoGLSLES_1(glsl_code, glsl_type, essl_version,
+-    // return_code):GLSLtoGLSLES_2(glsl_code, glsl_type, essl_version, return_code);
+-    std::string converted = GLSLtoGLSLES_2(glsl_code, glsl_type, essl_version, return_code);
+-    if (return_code >= 0 && !converted.empty()) {
+-        converted = process_uniform_declarations(converted);
+-        Cache::get_instance().put(sha256_string.c_str(), converted.c_str());
+-    }
+-
+-    return (return_code >= 0) ? converted : glsl_code;
+-}
+-
+ std::string replace_line_starting_with(const std::string& glslCode, const std::string& starting,
+                                        const std::string& substitution = "") {
+     std::string result;
+@@ -422,6 +399,45 @@ static inline void replace_all(std::string& str, const std::string& from, const
+     }
+ }
+ 
++static void normalize_interface_block_instances(std::string& glsl) {
++    static const std::regex io_block_decl(
++        R"((?:layout\s*\([^)]*\)\s*)?(?:(?:flat|smooth|noperspective|centroid|patch|sample|invariant|precise)\s+)*(?:in|out)\s+([A-Za-z_]\w*)\s*\{[\s\S]*?\}\s*([A-Za-z_]\w*)\s*;)",
++        std::regex::ECMAScript);
++
++    std::vector<std::pair<std::string, std::string>> renames;
++    for (auto it = std::sregex_iterator(glsl.begin(), glsl.end(), io_block_decl); it != std::sregex_iterator(); ++it) {
++        const std::string block_name = (*it)[1].str();
++        const std::string instance_name = (*it)[2].str();
++        if (block_name.rfind("gl_", 0) == 0 || instance_name.empty()) {
++            continue;
++        }
++
++        const std::string canonical_name = "mobileglues_io_" + block_name;
++        if (instance_name == canonical_name) {
++            continue;
++        }
++
++        bool already_queued = false;
++        for (const auto& entry : renames) {
++            if (entry.first == instance_name) {
++                already_queued = true;
++                break;
++            }
++        }
++        if (!already_queued) {
++            renames.emplace_back(instance_name, canonical_name);
++        }
++    }
++
++    for (const auto& [old_name, new_name] : renames) {
++        const std::regex access_regex("\\b" + old_name + R"(\s*\.)");
++        glsl = std::regex_replace(glsl, access_regex, new_name + ".");
++
++        const std::regex decl_regex(R"(\}\s*)" + old_name + R"(\s*;)");
++        glsl = std::regex_replace(glsl, decl_regex, "} " + new_name + ";");
++    }
++}
++
+ static size_t find_insertion_point(const std::string& glsl) {
+     size_t pos = 0;
+     size_t insertion_point = 0;
+@@ -558,54 +574,43 @@ bool process_non_opaque_atomic_to_ssbo(std::string& source) {
+     return true;
+ }
+ 
+-void process_sampler_buffer(std::string& source) { // a simplized version, should be rewritten in the future
+-    if (source.find("isamplerBuffer") == std::string::npos) {
++void process_sampler_buffer(std::string& source, std::vector<std::string>& sampler_buffer_emulations) {
++    auto var_regex = std::regex(R"(([iu]*)samplerBuffer\s*([a-zA-Z0-9_]+))");
++    if (!std::regex_search(source, var_regex)) {
+         return;
+     }
+ 
+-    size_t pos = 0;
+-    while ((pos = source.find("isamplerBuffer", pos)) != std::string::npos) {
+-        source.replace(pos, 14, "isampler2D");
+-        pos += 11;
+-    }
+-
+-    std::regex pattern(R"(texelFetch\s*\(\s*(\w+)\s*,\s*([^)]+?)\s*\))");
+-    source = std::regex_replace(source, pattern,
+-                                "texelFetch($1, ivec2(($2) % u_BufferTexWidth, ($2) / u_BufferTexWidth), 0)");
+-
+-    const char* boundaryProtection = R"(
+-ivec2 bufferCoords(int index) {
+-    int width = u_BufferTexWidth;
+-    int x = index % width;
+-    int y = index / width;
+-    if (y >= u_BufferTexHeight) {
+-        y = u_BufferTexHeight - 1;
+-        x = width - 1;
+-    }
+-    return ivec2(x, y);
+-}
+-)";
++	for (auto i = std::sregex_iterator(source.begin(), source.end(), var_regex); i != std::sregex_iterator(); ++i) {
++		sampler_buffer_emulations.push_back((*i)[2].str());
++	}
+ 
+-    source = std::regex_replace(source, std::regex("texelFetch\\((\\w+)\\s*,\\s*ivec2\\(([^)]+)\\)\\s*,\\s*0\\)"),
+-                                "texelFetch($1, bufferCoords($2), 0)");
++    const char* helper = R"(
++ ivec2 mobileglues_bufferCoords(int index, int width, int height) {
++     int x = index % width;
++     int y = index / width;
++     if (y >= height) {
++         y = height - 1;
++         x = width - 1;
++     }
++     return ivec2(x, y);
++ }
++ )";
+ 
+     size_t insertion_point = find_insertion_point(source);
+     if (insertion_point != std::string::npos) {
+-        source.insert(insertion_point, boundaryProtection);
++        source.insert(insertion_point, helper);
++		for (auto var_name : sampler_buffer_emulations) {
++			source.insert(insertion_point, std::format("uniform int mobileglues_u_width_{}; uniform int mobileglues_u_height_{};", var_name, var_name));
++		}
+     }
+ 
+-    const char* uniformDecl = R"(
+-uniform int u_BufferTexWidth;
+-uniform int u_BufferTexHeight;
+-)";
++    // replace samplerBuffer vars with sampler2D
++    source = std::regex_replace(source, var_regex, "$1sampler2D $2");
+ 
+-    insertion_point = find_insertion_point(source);
+-    if (insertion_point != std::string::npos) {
+-        insertion_point = source.find('\n', insertion_point);
+-        if (insertion_point != std::string::npos) {
+-            source.insert(insertion_point + 1, uniformDecl);
+-        }
+-    }
++    // replace texelFetch in samplerBuffer format with sampler2D format
++    // regex is probably bad. whatever
++    source = std::regex_replace(source, std::regex(R"(\btexelFetch\s*\(\s*([^,]+)\s*,\s*((?:[^,()]+|\([^)]*\))+)\s*\))"),
++                                "texelFetch($1, mobileglues_bufferCoords($2, mobileglues_u_width_$1, mobileglues_u_height_$1), 0)");
+ }
+ 
+ static void inject_textureQueryLod(std::string& glsl) {
+@@ -703,10 +708,17 @@ void inject_mg_macro_definition(std::string& glslCode) {
+     glslCode.insert(insertionPos, macro_definitions);
+ }
+ 
+-std::string preprocess_glsl(const std::string& glsl, GLenum shaderType, bool* atomicCounterEmulated) {
++std::string preprocess_glsl(const std::string& glsl, GLenum shaderType, bool& atomicCounterEmulated, std::vector<std::string>& samplerBufferEmulated) {
+     std::string ret = glsl;
+     // Remove lines beginning with `#line`
+     ret = replace_line_starting_with(ret, "#line");
++
++    // Canonicalize in/out interface block instance names so flattened varyings
++    // keep matching names across shader stages after SPIRV-Cross translation.
++    if (shaderType == GL_VERTEX_SHADER || shaderType == GL_FRAGMENT_SHADER) {
++        normalize_interface_block_instances(ret);
++    }
++
+     // Act as if disable_GL_ARB_derivative_control is false
+     replace_all(ret, "#ifdef GL_ARB_derivative_control", "#if 0");
+     replace_all(ret, "#ifndef GL_ARB_derivative_control", "#if 1");
+@@ -729,10 +741,10 @@ std::string preprocess_glsl(const std::string& glsl, GLenum shaderType, bool* at
+ 
+     if (hardware->emulate_texture_buffer) {
+         // Sampler buffer processing
+-        process_sampler_buffer(ret);
++        process_sampler_buffer(ret, samplerBufferEmulated);
+     }
+ 
+-    *atomicCounterEmulated = process_non_opaque_atomic_to_ssbo(ret);
++    atomicCounterEmulated = process_non_opaque_atomic_to_ssbo(ret);
+     return ret;
+ }
+ 
+@@ -854,11 +866,25 @@ std::string spirv_to_essl(std::vector<unsigned int> spirv, uint essl_version, in
+ }
+ 
+ static bool glslang_inited = false;
+-std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_version, int& return_code) {
++std::optional<glsl2es_ret> GLSLtoGLSLES(const char* glsl_code, GLenum glsl_type, uint essl_version, uint glsl_version) {
++	/*
++    std::string sha256_string(glsl_code);
++    sha256_string += "\n//" + std::to_string(MAJOR) + "." + std::to_string(MINOR) + "." + std::to_string(REVISION) +
++                     "|" + std::to_string(essl_version);
++    const char* cachedESSL = Cache::get_instance().get(sha256_string.c_str());
++    if (cachedESSL) {
++        LOG_D("GLSL Hit Cache:\n%s\n-->\n%s", glsl_code, cachedESSL)
++        bool atomicCounterEmulated = checkIfAtomicCounterBufferEmulated(std::string(cachedESSL));
++        return glsl2es_ret{std::string(cachedESSL), atomicCounterEmulated, false};
++    }
++	*/
++
+     bool atomicCounterEmulated = false;
+-    std::string correct_glsl_str = preprocess_glsl(glsl_code, glsl_type, &atomicCounterEmulated);
++	auto samplerBufferEmulations = std::vector<std::string>();
++    std::string correct_glsl_str =
++        preprocess_glsl(glsl_code, glsl_type, atomicCounterEmulated, samplerBufferEmulations);
+     LOG_D("Firstly converted GLSL:\n%s", correct_glsl_str.c_str())
+-    int glsl_version = get_or_add_glsl_version(correct_glsl_str);
++    int glsl_version_actual = get_or_add_glsl_version(correct_glsl_str);
+ 
+     if (!glslang_inited) {
+         glslang::InitializeProcess();
+@@ -866,20 +892,17 @@ std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_ve
+     }
+     const char* s[] = {correct_glsl_str.c_str()};
+     int errc = 0;
+-    std::vector<unsigned int> spirv_code = glsl_to_spirv(glsl_type, glsl_version, s, errc);
++    std::vector<unsigned int> spirv_code = glsl_to_spirv(glsl_type, glsl_version_actual, s, errc);
+     if (errc != 0) {
+-        return_code = -1;
+-        return "";
++        return std::nullopt;
+     }
+     errc = 0;
+     std::string essl = spirv_to_essl(spirv_code, essl_version, errc);
+     if (errc != 0) {
+-        return_code = -2;
+-        return "";
++        return std::nullopt;
+     }
+ 
+     // Post-processing ESSL
+-
+     if (glsl_type != GL_COMPUTE_SHADER) {
+         essl = removeLayoutBinding(essl);
+     }
+@@ -887,26 +910,11 @@ std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_ve
+     essl = forceSupporterOutput(essl);
+ 
+     LOG_D("Originally GLSL to GLSL ES Complete: \n%s", essl.c_str())
+-    return_code = errc;
+-    if (return_code == 0) {
+-        return_code = atomicCounterEmulated ? 1 : 0;
+-    }
+-    return essl;
+-}
+ 
+-std::string GLSLtoGLSLES_1(const char* glsl_code, GLenum glsl_type, uint esversion, int& return_code) { // useless now
+-    /*
+-#if !defined(__APPLE__)
+-    LOG_W("Warning: use glsl optimizer to convert shader.")
+-    if (esversion < 300) esversion = 300;
+-    std::string result = MesaConvertShader(glsl_code, glsl_type == GL_VERTEX_SHADER ? GL_VERTEX_SHADER :
+-GL_FRAGMENT_SHADER, 460LL, esversion);
++    if (!essl.empty()) {
++        essl = process_uniform_declarations(essl);
++        //Cache::get_instance().put(sha256_string.c_str(), essl.c_str());
++    }
+ 
+-    return_code = 0;
+-    return result;
+-#else
+-    LOG_W_FORCE("Cannot convert glsl with version %d in MacOS/iOS", esversion);
+-    return std::string(glsl_code);
+-#endif
+-    */
++    return glsl2es_ret{essl, atomicCounterEmulated, samplerBufferEmulations};
+ }
+diff --git a/MobileGlues-cpp/gl/glsl/glsl_for_es.h b/MobileGlues-cpp/gl/glsl/glsl_for_es.h
+index 017a228..cefdc4c 100644
+--- a/MobileGlues-cpp/gl/glsl/glsl_for_es.h
++++ b/MobileGlues-cpp/gl/glsl/glsl_for_es.h
+@@ -13,6 +13,8 @@
+ #include <GL/gl.h>
+ #include <stdio.h>
+ #include <string>
++#include <optional>
++#include <vector>
+ 
+ #ifdef __cplusplus
+ extern "C"
+@@ -23,10 +25,15 @@ extern "C"
+ }
+ #endif
+ 
+-std::string GLSLtoGLSLES(const char* glsl_code, GLenum glsl_type, uint essl_version, uint glsl_version,
+-                         int& return_code);
++// Return type for GLSL to GLSL ES conversion
++struct glsl2es_ret {
++    std::string transpiled;
++    bool atomicCounterEmulated;
++	std::vector<std::string> samplerBufferEmulations;
++};
++
++std::optional<glsl2es_ret> GLSLtoGLSLES(const char* glsl_code, GLenum glsl_type, uint essl_version, uint glsl_version);
+ std::string GLSLtoGLSLES_1(const char* glsl_code, GLenum glsl_type, uint esversion, int& return_code);
+-std::string GLSLtoGLSLES_2(const char* glsl_code, GLenum glsl_type, uint essl_version, int& return_code);
+ int getGLSLVersion(const char* glsl_code);
+ 
+-#endif
+\ No newline at end of file
++#endif
 diff --git a/MobileGlues-cpp/gl/log.h b/MobileGlues-cpp/gl/log.h
-index 0e67498..d557a26 100644
+index 0e67498..63ed7a3 100644
 --- a/MobileGlues-cpp/gl/log.h
 +++ b/MobileGlues-cpp/gl/log.h
-@@ -11,7 +11,7 @@
- 
- #define FORCE_SYNC_WITH_LOG_FILE 0
- 
--#define GLOBAL_DEBUG 0
-+#define GLOBAL_DEBUG 1
- 
- #define LOG_CALLED_FUNCS 0
- 
 @@ -72,7 +72,7 @@ int __android_log_print(int prio, const char* tag, const char* fmt, ...);
  void log_unique_function(const char* func_name);
  #else
@@ -329,12 +1531,253 @@ index 0e67498..d557a26 100644
 -#endif // MOBILEGLUES_LOG_H
 \ No newline at end of file
 +#endif // MOBILEGLUES_LOG_H
+diff --git a/MobileGlues-cpp/gl/multidraw.cpp b/MobileGlues-cpp/gl/multidraw.cpp
+index 849db14..19c2c38 100644
+--- a/MobileGlues-cpp/gl/multidraw.cpp
++++ b/MobileGlues-cpp/gl/multidraw.cpp
+@@ -6,6 +6,7 @@
+ // End of Source File Header
+ 
+ #include "multidraw.h"
++#include "buffer.h"
+ #include "../config/settings.h"
+ #include <cstdint>
+ #include <limits>
+@@ -185,15 +186,13 @@ void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, GLsizei* counts,
+         }
+ 
+         if (prevElementBuffer != 0) {
+-            GLES.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, prevElementBuffer);
+-            srcData = GLES.glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)currentIndices, currentCount * indexSize,
+-                                            GL_MAP_READ_BIT);
+-
+-            if (!srcData) {
++            if (!mgReadBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)currentIndices, currentCount * indexSize,
++                                     tempIndices)) {
+                 free(tempIndices);
+                 GLES.glDeleteBuffers(1, &tempBuffer);
+                 continue;
+             }
++            srcData = tempIndices;
+         } else {
+             srcData = (void*)currentIndices;
+         }
+@@ -216,10 +215,6 @@ void mg_glMultiDrawElementsBaseVertex_drawelements(GLenum mode, GLsizei* counts,
+             break;
+         }
+ 
+-        if (prevElementBuffer != 0) {
+-            GLES.glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+-        }
+-
+         GLES.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, tempBuffer);
+         GLES.glBufferData(GL_ELEMENT_ARRAY_BUFFER, currentCount * indexSize, tempIndices, GL_STREAM_DRAW);
+         free(tempIndices);
+diff --git a/MobileGlues-cpp/gl/program.cpp b/MobileGlues-cpp/gl/program.cpp
+index abbef71..c9a9cb4 100644
+--- a/MobileGlues-cpp/gl/program.cpp
++++ b/MobileGlues-cpp/gl/program.cpp
+@@ -17,11 +17,12 @@
+ #include "../config/settings.h"
+ #include <ankerl/unordered_dense.h>
+ #include "drawing.h"
++#include <vector>
+ 
+ #define DEBUG 0
+ 
+-extern UnorderedMap<GLuint, bool> shader_map_is_sampler_buffer_emulated;
+-UnorderedMap<GLuint, bool> program_map_is_sampler_buffer_emulated;
++extern UnorderedMap<GLuint, std::vector<std::string>> shader_map_sampler_buffer_emulations;
++UnorderedMap<GLuint, std::vector<std::string>> program_map_sampler_buffer_emulations;
+ 
+ extern UnorderedMap<GLuint, bool> shader_map_is_atomic_counter_emulated;
+ UnorderedMap<GLuint, bool> program_map_is_atomic_counter_emulated;
+@@ -205,8 +206,11 @@ void glUseProgram(GLuint program) {
+ void glAttachShader(GLuint program, GLuint shader) {
+     LOG()
+     LOG_D("glAttachShader(%u, %u)", program, shader)
+-    if (hardware->emulate_texture_buffer && shader_map_is_sampler_buffer_emulated[shader])
+-        program_map_is_sampler_buffer_emulated[program] = true;
++    if (hardware->emulate_texture_buffer) {
++        auto& program_array = program_map_sampler_buffer_emulations[program];
++        const auto& shader_array = shader_map_sampler_buffer_emulations[shader];
++        program_array.insert(program_array.end(), shader_array.begin(), shader_array.end());
++    }
+     if (shader_map_is_atomic_counter_emulated[shader]) {
+         program_map_is_atomic_counter_emulated[program] = true;
+         LOG_D("Shader %d is atomic counter emulated, setting program %d to atomic counter emulated", shader, program)
+@@ -235,7 +239,7 @@ GLuint glCreateProgram() {
+     LOG_D("glCreateProgram")
+     GLuint program = GLES.glCreateProgram();
+     if (hardware->emulate_texture_buffer) {
+-        program_map_is_sampler_buffer_emulated[program] = false;
++        program_map_sampler_buffer_emulations[program] = {};
+         if (g_samplerCacheForSamplerBuffer.find(program) != g_samplerCacheForSamplerBuffer.end()) {
+             g_samplerCacheForSamplerBuffer.erase(program);
+         }
 diff --git a/MobileGlues-cpp/gl/shader.cpp b/MobileGlues-cpp/gl/shader.cpp
-index 1a2d934..1017231 100644
+index 1a2d934..9371c43 100644
 --- a/MobileGlues-cpp/gl/shader.cpp
 +++ b/MobileGlues-cpp/gl/shader.cpp
-@@ -135,4 +135,4 @@ GLuint glCreateShader(GLenum shaderType) {
-     if (shader != 0 && hardware->emulate_texture_buffer) shader_map_is_sampler_buffer_emulated[shader] = false;
+@@ -16,12 +16,13 @@
+ #include "glsl/glsl_for_es.h"
+ #include "../config/settings.h"
+ #include "FSR1/FSR1.h"
++#include <vector>
+ 
+ #define DEBUG 0
+ 
+ struct shader_t shaderInfo;
+ 
+-UnorderedMap<GLuint, bool> shader_map_is_sampler_buffer_emulated;
++UnorderedMap<GLuint, std::vector<std::string>> shader_map_sampler_buffer_emulations;
+ UnorderedMap<GLuint, bool> shader_map_is_atomic_counter_emulated;
+ 
+ bool can_run_essl3(unsigned int esversion, const char* glsl) {
+@@ -47,69 +48,75 @@ bool is_direct_shader(const char* glsl) {
+     return es3_ability;
+ }
+ 
+-bool check_if_sampler_buffer_used(std::string str) {
+-    return str.find("samplerBuffer") != std::string::npos;
+-}
+-
+ void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
+-    LOG()
+-    shaderInfo.id = 0;
+-    shaderInfo.converted = "";
+-    shaderInfo.frag_data_changed = 0;
+-    size_t l = 0;
+-    for (int i = 0; i < count; i++)
+-        l += (length && length[i] >= 0) ? length[i] : strlen(string[i]);
+-    std::string glsl_src, essl_src;
+-    glsl_src.reserve(l + 1);
+-    if (length) {
+-        for (int i = 0; i < count; i++) {
+-            if (length[i] >= 0)
+-                glsl_src += std::string_view(string[i], length[i]);
+-            else
+-                glsl_src += string[i];
+-        }
+-    } else {
+-        for (int i = 0; i < count; i++) {
+-            glsl_src += string[i];
+-        }
+-    }
+-
+-    bool is_sampler_buffer_emulated = hardware->emulate_texture_buffer && check_if_sampler_buffer_used(glsl_src);
+-
+-    if (is_direct_shader(glsl_src.c_str())) {
+-        LOG_D("[INFO] [Shader] Direct shader source: ")
+-        LOG_D("%s", glsl_src.c_str())
+-        essl_src = glsl_src;
+-    } else {
+-        int glsl_version = getGLSLVersion(glsl_src.c_str());
+-        LOG_D("[INFO] [Shader] Shader source: ")
+-        LOG_D("%s", glsl_src.c_str())
+-        GLint shaderType;
+-        GLES.glGetShaderiv(shader, GL_SHADER_TYPE, &shaderType);
+-        int return_code = 0;
+-        essl_src = GLSLtoGLSLES(glsl_src.c_str(), shaderType, hardware->es_version, glsl_version, return_code);
+-        if (return_code == 1) { // atomicCounterEmulated
+-            shader_map_is_atomic_counter_emulated[shader] = true;
+-            LOG_D("[INFO] [Shader] Atomic counter emulated in shader %d", shader)
+-        }
+-
+-        if (essl_src.empty()) {
+-            LOG_E("Failed to convert shader %d.", shader)
+-            return;
+-        }
+-        LOG_D("\n[INFO] [Shader] Converted Shader source: \n%s", essl_src.c_str())
+-    }
+-    if (!essl_src.empty()) {
+-        shaderInfo.id = shader;
+-        shaderInfo.converted = essl_src;
+-        const char* s[] = {essl_src.c_str()};
+-        GLES.glShaderSource(shader, count, s, nullptr);
+-        if (hardware->emulate_texture_buffer)
+-            shader_map_is_sampler_buffer_emulated[shader] = is_sampler_buffer_emulated;
+-    } else
+-        LOG_E("Failed to convert glsl.")
+-    CHECK_GL_ERROR
+-}
++     LOG()
++     shaderInfo.id = 0;
++     shaderInfo.converted = "";
++     shaderInfo.frag_data_changed = 0;
++     size_t l = 0;
++     for (int i = 0; i < count; i++)
++         l += (length && length[i] >= 0) ? length[i] : strlen(string[i]);
++     std::string glsl_src, essl_src;
++     glsl_src.reserve(l + 1);
++     if (length) {
++         for (int i = 0; i < count; i++) {
++             if (length[i] >= 0)
++                 glsl_src += std::string_view(string[i], length[i]);
++             else
++                 glsl_src += string[i];
++         }
++     } else {
++         for (int i = 0; i < count; i++) {
++             glsl_src += string[i];
++         }
++     }
++
++     std::optional<glsl2es_ret> conversion_result;
++
++     if (is_direct_shader(glsl_src.c_str())) {
++         LOG_D("[INFO] [Shader] Direct shader source: ")
++         LOG_D("%s", glsl_src.c_str())
++         essl_src = glsl_src;
++     } else {
++         int glsl_version = getGLSLVersion(glsl_src.c_str());
++         LOG_D("[INFO] [Shader] Shader source: ")
++         LOG_D("%s", glsl_src.c_str())
++         GLint shaderType;
++         GLES.glGetShaderiv(shader, GL_SHADER_TYPE, &shaderType);
++         conversion_result = GLSLtoGLSLES(glsl_src.c_str(), shaderType, hardware->es_version, glsl_version);
++         
++         if (!conversion_result) {
++             LOG_E("Failed to convert shader %d.", shader)
++             return;
++         }
++         
++         essl_src = conversion_result->transpiled;
++         
++         if (conversion_result->atomicCounterEmulated) {
++             shader_map_is_atomic_counter_emulated[shader] = true;
++             LOG_D("[INFO] [Shader] Atomic counter emulated in shader %d", shader)
++         }
++
++         if (essl_src.empty()) {
++             LOG_E("Failed to convert shader %d.", shader)
++             return;
++         }
++         LOG_D("\n[INFO] [Shader] Converted Shader source: \n%s", essl_src.c_str())
++     }
++     if (!essl_src.empty()) {
++         shaderInfo.id = shader;
++         shaderInfo.converted = essl_src;
++         const char* s[] = {essl_src.c_str()};
++         GLES.glShaderSource(shader, count, s, nullptr);
++		 if (conversion_result) {
++			 shader_map_sampler_buffer_emulations[shader] = conversion_result->samplerBufferEmulations;
++		 } else {
++			 shader_map_sampler_buffer_emulations[shader] = std::vector<std::string>();
++		 }
++     } else
++         LOG_E("Failed to convert glsl.")
++     CHECK_GL_ERROR
++ }
+ 
+ void glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
+     LOG()
+@@ -132,7 +139,7 @@ GLuint glCreateShader(GLenum shaderType) {
+     LOG()
+     LOG_D("glCreateShader(%s)", glEnumToString(shaderType))
+     GLuint shader = GLES.glCreateShader(shaderType);
+-    if (shader != 0 && hardware->emulate_texture_buffer) shader_map_is_sampler_buffer_emulated[shader] = false;
++    if (shader != 0 && hardware->emulate_texture_buffer) shader_map_sampler_buffer_emulations[shader] = {};
      CHECK_GL_ERROR
      return shader;
 -}
@@ -353,8 +1796,28 @@ index fe02cad..e30d0b9 100644
  #include <android/log.h>
  #include <malloc.h>
  #endif
+diff --git a/MobileGlues-cpp/gles/gles.h b/MobileGlues-cpp/gles/gles.h
+index 2cf6905..5624e10 100644
+--- a/MobileGlues-cpp/gles/gles.h
++++ b/MobileGlues-cpp/gles/gles.h
+@@ -210,6 +210,7 @@ extern "C"
+     GL_FUNC_TYPEDEF(void, glGetQueryiv, GLenum target, GLenum pname, GLint* params)
+     GL_FUNC_TYPEDEF(void, glGetQueryObjectuiv, GLuint id, GLenum pname, GLuint* params)
+     GL_FUNC_TYPEDEF(GLboolean, glUnmapBuffer, GLenum target)
++    GL_FUNC_TYPEDEF(void, glGetBufferSubData, GLenum target, GLintptr offset, GLsizeiptr size, void* data)
+     GL_FUNC_TYPEDEF(void, glGetBufferPointerv, GLenum target, GLenum pname, void** params)
+     GL_FUNC_TYPEDEF(void, glDrawBuffers, GLsizei n, const GLenum* bufs)
+     GL_FUNC_TYPEDEF(void, glUniformMatrix2x3fv, GLint location, GLsizei count, GLboolean transpose,
+@@ -643,6 +644,7 @@ extern "C"
+         GL_FUNC_DECL(glGetQueryiv)
+         GL_FUNC_DECL(glGetQueryObjectuiv)
+         GL_FUNC_DECL(glUnmapBuffer)
++        GL_FUNC_DECL(glGetBufferSubData)
+         GL_FUNC_DECL(glGetBufferPointerv)
+         GL_FUNC_DECL(glDrawBuffers)
+         GL_FUNC_DECL(glUniformMatrix2x3fv)
 diff --git a/MobileGlues-cpp/gles/loader.cpp b/MobileGlues-cpp/gles/loader.cpp
-index 9e42471..d340b01 100644
+index 9e42471..d248f22 100644
 --- a/MobileGlues-cpp/gles/loader.cpp
 +++ b/MobileGlues-cpp/gles/loader.cpp
 @@ -10,6 +10,10 @@
@@ -392,6 +1855,14 @@ index 9e42471..d340b01 100644
  }
  
  void set_hardware() {
+@@ -381,6 +392,7 @@ void init_target_gles() {
+     INIT_GLES_FUNC(glGetQueryiv)
+     INIT_GLES_FUNC(glGetQueryObjectuiv)
+     INIT_GLES_FUNC(glUnmapBuffer)
++    INIT_GLES_FUNC(glGetBufferSubData)
+     INIT_GLES_FUNC(glGetBufferPointerv)
+     INIT_GLES_FUNC(glDrawBuffers)
+     INIT_GLES_FUNC(glUniformMatrix2x3fv)
 diff --git a/MobileGlues-cpp/gles/loader.h b/MobileGlues-cpp/gles/loader.h
 index bccd3ab..3577a31 100644
 --- a/MobileGlues-cpp/gles/loader.h
