@@ -33,6 +33,24 @@ index 2b613b6..47e0b83 100644
      UNUSED_PARAMS(vm, reserved);
      tlsDestroy();
  }
+diff --git a/modules/lwjgl/core/src/main/c/libffi/ffi.h b/modules/lwjgl/core/src/main/c/libffi/ffi.h
+index f58609e..33b7ab1 100644
+--- a/modules/lwjgl/core/src/main/c/libffi/ffi.h
++++ b/modules/lwjgl/core/src/main/c/libffi/ffi.h
+@@ -379,6 +379,13 @@ typedef struct {
+ FFI_API void *ffi_closure_alloc (size_t size, void **code);
+ FFI_API void ffi_closure_free (void *);
+ 
++FFI_API ffi_status
++ffi_alloc_prep_closure (ffi_closure **pclosure,
++			ffi_cif *cif,
++			void (*fun)(ffi_cif*,void*,void**,void*),
++			void *user_data,
++			void **code);
++
+ FFI_API ffi_status
+ ffi_prep_closure (ffi_closure*,
+ 		  ffi_cif *,
 diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
 index 92de410..8ffc752 100644
 --- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
@@ -109,17 +127,120 @@ index 9ddee4d..72e5256 100644
 \ No newline at end of file
 +}
 diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
-index aaab4de..88ee07c 100644
+index aaab4de..75a5cf8 100644
 --- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
 +++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
-@@ -141,6 +141,7 @@ final class Upcalls {
-         if (errcode != FFI_OK) {
-             DeleteGlobalRef(user_data);
-             ffi_closure_free(closure);
-+			System.out.println("[LWJGL] :3 " + closure + " " + descriptor.cif + " " + CALLBACK_HANDLER + " " + user_data + " " + executableAddress + " " + errcode);
-             throw new RuntimeException("Failed to prepare the libffi closure");
+@@ -37,56 +37,24 @@ final class Upcalls {
+     }
+ 
+     static {
+-        // Detect whether we need to maintain a mapping from executable addresses to FFIClosure structs.
+-        try (MemoryStack stack = stackPush()) {
+-            PointerBuffer code = stack.mallocPointer(1);
++        apiLog("Closure Registry: ConcurrentHashMap");
+ 
+-            FFIClosure closure = ffi_closure_alloc(CLOSURE_SIZE, code);
+-            if (closure == null) {
+-                throw new OutOfMemoryError();
+-            }
++        CLOSURE_REGISTRY = new ClosureRegistry() {
++            private final ConcurrentHashMap<Long, FFIClosure> map = new ConcurrentHashMap<>();
+ 
+-            if (code.get(0) == closure.address()) {
+-                apiLog("Closure Registry: simple");
+-
+-                // When the closure address matches the executable address, we don't have to maintain any mappings.
+-                // We can simply cast the executable address to ffi_closure. This is true on many platforms.
+-                CLOSURE_REGISTRY = new ClosureRegistry() {
+-                    @Override
+-                    public void put(long executableAddress, FFIClosure closure) {
+-                        // no-op
+-                    }
+-                    @Override
+-                    public FFIClosure get(long executableAddress) {
+-                        return FFIClosure.create(executableAddress);
+-                    }
+-                    @Override
+-                    public FFIClosure remove(long executableAddress) {
+-                        return get(executableAddress);
+-                    }
+-                };
+-            } else {
+-                apiLog("Closure Registry: ConcurrentHashMap");
+-
+-                CLOSURE_REGISTRY = new ClosureRegistry() {
+-                    private final ConcurrentHashMap<Long, FFIClosure> map = new ConcurrentHashMap<>();
+-
+-                    @Override
+-                    public void put(long executableAddress, FFIClosure closure) {
+-                        map.put(executableAddress, closure);
+-                    }
+-                    @Override
+-                    public FFIClosure get(long executableAddress) {
+-                        return map.get(executableAddress);
+-                    }
+-                    @Override
+-                    public FFIClosure remove(long executableAddress) {
+-                        return map.remove(executableAddress);
+-                    }
+-                };
++            @Override
++            public void put(long executableAddress, FFIClosure closure) {
++                map.put(executableAddress, closure);
+             }
+-            ffi_closure_free(closure);
+-        }
++            @Override
++            public FFIClosure get(long executableAddress) {
++                return map.get(executableAddress);
++            }
++            @Override
++            public FFIClosure remove(long executableAddress) {
++                return map.remove(executableAddress);
++            }
++        };
+     }
+ 
+     /** Address of the native upcall handler that will call the Java method when the native callback function is invoked. */
+@@ -124,26 +92,26 @@ final class Upcalls {
+         long executableAddress;
+         try (MemoryStack stack = stackPush()) {
+             PointerBuffer code = stack.mallocPointer(1);
++            PointerBuffer pclosure = stack.mallocPointer(1);
+ 
+-            closure = ffi_closure_alloc(CLOSURE_SIZE, code);
+-            if (closure == null) {
+-                throw new OutOfMemoryError();
++            long user_data = NewGlobalRef(instance);
++            int errcode = nffi_alloc_prep_closure(memAddress(pclosure), descriptor.cif.address(), CALLBACK_HANDLER, user_data, memAddress(code));
++            if (errcode != FFI_OK) {
++                DeleteGlobalRef(user_data);
++                throw new RuntimeException("Failed to prepare the libffi closure");
+             }
++
+             executableAddress = code.get(0);
++            closure = FFIClosure.createSafe(pclosure.get(0));
++            if (closure == null) {
++                DeleteGlobalRef(user_data);
++                throw new RuntimeException("Failed to allocate the libffi closure");
++            }
+             if (DEBUG_ALLOCATOR) {
+                 MemoryManage.DebugAllocator.track(executableAddress, CLOSURE_SIZE);
+             }
          }
  
+-        long user_data = NewGlobalRef(instance);
+-
+-        int errcode = ffi_prep_closure_loc(closure, descriptor.cif, CALLBACK_HANDLER, user_data, executableAddress);
+-        if (errcode != FFI_OK) {
+-            DeleteGlobalRef(user_data);
+-            ffi_closure_free(closure);
+-            throw new RuntimeException("Failed to prepare the libffi closure");
+-        }
+-
+         CLOSURE_REGISTRY.put(executableAddress, closure);
+ 
+         return executableAddress;
 diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
 index 5c4e929..bd82a6f 100644
 --- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
@@ -262,6 +383,34 @@ index 5c4e929..bd82a6f 100644
 +        }
      }
  
+-}
+\ No newline at end of file
++}
+diff --git a/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt b/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt
+index 7508e5d..70d156d 100644
+--- a/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt
++++ b/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt
+@@ -226,6 +226,16 @@ typedef void (*FFI_CLOSURE_FUN)(ffi_cif*, void*, void**, void*);
+         ffi_closure.p("writable")
+     )
+ 
++    ffi_status(
++        "alloc_prep_closure",
++
++        Check(1)..ffi_closure.p.p("pclosure"),
++        ffi_cif.p("cif"),
++        FFI_CLOSURE_FUN("fun"),
++        nullable..opaque_p("user_data"),
++        Check(1)..void.p.p("code")
++    )
++
+     ffi_status(
+         "prep_closure_loc",
+ 
+@@ -235,4 +245,4 @@ typedef void (*FFI_CLOSURE_FUN)(ffi_cif*, void*, void**, void*);
+         nullable..opaque_p("user_data"),
+         opaque_p("codeloc")
+     )
 -}
 \ No newline at end of file
 +}
