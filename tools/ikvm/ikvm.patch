@@ -108,6 +108,23 @@ index bfef3bb82..21221ff72 100644
      </Target>
  
      <Target Name="ResolveJava" DependsOnTargets="FindJdk" Condition=" '$(JavaPath)' == '' ">
+diff --git a/src/IKVM.Runtime/ExceptionHelper.cs b/src/IKVM.Runtime/ExceptionHelper.cs
+index f54199cef..e2b532371 100644
+--- a/src/IKVM.Runtime/ExceptionHelper.cs
++++ b/src/IKVM.Runtime/ExceptionHelper.cs
+@@ -870,11 +870,7 @@ Exception MapTypeInitializeException(TypeInitializationException t, Type handler
+             var r = MapException<Exception>(t.InnerException, true, false);
+             if (r is not java.lang.Error)
+             {
+-                // Forwarding "r" as cause only doesn't make it available in the debugger details
+-                // of current versions of VS, so at least provide a text representation instead.
+-                // Not wrapping at all might be the even better approach, but it was introduced for
+-                // some reason I guess.
+-                r = new java.lang.ExceptionInInitializerError(r.ToString());
++                r = new java.lang.ExceptionInInitializerError(r);
+                 wrapped = true;
+             }
+ 
 diff --git a/src/IKVM.Runtime/JNI/JNIEnv.cs b/src/IKVM.Runtime/JNI/JNIEnv.cs
 index 87f4359c1..efb3c273f 100644
 --- a/src/IKVM.Runtime/JNI/JNIEnv.cs
@@ -3486,6 +3503,77 @@ index 000000000..bf21a7868
 +    }
 +
 +}
+diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
+index 4c3c07e12..6cf70fe3c 100644
+--- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
++++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
+@@ -1281,7 +1281,7 @@ FinishedTypeImpl FinishCore()
+                     {
+                         // In dynamic mode, we may need to emit a call to this method from a DynamicMethod which doesn't support calling unfinished methods,
+                         // so we must resolve to the real method here.
+-                        finishedClinitMethod = type.GetMethod("__<clinit>", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
++                        finishedClinitMethod = type.GetMethod("__<clinit>", BindingFlags.DeclaredOnly | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                     }
+ #endif
+ 
+@@ -2998,4 +2998,4 @@ internal override RuntimeJavaType Host
+ 
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/IKVM.Runtime/RuntimeJavaMethod.cs b/src/IKVM.Runtime/RuntimeJavaMethod.cs
+index 833b0af1a..75e4e6a31 100644
+--- a/src/IKVM.Runtime/RuntimeJavaMethod.cs
++++ b/src/IKVM.Runtime/RuntimeJavaMethod.cs
+@@ -470,6 +470,24 @@ internal Type GetDelegateType()
+             return DeclaringType.Context.MethodHandleUtil.CreateMemberWrapperDelegateType(paramTypes, ReturnType);
+         }
+ 
++		static bool SignatureTypesMatch(Type expected, Type actual)
++		{
++			if (expected == actual)
++				return true;
++			if (expected == null || actual == null)
++				return false;
++			// Mono WASM patched runtimes can surface a rank-1 array mismatch where
++			// one side is SZARRAY (T[]) and the other is VECTOR-like non-SZ (T[*]).
++			if (expected.IsArray && actual.IsArray && expected.GetArrayRank() == 1 && actual.GetArrayRank() == 1)
++			{
++				var expectedElement = expected.GetElementType();
++				var actualElement = actual.GetElementType();
++				if (expectedElement == actualElement && expected.IsSZArray != actual.IsSZArray)
++					return true;
++			}
++			return false;
++		}
++
+         /// <summary>
+         /// Resolves the potentially dynamic member into it's final runtime method.
+         /// </summary>
+@@ -510,7 +528,7 @@ internal void ResolveMethod()
+                 var flags = BindingFlags.DeclaredOnly;
+                 flags |= mb.IsPublic ? BindingFlags.Public : BindingFlags.NonPublic;
+                 flags |= mb.IsStatic ? BindingFlags.Static : BindingFlags.Instance;
+-                method = DeclaringType.TypeAsTBD.GetMethods(flags).FirstOrDefault(i => i.Name == mb.Name && i.GetParameters().Select(j => j.ParameterType).SequenceEqual(types) && i.ReturnType.Equals(ReturnType.TypeAsSignatureType));
++                method = DeclaringType.TypeAsTBD.GetMethods(flags).FirstOrDefault(i => i.Name == mb.Name && i.GetParameters().Select(j => j.ParameterType).SequenceEqual(types) && SignatureTypesMatch(i.ReturnType, ReturnType.TypeAsSignatureType));
+                 if (method == null)
+                     method = DeclaringType.TypeAsTBD.GetConstructor(flags, null, types, null);
+                 if (method == null)
+diff --git a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs b/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
+index 05961e1ed..5492a5393 100644
+--- a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
++++ b/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
+@@ -54,7 +54,7 @@ sealed class RuntimeUnloadableJavaType : RuntimeJavaType
+         internal RuntimeUnloadableJavaType(RuntimeContext context, string name) :
+             base(context, TypeFlags.None, RuntimeJavaType.UnloadableModifiersHack, name)
+         {
+-
++			Console.WriteLine($"[IKVM internal] Java type failed to load!! This may crash later {name}");
+         }
+ 
+         /// <summary>
 diff --git a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs b/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
 index 6714bea45..1fb144dc5 100644
 --- a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
