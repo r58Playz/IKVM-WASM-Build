@@ -234,18 +234,21 @@ index cfa866b..c164f3c 100644
    }
  }
 diff --git a/src/cpp/glfw3.cpp b/src/cpp/glfw3.cpp
-index 8475a25..c1b30ca 100644
+index 8475a25..0d8c4d5 100644
 --- a/src/cpp/glfw3.cpp
 +++ b/src/cpp/glfw3.cpp
-@@ -19,6 +19,7 @@
+@@ -19,7 +19,10 @@
  #include "../../include/GLFW/emscripten_glfw3.h"
  #include "../../include/GLFW/emscripten_glfw3_version.h"
  #include "emscripten/glfw3/Context.h"
++#include <emscripten.h>
 +#include <emscripten/html5_webgl.h>
  #include <memory>
++#include <stdint.h>
  #include "emscripten/glfw3/ErrorHandler.h"
  #include "emscripten/glfw3/Keyboard.h"
-@@ -117,6 +118,8 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
+ 
+@@ -117,6 +120,8 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
  extern "C" {
  #endif
  
@@ -254,7 +257,7 @@ index 8475a25..c1b30ca 100644
  //------------------------------------------------------------------------
  // glfwInit
  //------------------------------------------------------------------------
-@@ -1310,11 +1313,21 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
+@@ -1310,11 +1315,21 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
  //------------------------------------------------------------------------
  GLFWAPI const GLFWvidmode* glfwGetVideoModes(GLFWmonitor* monitor, int* count)
  {
@@ -278,7 +281,62 @@ index 8475a25..c1b30ca 100644
  GLFWAPI GLFWcharmodsfun glfwSetCharModsCallback(GLFWwindow* window, GLFWcharmodsfun callback)
  {
    ErrorHandler::instance().logWarning("glfwSetCharModsCallback is deprecated.");
-@@ -1336,7 +1349,46 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
+@@ -1324,7 +1339,53 @@ GLFWAPI void glfwInitAllocator(const GLFWallocator* allocator) { logNotImplement
+ GLFWAPI void glfwSetGamma(GLFWmonitor* monitor, float gamma) { logNotAvailable("glfwSetGamma"); }
+ GLFWAPI const GLFWgammaramp* glfwGetGammaRamp(GLFWmonitor* monitor) { logNotAvailable("glfwGetGammaRamp"); return nullptr; }
+ GLFWAPI void glfwSetGammaRamp(GLFWmonitor* monitor, const GLFWgammaramp* ramp) { logNotAvailable("glfwSetGammaRamp"); }
+-GLFWAPI void glfwSetWindowIcon(GLFWwindow* window, int count, const GLFWimage* images) { logNotAvailable("glfwSetWindowIcon"); }
++// glfwSetWindowIcon: GLFW says "the application icon, typically displayed in the window
++// caption, in the dock or taskbar". Browsers don't have a window icon proper; the closest
++// analogue is the favicon. We pick the largest provided image, blit its RGBA pixels onto
++// a 2D canvas, encode as a PNG data URL, and assign it to (or create) <link rel="icon">.
++// Mirrors how SDL3 maps SDL_SetWindowIcon under emscripten.
++GLFWAPI void glfwSetWindowIcon(GLFWwindow* window, int count, const GLFWimage* images)
++{
++  (void)window;
++  if (count <= 0 || images == nullptr) {
++    return;
++  }
++  // Pick the largest image (by pixel count) — browsers downscale fine, upscaling looks bad.
++  int best = 0;
++  for (int i = 1; i < count; i++) {
++    if ((long long)images[i].width * images[i].height >
++        (long long)images[best].width * images[best].height) {
++      best = i;
++    }
++  }
++  const GLFWimage& img = images[best];
++  if (img.width <= 0 || img.height <= 0 || img.pixels == nullptr) {
++    return;
++  }
++  MAIN_THREAD_EM_ASM({
++    try {
++      var w = $0 | 0;
++      var h = $1 | 0;
++      var p = $2 | 0;
++      var c = document.createElement('canvas');
++      c.width = w;
++      c.height = h;
++      var ctx = c.getContext('2d');
++      var img = ctx.createImageData(w, h);
++      img.data.set(HEAPU8.subarray(p, p + w * h * 4));
++      ctx.putImageData(img, 0, 0);
++      var url = c.toDataURL('image/png');
++      var link = document.querySelector("link[rel~='icon']");
++      if (!link) {
++        link = document.createElement('link');
++        link.rel = 'icon';
++        document.head.appendChild(link);
++      }
++      link.type = 'image/png';
++      link.href = url;
++    } catch (e) { console.warn('[glfwSetWindowIcon] failed:', e); }
++  }, img.width, img.height, (uintptr_t)img.pixels);
++}
+ GLFWAPI void glfwIconifyWindow(GLFWwindow* window) { logNotImplemented("glfwIconifyWindow"); }
+ GLFWAPI void glfwRestoreWindow(GLFWwindow* window) { logNotImplemented("glfwRestoreWindow"); }
+ GLFWAPI void glfwMaximizeWindow(GLFWwindow* window) { logNotImplemented("glfwMaximizeWindow"); }
+@@ -1336,7 +1397,46 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
  GLFWAPI GLFWwindowiconifyfun glfwSetWindowIconifyCallback(GLFWwindow* window, GLFWwindowiconifyfun callback) { logNotImplemented("glfwSetWindowIconifyCallback"); return callback; }
  GLFWAPI GLFWwindowmaximizefun glfwSetWindowMaximizeCallback(GLFWwindow* window, GLFWwindowmaximizefun callback) { logNotImplemented("glfwSetWindowMaximizeCallback"); return callback; }
  GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* window, GLFWdropfun callback) { logNotImplemented("glfwSetDropCallback"); return callback; }
@@ -326,7 +384,7 @@ index 8475a25..c1b30ca 100644
  // GLFWAPI GLFWglproc glfwGetProcAddress(const char* procname) { logNotImplemented("glfwGetProcAddress"); } implemented by emscripten GL
  GLFWAPI int glfwVulkanSupported(void) { return GLFW_FALSE; }
  GLFWAPI const char** glfwGetRequiredInstanceExtensions(uint32_t* count) { logNotImplemented("glfwGetRequiredInstanceExtensions"); *count = 0; return nullptr; }
-@@ -1509,4 +1561,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
+@@ -1509,4 +1609,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
    };
  }
  

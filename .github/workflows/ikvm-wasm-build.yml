@@ -126,13 +126,13 @@ jobs:
         shell: bash
         run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}"
 
-      - name: build lwjgl3
-        shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-lwjgl3.sh" --variant="${{ matrix.variant }}"
-
       - name: build libffi
         shell: bash
         run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-libffi.sh" --variant="${{ matrix.variant }}"
+
+      - name: build lwjgl3
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-lwjgl3.sh" --variant="${{ matrix.variant }}"
 
       - name: Upload Java/native dependency artifacts
         uses: actions/upload-artifact@v4

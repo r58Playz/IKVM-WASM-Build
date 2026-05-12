@@ -7,8 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
 
 LWJGL_REPO="https://github.com/LWJGL/lwjgl3.git"
-# 3.4.1 is the latest LWJGL release and compiles with emsdk 3.1.56.
-LWJGL_REF="${LWJGL_REF:-3.4.1}"
+# 3.2.2 is the LWJGL release used by Minecraft 1.16.1.
+LWJGL_REF="${LWJGL_REF:-3.2.2}"
 LWJGL_PATCH="${LWJGL_PATCH:-$SCRIPT_DIR/lwjgl3.patch}"
 EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-3.1.56}"
 ANT_VERSION="${ANT_VERSION:-1.10.15}"
@@ -27,7 +27,7 @@ Usage: build-lwjgl3.sh [options]
 Options:
   --variant=<mt|st>            Build variant (default: mt).
   --output-dir=<path>          Output directory (default: tools/native-deps/out/<variant>).
-  --lwjgl-ref=<ref>            LWJGL git ref/tag (default: 3.4.1).
+  --lwjgl-ref=<ref>            LWJGL git ref/tag (default: 3.2.2).
   --lwjgl-patch=<path>         Optional patch to apply to lwjgl clone.
   --ant-cache-root=<path>      Persistent Apache Ant cache root.
   --tmp-dir=<path>             Temporary build directory (default: mktemp).
@@ -135,10 +135,9 @@ build_binding_args() {
     local binding
 
     local all_bindings=(
-        assimp bgfx egl fmod freetype glfw harfbuzz hwloc jawt jemalloc ktx llvm lmdb lz4
-        meshoptimizer msdfgen nanovg nfd nuklear odbc openal opencl opengl opengles openxr
-        opus par remotery renderdoc rpmalloc sdl shaderc spng spvc stb tinyexr tinyfd vulkan
-        vma xxhash yoga zstd
+        assimp bgfx bullet cuda egl glfw jawt jemalloc libdivide llvm lmdb lz4 meow
+        nanovg nfd nuklear odbc openal opencl opengl opengles openvr opus par remotery
+        rpmalloc sse stb tinyexr tinyfd tootle vma vulkan xxhash yoga zstd
     )
 
     out_args=()
@@ -300,6 +299,13 @@ trap cleanup EXIT
 
 LWJGL_SRC_DIR="$WORKSPACE/lwjgl3"
 NATIVE_BUILD_DIR="$TMP_DIR/native-build"
+LIBFFI_INCLUDE_DIR="$WORKSPACE/out/$VARIANT/libffi-include"
+
+if [ ! -f "$LIBFFI_INCLUDE_DIR/ffi.h" ] || [ ! -f "$LIBFFI_INCLUDE_DIR/ffitarget.h" ]; then
+    echo "ERROR: expected configured libffi headers not found under $LIBFFI_INCLUDE_DIR" >&2
+    echo "Run build-libffi.sh for variant '$VARIANT' before build-lwjgl3.sh." >&2
+    exit 1
+fi
 
 mkdir -p "$NATIVE_BUILD_DIR/obj" "$OUTPUT_DIR"
 
@@ -315,8 +321,10 @@ ANT_CMD="$(setup_ant)"
 
 declare -a TEMPLATE_BINDING_ARGS
 declare -a COMPILE_BINDING_ARGS
-build_binding_args "glfw,egl,opengl,opengles,stb,vulkan" TEMPLATE_BINDING_ARGS
-build_binding_args "glfw,egl,opengl,stb" COMPILE_BINDING_ARGS
+build_binding_args "glfw,egl,opengl,opengles,opencl,stb,tinyfd,vulkan" TEMPLATE_BINDING_ARGS
+# opengl ARBCLEvent and glfw GLFWVulkan are generated unconditionally and require opencl/vulkan
+# classes to be on the classpath. We compile those modules' Java but do not ship their classes.
+build_binding_args "glfw,egl,opengl,opencl,stb,tinyfd,vulkan" COMPILE_BINDING_ARGS
 
 log "Compiling lwjgl3 Java classes with Ant"
 (cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${TEMPLATE_BINDING_ARGS[@]}" compile-templates)
@@ -327,7 +335,8 @@ GLFW_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/glfw"
 EGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/egl"
 OPENGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/opengl"
 STB_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/stb"
-if [ ! -d "$CORE_CLASSES_DIR" ] || [ ! -d "$GLFW_CLASSES_DIR" ] || [ ! -d "$EGL_CLASSES_DIR" ] || [ ! -d "$OPENGL_CLASSES_DIR" ] || [ ! -d "$STB_CLASSES_DIR" ]; then
+TINYFD_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/tinyfd"
+if [ ! -d "$CORE_CLASSES_DIR" ] || [ ! -d "$GLFW_CLASSES_DIR" ] || [ ! -d "$EGL_CLASSES_DIR" ] || [ ! -d "$OPENGL_CLASSES_DIR" ] || [ ! -d "$STB_CLASSES_DIR" ] || [ ! -d "$TINYFD_CLASSES_DIR" ]; then
     echo "ERROR: expected Ant compile outputs not found under $LWJGL_SRC_DIR/bin/classes/lwjgl" >&2
     exit 1
 fi
@@ -340,29 +349,36 @@ cp -a "$GLFW_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$EGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$OPENGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$STB_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
+cp -a "$TINYFD_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 jar cf "$OUTPUT_DIR/lwjgl3.jar" -C "$JAR_STAGING_DIR" .
 
 log "Compiling lwjgl3 native sources"
 NATIVE_SOURCES=(
     modules/lwjgl/core/src/main/c/common_tools.c
     modules/lwjgl/core/src/main/c/org_lwjgl_system_MemoryUtil.c
-    modules/lwjgl/core/src/main/c/org_lwjgl_system_SharedLibraryUtil.c
     modules/lwjgl/core/src/main/c/org_lwjgl_system_ThreadLocalUtil.c
-    modules/lwjgl/core/src/main/c/org_lwjgl_system_Upcalls.c
+    modules/lwjgl/core/src/main/c/org_lwjgl_system_Callback.c
+    modules/lwjgl/core/src/main/c/dyncall_libffi_bridge.c
     modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
+    modules/lwjgl/tinyfd/src/main/c/tinyfd_js_proxy.c
 )
 
 STB_NATIVE_SOURCES=()
 
 for src in "$LWJGL_SRC_DIR"/modules/lwjgl/core/src/generated/c/org_lwjgl_system_*.c; do
+    base="$(basename "$src")"
+    # dyncall bindings rely on libdyncall/dyncallback/dynload static libs which we do not ship.
+    case "$base" in
+        org_lwjgl_system_dyncall_*.c) continue ;;
+    esac
+    NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
+done
+
+for src in "$LWJGL_SRC_DIR"/modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_*.c; do
     NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
 done
 
 for src in "$LWJGL_SRC_DIR"/modules/lwjgl/opengl/src/generated/c/org_lwjgl_opengl_*.c; do
-    if [ "$(basename "$src")" = "org_lwjgl_opengl_WGL.c" ]; then
-        continue
-    fi
-
     NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
 done
 
@@ -379,11 +395,11 @@ COMMON_NATIVE_FLAGS=(
     -DLWJGL_x64
     -I"$JAVA_HOME_DETECTED/include"
     -I"$JAVA_HOME_DETECTED/include/linux"
+    -I"$LIBFFI_INCLUDE_DIR"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c"
+    -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/dyncall"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/opengl/src/main/c"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/linux"
-    -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/libffi"
-    -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/libffi/x86"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/stb/src/main/c"
 )
 

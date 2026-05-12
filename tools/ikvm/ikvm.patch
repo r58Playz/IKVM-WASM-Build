@@ -20,6 +20,13 @@ index b826bb4fb..60450f1d4 100644
      </ItemGroup>
  
      <Target Name="Publish">
+diff --git a/src/IKVM.Image/ikvm/any/bin/ikvm.properties b/src/IKVM.Image/ikvm/any/bin/ikvm.properties
+deleted file mode 100644
+index 8473a67ad..000000000
+--- a/src/IKVM.Image/ikvm/any/bin/ikvm.properties
++++ /dev/null
+@@ -1 +0,0 @@
+-﻿ikvm.home=..
 diff --git a/src/IKVM.Java.runtime.linux/UnixConstants.java b/src/IKVM.Java.runtime.linux/UnixConstants.java
 index 8cfa61fe6..0bd71d2cf 100644
 --- a/src/IKVM.Java.runtime.linux/UnixConstants.java
@@ -108,6 +115,36 @@ index bfef3bb82..21221ff72 100644
      </Target>
  
      <Target Name="ResolveJava" DependsOnTargets="FindJdk" Condition=" '$(JavaPath)' == '' ">
+diff --git a/src/IKVM.Java/local/sun/management/VMManagementImpl.java b/src/IKVM.Java/local/sun/management/VMManagementImpl.java
+index 5f3686a7f..9557640f9 100644
+--- a/src/IKVM.Java/local/sun/management/VMManagementImpl.java
++++ b/src/IKVM.Java/local/sun/management/VMManagementImpl.java
+@@ -57,6 +57,7 @@ class VMManagementImpl implements VMManagement {
+     private static boolean threadAllocatedMemorySupport;
+     private static boolean gcNotificationSupport;
+     private static boolean remoteDiagnosticCommandsSupport;
++    private static final long vmStartupTime = System.currentTimeMillis();
+ 
+     // Optional supports
+     public boolean isCompilationTimeMonitoringSupported() {
+@@ -186,7 +187,7 @@ class VMManagementImpl implements VMManagement {
+     }
+ 
+     public long getUptime() {
+-        return cli.System.DateTime.get_Now().Subtract(cli.System.Diagnostics.Process.GetCurrentProcess().get_StartTime()).get_Ticks() / 10000L;
++        return System.currentTimeMillis() - vmStartupTime;
+     }
+ 
+     private List<String> vmArgs = null;
+@@ -204,7 +205,7 @@ class VMManagementImpl implements VMManagement {
+     }
+ 
+     public long getStartupTime() {
+-        return (long)(cli.System.Diagnostics.Process.GetCurrentProcess().get_StartTime().ToUniversalTime().Subtract(new cli.System.DateTime(1970, 1, 1))).get_TotalMilliseconds();
++        return vmStartupTime;
+     }
+     public int getAvailableProcessors() {
+         return cli.System.Environment.get_ProcessorCount();
 diff --git a/src/IKVM.Runtime/ExceptionHelper.cs b/src/IKVM.Runtime/ExceptionHelper.cs
 index f54199cef..e2b532371 100644
 --- a/src/IKVM.Runtime/ExceptionHelper.cs
@@ -2066,6 +2103,19 @@ index 61d1566a4..e93c68c32 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Runtime/Java/Externs/java/io/FileOutputStream.cs b/src/IKVM.Runtime/Java/Externs/java/io/FileOutputStream.cs
+index 29cb30a01..2f5edb9a6 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/io/FileOutputStream.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/io/FileOutputStream.cs
+@@ -30,7 +30,7 @@ static class FileOutputStream
+         static __jniDelegate__write __jniPtr__write;
+         delegate void __jniDelegate__writeBytes(IntPtr jniEnv, IntPtr this_, IntPtr bytes, int off, int len, sbyte append);
+         static __jniDelegate__writeBytes __jniPtr__writeBytes;
+-        delegate int __jniDelegate__close0(IntPtr jniEnv, IntPtr this_);
++        delegate void __jniDelegate__close0(IntPtr jniEnv, IntPtr this_);
+         static __jniDelegate__close0 __jniPtr__close0;
+ 
+ #endif
 diff --git a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs b/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
 index e9f3aa23d..e46bd67d5 100644
 --- a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
@@ -2108,7 +2158,7 @@ index 0322f2275..c9db1de29 100644
  		{
  #if !FIRST_PASS
 diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
-index 50a0078d2..d62eabff7 100644
+index 50a0078d2..3b00208e3 100644
 --- a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
 +++ b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
 @@ -1,4 +1,7 @@
@@ -2120,7 +2170,7 @@ index 50a0078d2..d62eabff7 100644
  using System.Linq;
  using System.Linq.Expressions;
  using System.Reflection;
-@@ -68,6 +71,429 @@ public ArrayDelegateRef(RuntimeJavaType type)
+@@ -68,6 +71,457 @@ public ArrayDelegateRef(RuntimeJavaType type)
              .Where(i => i.Name == nameof(CompareAndSwapArray) && i.IsGenericMethodDefinition && i.GetGenericArguments().Length == 1)
              .FirstOrDefault();
  
@@ -2538,19 +2588,47 @@ index 50a0078d2..d62eabff7 100644
 +        }
 +#endif
 +
++        private static readonly bool s_unsafeOffsetTraceEnabled =
++            !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("IKVM_UNSAFE_OFFSET_TRACE"));
++
 +        internal static long GetObjectFieldOffset(RuntimeJavaField field)
 +        {
 +            var info = GetObjectFieldOffsetInfo(field.DeclaringType);
 +            if (info.TryGetOffset(field, out var offset))
-+                return EncodeObjectFieldOffset(info.TypeId, offset);
++            {
++                long encoded = EncodeObjectFieldOffset(info.TypeId, offset);
++                if (s_unsafeOffsetTraceEnabled)
++                {
++                    try
++                    {
++                        System.IO.File.WriteAllText("/dev/stderr",
++                            $"[Unsafe.fieldOffset] type={field.DeclaringType?.Name} field={field.Name} typeId={info.TypeId} offset={offset} encoded=0x{encoded:x16}\n");
++                    }
++                    catch
++                    {
++                    }
++                }
++                return encoded;
++            }
 +
++            if (s_unsafeOffsetTraceEnabled)
++            {
++                try
++                {
++                    System.IO.File.WriteAllText("/dev/stderr",
++                        $"[Unsafe.fieldOffset] LOOKUP_FAILED type={field.DeclaringType?.Name} field={field.Name}\n");
++                }
++                catch
++                {
++                }
++            }
 +            throw new global::java.lang.IllegalArgumentException();
 +        }
 +
          /// <summary>
          /// Emits the appropriate ldind opcode for the given type.
          /// </summary>
-@@ -132,6 +558,24 @@ public static void registerNatives()
+@@ -132,6 +586,24 @@ public static void registerNatives()
  
          }
  
@@ -2575,7 +2653,7 @@ index 50a0078d2..d62eabff7 100644
          /// <summary>
          /// Implements the logic to get a field by offset.
          /// </summary>
-@@ -145,7 +589,7 @@ static T GetField<T>(object o, long offset)
+@@ -145,7 +617,7 @@ static T GetField<T>(object o, long offset)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -2584,7 +2662,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -171,7 +615,7 @@ static void PutField<T>(object o, long offset, T value)
+@@ -171,7 +643,7 @@ static void PutField<T>(object o, long offset, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -2593,7 +2671,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -265,7 +709,7 @@ public static bool getBoolean(object self, object o, long offset)
+@@ -265,7 +737,7 @@ public static bool getBoolean(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2602,7 +2680,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<bool>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset) != 0,
                      _ => GetField<bool>(o, offset)
-@@ -295,7 +739,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
+@@ -295,7 +767,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
                  switch (o)
                  {
                      case null:
@@ -2611,7 +2689,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -331,7 +775,7 @@ public static byte getByte(object self, object o, long offset)
+@@ -331,7 +803,7 @@ public static byte getByte(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2620,7 +2698,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<byte>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset),
                      _ => GetField<byte>(o, offset)
-@@ -361,7 +805,7 @@ public static void putByte(object self, object o, long offset, byte x)
+@@ -361,7 +833,7 @@ public static void putByte(object self, object o, long offset, byte x)
                  switch (o)
                  {
                      case null:
@@ -2629,7 +2707,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -395,9 +839,16 @@ public static short getShort(object self, object o, long offset)
+@@ -395,9 +867,16 @@ public static short getShort(object self, object o, long offset)
  #else
              try
              {
@@ -2647,7 +2725,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<short>(null, offset),
                      Array array => ReadInt16(array, offset),
                      _ => GetField<short>(o, offset)
-@@ -424,10 +875,22 @@ public static void putShort(object self, object o, long offset, short x)
+@@ -424,10 +903,22 @@ public static void putShort(object self, object o, long offset, short x)
  #else
              try
              {
@@ -2671,7 +2749,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -461,9 +924,19 @@ public static char getChar(object self, object o, long offset)
+@@ -461,9 +952,19 @@ public static char getChar(object self, object o, long offset)
  #else
              try
              {
@@ -2692,7 +2770,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<char>(null, offset),
                      Array array => (char)ReadInt16(array, offset),
                      _ => GetField<char>(o, offset)
-@@ -490,10 +963,22 @@ public static void putChar(object self, object o, long offset, char x)
+@@ -490,10 +991,22 @@ public static void putChar(object self, object o, long offset, char x)
  #else
              try
              {
@@ -2716,7 +2794,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -527,9 +1012,16 @@ public static int getInt(object self, object o, long offset)
+@@ -527,9 +1040,16 @@ public static int getInt(object self, object o, long offset)
  #else
              try
              {
@@ -2734,7 +2812,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<int>(null, offset),
                      Array array => ReadInt32(array, offset),
                      _ => GetField<int>(o, offset)
-@@ -556,10 +1048,22 @@ public static void putInt(object self, object o, long offset, int x)
+@@ -556,10 +1076,22 @@ public static void putInt(object self, object o, long offset, int x)
  #else
              try
              {
@@ -2758,7 +2836,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -593,9 +1097,16 @@ public static long getLong(object self, object o, long offset)
+@@ -593,9 +1125,16 @@ public static long getLong(object self, object o, long offset)
  #else
              try
              {
@@ -2776,7 +2854,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<long>(null, offset),
                      Array array => ReadInt64(array, offset),
                      _ => GetField<long>(o, offset)
-@@ -622,10 +1133,22 @@ public static void putLong(object self, object o, long offset, long x)
+@@ -622,10 +1161,22 @@ public static void putLong(object self, object o, long offset, long x)
  #else
              try
              {
@@ -2800,7 +2878,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -659,9 +1182,19 @@ public static float getFloat(object self, object o, long offset)
+@@ -659,9 +1210,19 @@ public static float getFloat(object self, object o, long offset)
  #else
              try
              {
@@ -2821,7 +2899,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<float>(null, offset),
                      Array array => global::java.lang.Float.intBitsToFloat(ReadInt32(array, offset)),
                      _ => GetField<float>(o, offset)
-@@ -688,10 +1221,23 @@ public static void putFloat(object self, object o, long offset, float x)
+@@ -688,10 +1249,23 @@ public static void putFloat(object self, object o, long offset, float x)
  #else
              try
              {
@@ -2846,7 +2924,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -725,9 +1271,19 @@ public static double getDouble(object self, object o, long offset)
+@@ -725,9 +1299,19 @@ public static double getDouble(object self, object o, long offset)
  #else
              try
              {
@@ -2867,7 +2945,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<double>(null, offset),
                      Array array => global::java.lang.Double.longBitsToDouble(ReadInt64(array, offset)),
                      _ => GetField<double>(o, offset)
-@@ -754,10 +1310,23 @@ public static void putDouble(object self, object o, long offset, double x)
+@@ -754,10 +1338,23 @@ public static void putDouble(object self, object o, long offset, double x)
  #else
              try
              {
@@ -2892,7 +2970,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -790,7 +1359,7 @@ public static byte getByte(object self, long address)
+@@ -790,7 +1387,7 @@ public static byte getByte(object self, long address)
  #else
              try
              {
@@ -2901,7 +2979,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -812,7 +1381,7 @@ public static void putByte(object self, long address, byte x)
+@@ -812,7 +1409,7 @@ public static void putByte(object self, long address, byte x)
  #else
              try
              {
@@ -2910,7 +2988,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -834,7 +1403,7 @@ public static short getShort(object self, long address)
+@@ -834,7 +1431,7 @@ public static short getShort(object self, long address)
  #else
              try
              {
@@ -2919,7 +2997,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -856,7 +1425,7 @@ public static void putShort(object self, long address, short x)
+@@ -856,7 +1453,7 @@ public static void putShort(object self, long address, short x)
  #else
              try
              {
@@ -2928,7 +3006,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -878,7 +1447,7 @@ public static char getChar(object self, long address)
+@@ -878,7 +1475,7 @@ public static char getChar(object self, long address)
  #else
              try
              {
@@ -2937,7 +3015,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -900,7 +1469,7 @@ public static void putChar(object self, long address, char x)
+@@ -900,7 +1497,7 @@ public static void putChar(object self, long address, char x)
  #else
              try
              {
@@ -2946,7 +3024,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -922,7 +1491,7 @@ public static int getInt(object self, long address)
+@@ -922,7 +1519,7 @@ public static int getInt(object self, long address)
  #else
              try
              {
@@ -2955,7 +3033,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -944,7 +1513,7 @@ public static void putInt(object self, long address, int x)
+@@ -944,7 +1541,7 @@ public static void putInt(object self, long address, int x)
  #else
              try
              {
@@ -2964,7 +3042,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -966,7 +1535,7 @@ public static long getLong(object self, long address)
+@@ -966,7 +1563,7 @@ public static long getLong(object self, long address)
  #else
              try
              {
@@ -2973,7 +3051,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -988,7 +1557,7 @@ public static void putLong(object self, long address, long x)
+@@ -988,7 +1585,7 @@ public static void putLong(object self, long address, long x)
  #else
              try
              {
@@ -2982,7 +3060,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1084,7 +1653,7 @@ public static long getAddress(object self, long address)
+@@ -1084,7 +1681,7 @@ public static long getAddress(object self, long address)
  #else
              try
              {
@@ -2991,7 +3069,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1106,7 +1675,7 @@ public static void putAddress(object self, long address, long x)
+@@ -1106,7 +1703,7 @@ public static void putAddress(object self, long address, long x)
  #else
              try
              {
@@ -3000,7 +3078,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1136,7 +1705,7 @@ public static unsafe long allocateMemory(object self, long bytes)
+@@ -1136,7 +1733,7 @@ public static unsafe long allocateMemory(object self, long bytes)
                  var ptr = Marshal.AllocHGlobal(len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -3009,7 +3087,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1171,7 +1740,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1171,7 +1768,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  }
  
                  // remove memory pressure
@@ -3018,7 +3096,7 @@ index 50a0078d2..d62eabff7 100644
                  var len = Marshal.ReadIntPtr(ptr);
                  System.GC.RemoveMemoryPressure((long)len);
  
-@@ -1180,7 +1749,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1180,7 +1777,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  ptr = Marshal.ReAllocHGlobal(ptr, len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -3027,7 +3105,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1210,7 +1779,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
+@@ -1210,7 +1807,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
              try
              {
                  if (o == null)
@@ -3036,7 +3114,7 @@ index 50a0078d2..d62eabff7 100644
                  else if (o is byte[] array)
                      ((Span<byte>)array).Slice((int)offset, (int)bytes).Fill(value);
                  else if (o is Array array2)
-@@ -1259,7 +1828,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1259,7 +1856,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (destBase is byte[] byteArray)
                      {
@@ -3045,7 +3123,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else if (destBase is bool[])
                      {
-@@ -1269,31 +1838,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1269,31 +1866,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (destBase is short[] shortArray)
                      {
@@ -3084,7 +3162,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else
                      {
-@@ -1308,7 +1877,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1308,7 +1905,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (srcBase is byte[] byteArray)
                      {
@@ -3093,7 +3171,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else if (srcBase is bool[])
                      {
-@@ -1318,27 +1887,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1318,27 +1915,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (srcBase is short[] shortArray)
                      {
@@ -3127,7 +3205,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else
                      {
-@@ -1360,11 +1929,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1360,11 +1957,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
          /// <param name="address"></param>
          public static unsafe void freeMemory(object self, long address)
          {
@@ -3142,7 +3220,7 @@ index 50a0078d2..d62eabff7 100644
              var len = Marshal.ReadIntPtr(ptr);
              Marshal.FreeHGlobal(ptr);
              System.GC.RemoveMemoryPressure((long)len);
-@@ -1412,7 +1981,7 @@ public static long objectFieldOffset(object self, global::java.lang.reflect.Fiel
+@@ -1412,7 +2009,7 @@ public static long objectFieldOffset(object self, global::java.lang.reflect.Fiel
              if (w.IsStatic)
                  throw new global::java.lang.IllegalArgumentException();
  
@@ -3151,7 +3229,7 @@ index 50a0078d2..d62eabff7 100644
          }
  
          /// <summary>
-@@ -1675,7 +2244,7 @@ static T GetFieldVolatile<T>(object o, long offset)
+@@ -1675,7 +2272,7 @@ static T GetFieldVolatile<T>(object o, long offset)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3160,7 +3238,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -1701,7 +2270,7 @@ static void PutFieldVolatile<T>(object o, long offset, T value)
+@@ -1701,7 +2298,7 @@ static void PutFieldVolatile<T>(object o, long offset, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3169,7 +3247,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -1904,7 +2473,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
+@@ -1904,7 +2501,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3178,7 +3256,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetFieldVolatile<int>(null, offset),
                      Array array => ReadInt32Volatile(array, offset),
                      _ => GetFieldVolatile<int>(o, offset)
-@@ -1934,7 +2503,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
+@@ -1934,7 +2531,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
                  switch (o)
                  {
                      case null:
@@ -3187,7 +3265,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -1970,7 +2539,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
+@@ -1970,7 +2567,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3196,7 +3274,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetFieldVolatile<bool>(null, offset),
                      Array array => ReadByteVolatile(array, offset) != 0,
                      _ => GetFieldVolatile<bool>(o, offset)
-@@ -2000,7 +2569,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
+@@ -2000,7 +2597,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -3205,7 +3283,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2036,7 +2605,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
+@@ -2036,7 +2633,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3214,7 +3292,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetFieldVolatile<byte>(null, offset),
                      Array array => ReadByteVolatile(array, offset),
                      _ => GetFieldVolatile<byte>(o, offset)
-@@ -2066,7 +2635,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
+@@ -2066,7 +2663,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
                  switch (o)
                  {
                      case null:
@@ -3223,7 +3301,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2130,7 +2699,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
+@@ -2130,7 +2727,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
                  switch (o)
                  {
                      case null:
@@ -3232,7 +3310,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2194,7 +2763,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
+@@ -2194,7 +2791,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
                  switch (o)
                  {
                      case null:
@@ -3241,7 +3319,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2258,7 +2827,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
+@@ -2258,7 +2855,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
                  switch (o)
                  {
                      case null:
@@ -3250,7 +3328,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2323,7 +2892,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
+@@ -2323,7 +2920,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
                  switch (o)
                  {
                      case null:
@@ -3259,7 +3337,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2388,7 +2957,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
+@@ -2388,7 +2985,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -3268,7 +3346,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2438,7 +3007,7 @@ static bool CompareAndSwapField<T>(object o, long offset, T expected, T value)
+@@ -2438,7 +3035,7 @@ static bool CompareAndSwapField<T>(object o, long offset, T expected, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3277,13 +3355,78 @@ index 50a0078d2..d62eabff7 100644
  #endif
          }
  
-@@ -3351,4 +3920,4 @@ static void InterlockedWrite(ref double location, double value)
+@@ -3351,4 +3948,4 @@ static void InterlockedWrite(ref double location, double value)
  
      }
  
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Runtime/LambdaMetafactory.cs b/src/IKVM.Runtime/LambdaMetafactory.cs
+index 22e86df4c..1cdf2bf8b 100644
+--- a/src/IKVM.Runtime/LambdaMetafactory.cs
++++ b/src/IKVM.Runtime/LambdaMetafactory.cs
+@@ -233,15 +233,30 @@ bool EmitImpl(RuntimeByteCodeJavaType.FinishContext context, ClassFile classFile
+             // define a new anonymous class to implement the functional interface
+             var tb = context.DefineAnonymousClass();
+ 
+-            // we're not implementing the interfaces recursively (because we don't care about .NET Compact anymore),
+-            // but should we decide to do that, we'd need to somehow communicate to AnonymousTypeWrapper what the 'real' interface is
+-            tb.AddInterfaceImplementation(interfaceType.TypeAsBaseType);
++            // Implement the functional interface and walk its parent interface chain.
++            //
++            // We can't rely on the CLR's automatic transitive interface dispatch here:
++            // the anonymous lambda type is finalized before its interface (e.g. a
++            // sub-interface of Callable) has its own parent interface chain visible
++            // to the runtime's interface_offsets cache. Without explicitly listing
++            // every parent interface here, dispatching against one of those parents
++            // (e.g. Callable.call() on a lambda typed as CrashReportDetail) will fail
++            // the interface offset lookup at runtime.
++            //
++            // The original code only registered the direct interface with a TODO
++            // noting that registering recursively would need careful handling of
++            // ghost interfaces and AnonymousTypeWrapper's notion of the "real"
++            // interface — but in practice the missing transitive registration is
++            // exactly what causes runtime interface dispatch failures.
++            var addedInterfaces = new HashSet<RuntimeJavaType>();
++            AddInterfaceAndParents(tb, interfaceType, addedInterfaces);
++
+             if (serializable && Array.IndexOf(markers, context.Context.JavaBase.TypeOfJavaIoSerializable) == -1)
+-                tb.AddInterfaceImplementation(context.Context.JavaBase.TypeOfJavaIoSerializable.TypeAsBaseType);
++                AddInterfaceAndParents(tb, context.Context.JavaBase.TypeOfJavaIoSerializable, addedInterfaces);
+ 
+             // implement marker interfaces
+             foreach (var marker in markers)
+-                tb.AddInterfaceImplementation(marker.TypeAsBaseType);
++                AddInterfaceAndParents(tb, marker, addedInterfaces);
+ 
+             getInstance = CreateConstructorAndDispatch(context, cpi, tb, methods, implParameters, samMethodType, implMethod, instantiatedMethodType, serializable);
+             AddDefaultInterfaceMethods(context, methodList, tb);
+@@ -254,6 +269,24 @@ static void Fail(string msg)
+             Console.WriteLine("Fail: " + msg);
+         }
+ 
++        /// <summary>
++        /// Add an interface to the TypeBuilder and recursively register all of its
++        /// parent interfaces too. Skips interfaces that aren't accessible from the
++        /// lambda's anonymous-class context. Avoids re-registering interfaces via
++        /// the <paramref name="visited"/> set so we don't add the same interface
++        /// twice when multiple parents converge.
++        /// </summary>
++        static void AddInterfaceAndParents(TypeBuilder tb, RuntimeJavaType ifaceType, HashSet<RuntimeJavaType> visited)
++        {
++            if (ifaceType == null || !visited.Add(ifaceType))
++                return;
++
++            tb.AddInterfaceImplementation(ifaceType.TypeAsBaseType);
++
++            foreach (var parent in ifaceType.Interfaces)
++                AddInterfaceAndParents(tb, parent, visited);
++        }
++
+         /// <summary>
+         /// Returns <c>true</c> if the various signatures are compatible or adaptable to each other.
+         /// </summary>
 diff --git a/src/IKVM.Runtime/LibJVM.cs b/src/IKVM.Runtime/LibJVM.cs
 index 2fa4d5bcd..db0a84758 100644
 --- a/src/IKVM.Runtime/LibJVM.cs
@@ -3503,64 +3646,325 @@ index 000000000..bf21a7868
 +    }
 +
 +}
+diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
+index 44ffeeaf4..e45ea151c 100644
+--- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
++++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
+@@ -2346,4 +2346,4 @@ internal void EmitLiveObjectLoad(CodeEmitter ilgen, object value)
+         }
+     }
+ 
+-}
+\ No newline at end of file
++}
 diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
-index 4c3c07e12..6cf70fe3c 100644
+index 4c3c07e12..26889c7e1 100644
 --- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
 +++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
-@@ -1281,7 +1281,7 @@ FinishedTypeImpl FinishCore()
-                     {
-                         // In dynamic mode, we may need to emit a call to this method from a DynamicMethod which doesn't support calling unfinished methods,
-                         // so we must resolve to the real method here.
--                        finishedClinitMethod = type.GetMethod("__<clinit>", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-+                        finishedClinitMethod = type.GetMethod("__<clinit>", BindingFlags.DeclaredOnly | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-                     }
- #endif
+@@ -62,7 +62,18 @@ private sealed partial class JavaTypeImpl : DynamicImpl
+             bool finishInProgress;
+             MethodBuilder clinitMethod;
+             MethodBuilder finalizeMethod;
+-            int recursionCount;
++            // Per-thread recursion guard for Finish(). Was an instance int+
++            // Interlocked.Increment, which under threading (multiple workers
++            // calling Finish on different types concurrently inside their own
++            // graphs) would let one thread's increments push another thread
++            // over the "> 2" threshold, causing it to fall back to
++            // LoadMode.ReturnUnloadable and emit RuntimeUnloadableJavaType for
++            // perfectly-loadable referenced classes. Tracking per-thread keeps
++            // the original intent (detect a single thread recursing into
++            // Finish on this same type via a broken classloader callback) and
++            // is unaffected by concurrent unrelated Finish work on other
++            // threads.
++            [ThreadStatic] static System.Collections.Generic.Dictionary<JavaTypeImpl, int> t_recursionCounts;
+ #if IMPORTER
+             RuntimeByteCodeJavaType enclosingClassWrapper;
+             AnnotationBuilder annotationBuilder;
+@@ -1156,9 +1167,14 @@ internal override DynamicImpl Finish()
+                 // are in the process of finishing, and this would be a problem.
+                 // Prevent infinity recursion for broken class loaders by keeping a recursion count and falling
+                 // back to late binding if we recurse more than twice.
+-                var mode = System.Threading.Interlocked.Increment(ref recursionCount) > 2 || (JVM.DisableEagerClassLoading && wrapper.Name != "sun.reflect.misc.Trampoline")
++                t_recursionCounts ??= new System.Collections.Generic.Dictionary<JavaTypeImpl, int>();
++                t_recursionCounts.TryGetValue(this, out int t_rc);
++                t_recursionCounts[this] = t_rc + 1;
++                var mode = (t_rc + 1) > 2 || (JVM.DisableEagerClassLoading && wrapper.Name != "sun.reflect.misc.Trampoline")
+                     ? LoadMode.ReturnUnloadable
+                     : LoadMode.Link;
++				if (mode == LoadMode.ReturnUnloadable)
++					Console.WriteLine($"[IKVM internal] loadmode unloadable!!! uh oh {this} {wrapper.Name}");
+                 try
+                 {
+                     classFile.Link(wrapper, mode);
+@@ -1171,7 +1187,11 @@ internal override DynamicImpl Finish()
+                 }
+                 finally
+                 {
+-                    System.Threading.Interlocked.Decrement(ref recursionCount);
++                    int t_rc_now = t_recursionCounts[this];
++                    if (t_rc_now <= 1)
++                        t_recursionCounts.Remove(this);
++                    else
++                        t_recursionCounts[this] = t_rc_now - 1;
+                 }
  
-@@ -2998,4 +2998,4 @@ internal override RuntimeJavaType Host
+                 // this is the correct lock, FinishCore doesn't call any user code and mutates global state,
+@@ -1918,7 +1938,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+                 var tw = wrapper.BaseTypeWrapper;
+                 while (tw != null)
+                 {
+-                    var baseMethod = tw.GetMethod(name, sig, true);
++                    var baseMethod = GetBaseMethodByNameOrSignature(tw, name, sig);
+                     if (baseMethod == null)
+                         break;
+                     else if (baseMethod.IsAccessStub)
+@@ -1935,7 +1955,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+ 
+                 while (tw != null)
+                 {
+-                    var baseMethod = tw.GetMethod(name, sig, true);
++                    var baseMethod = GetBaseMethodByNameOrSignature(tw, name, sig);
+                     if (baseMethod == null)
+                     {
+                         break;
+@@ -1977,7 +1997,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+                             tw = wrapper.BaseTypeWrapper;
+                             while (tw != null)
+                             {
+-                                var baseMethod2 = tw.GetMethod(name, sig, true);
++                                var baseMethod2 = GetBaseMethodByNameOrSignature(tw, name, sig);
+                                 if (baseMethod2 == null || baseMethod2 == baseMethod)
+                                     break;
+ 
+@@ -2040,7 +2060,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+                             tw = topPublicOrProtectedMethod.DeclaringType.BaseTypeWrapper;
+                             while (tw != null)
+                             {
+-                                var baseMethod2 = tw.GetMethod(name, sig, true);
++                                var baseMethod2 = GetBaseMethodByNameOrSignature(tw, name, sig);
+                                 if (baseMethod2 == null)
+                                     break;
+ 
+@@ -2101,11 +2121,11 @@ static bool TryGetClassFileVersion(RuntimeJavaType tw, ref int majorVersion)
+                 return false;
+             }
+ 
+-            static RuntimeJavaMethod GetPackageBaseMethod(RuntimeJavaType tw, string name, string sig, RuntimeJavaType package)
++            RuntimeJavaMethod GetPackageBaseMethod(RuntimeJavaType tw, string name, string sig, RuntimeJavaType package)
+             {
+                 while (tw != null)
+                 {
+-                    var mw = tw.GetMethod(name, sig, true);
++                    var mw = GetBaseMethodByNameOrSignature(tw, name, sig);
+                     if (mw == null)
+                         break;
+ 
+@@ -2124,7 +2144,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+                 var tw = wrapper.BaseTypeWrapper;
+                 while (tw != null)
+                 {
+-                    var baseMethod = tw.GetMethod(name, sig, true);
++                    var baseMethod = GetBaseMethodByNameOrSignature(tw, name, sig);
+                     if (baseMethod == null)
+                     {
+                         return null;
+@@ -2162,7 +2182,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+                             tw = baseMethod.DeclaringType.BaseTypeWrapper;
+                             while (tw != null)
+                             {
+-                                RuntimeJavaMethod baseMethod2 = tw.GetMethod(name, sig, true);
++                                RuntimeJavaMethod baseMethod2 = GetBaseMethodByNameOrSignature(tw, name, sig);
+                                 if (baseMethod2 == null)
+                                 {
+                                     break;
+@@ -2211,6 +2231,15 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+                 return null;
+             }
+ 
++            RuntimeJavaMethod GetBaseMethodByNameOrSignature(RuntimeJavaType tw, string name, string sig)
++            {
++                // Base method discovery must stay within the Java override relation that the
++                // wrapper hierarchy already resolved. Signature-only scans can bind unrelated
++                // methods such as Object.toString() to a different child method with the same
++                // descriptor, which then produces invalid CLR MethodImpls.
++                return tw.GetMethod(name, sig, true);
++            }
++
+             static MethodInfo GetBaseFinalizeMethod(RuntimeJavaType wrapper)
+             {
+                 for (; ; )
+@@ -2452,6 +2481,12 @@ internal override MethodBase LinkMethod(RuntimeJavaMethod mw)
+ #if IMPORTER
+                     wrapper.Context.AttributeHelper.SetThrowsAttribute(method, exceptions);
+ 
++                    // Persist the original Java method identity for all emitted methods so
++                    // later managed-wrapper lookups can resolve Java override chains without
++                    // depending on the CLR-visible method name.
++                    if (method is MethodBuilder emittedMethod && !(classFile.IsInterface && !m.IsStatic && !m.IsPublic))
++                        wrapper.Context.AttributeHelper.SetNameSig(emittedMethod, m.Name, m.Signature);
++
+                     if (setModifiers || m.IsInternal || (m.Modifiers & (Modifiers.Synthetic | Modifiers.Bridge)) != 0)
+                         wrapper.Context.AttributeHelper.SetModifiers(method, m.Modifiers, m.IsInternal);
+ 
+@@ -2713,6 +2748,7 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
+                     bool newslot = baseMethods[index] != null
+                         && (methods[index].IsExplicitOverride || baseMethods[index][0].RealName != name || CheckRequireOverrideStub(methods[index], baseMethods[index][0]))
+                         && !needFinalize;
++
+                     if (newslot)
+                     {
+                         attribs |= MethodAttributes.NewSlot;
+@@ -2752,7 +2788,14 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
+                             }
+                             else if (subsequent || methods[index].IsExplicitOverride || baseMethod.RealName != name)
+                             {
+-                                typeBuilder.DefineMethodOverride(mb, (MethodInfo)baseMethod.GetMethod());
++                                var baseMethodInfo = (MethodInfo)baseMethod.GetMethod();
++
++                                if (!HasMethodImplCompatibleSignature(mb, baseMethodInfo))
++                                {
++                                    throw new InvalidOperationException($"MethodImpl signature mismatch: body={wrapper.Name}::{methods[index].Name}{methods[index].Signature} clr={FormatClrSignature(mb)} declaration={baseMethod.DeclaringType.Name}::{baseMethod.Name}{baseMethod.Signature} clr={FormatClrSignature(baseMethodInfo)}");
++                                }
++
++                                typeBuilder.DefineMethodOverride(mb, baseMethodInfo);
+                             }
+ 
+                             // the non-primary base methods always need an explicit method override
+@@ -2867,6 +2910,34 @@ private static MethodAttributes GetMethodAccess(RuntimeJavaMethod mw)
+                 }
+             }
+ 
++            static bool HasMethodImplCompatibleSignature(MethodInfo body, MethodInfo declaration)
++            {
++                if (body.ReturnType != declaration.ReturnType)
++                    return false;
++
++                var bodyParams = body.GetParameters();
++                var declarationParams = declaration.GetParameters();
++                if (bodyParams.Length != declarationParams.Length)
++                    return false;
++
++                for (int i = 0; i < bodyParams.Length; i++)
++                    if (bodyParams[i].ParameterType != declarationParams[i].ParameterType)
++                        return false;
++
++                return true;
++            }
++
++            static string FormatClrSignature(MethodInfo method)
++            {
++                var parameters = method.GetParameters();
++                var types = new string[parameters.Length];
++                for (int i = 0; i < parameters.Length; i++)
++                    types[i] = parameters[i].ParameterType.FullName ?? parameters[i].ParameterType.ToString();
++
++                var returnType = method.ReturnType.FullName ?? method.ReturnType.ToString();
++                return method.Name + "(" + string.Join(",", types) + "):" + returnType;
++            }
++
+ #if IMPORTER
+             // The classic example of an access bridge is StringBuilder.length(), the JDK 6 compiler
+             // generates this to work around a reflection problem (which otherwise wouldn't surface the
+@@ -2998,4 +3069,4 @@ internal override RuntimeJavaType Host
  
      }
  
 -}
 \ No newline at end of file
 +}
-diff --git a/src/IKVM.Runtime/RuntimeJavaMethod.cs b/src/IKVM.Runtime/RuntimeJavaMethod.cs
-index 833b0af1a..75e4e6a31 100644
---- a/src/IKVM.Runtime/RuntimeJavaMethod.cs
-+++ b/src/IKVM.Runtime/RuntimeJavaMethod.cs
-@@ -470,6 +470,24 @@ internal Type GetDelegateType()
-             return DeclaringType.Context.MethodHandleUtil.CreateMemberWrapperDelegateType(paramTypes, ReturnType);
-         }
+diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
+index 74dfda7c8..b1e7a42c3 100644
+--- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
++++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
+@@ -387,12 +387,18 @@ private bool IsSerializable
  
-+		static bool SignatureTypesMatch(Type expected, Type actual)
-+		{
-+			if (expected == actual)
-+				return true;
-+			if (expected == null || actual == null)
-+				return false;
-+			// Mono WASM patched runtimes can surface a rank-1 array mismatch where
-+			// one side is SZARRAY (T[]) and the other is VECTOR-like non-SZ (T[*]).
-+			if (expected.IsArray && actual.IsArray && expected.GetArrayRank() == 1 && actual.GetArrayRank() == 1)
-+			{
-+				var expectedElement = expected.GetElementType();
-+				var actualElement = actual.GetElementType();
-+				if (expectedElement == actualElement && expected.IsSZArray != actual.IsSZArray)
-+					return true;
-+			}
-+			return false;
-+		}
+         static bool CheckRequireOverrideStub(RuntimeJavaMethod mw1, RuntimeJavaMethod mw2)
+         {
++            if (mw1.HasCallerID != mw2.HasCallerID)
++                return true;
 +
-         /// <summary>
-         /// Resolves the potentially dynamic member into it's final runtime method.
-         /// </summary>
-@@ -510,7 +528,7 @@ internal void ResolveMethod()
-                 var flags = BindingFlags.DeclaredOnly;
-                 flags |= mb.IsPublic ? BindingFlags.Public : BindingFlags.NonPublic;
-                 flags |= mb.IsStatic ? BindingFlags.Static : BindingFlags.Instance;
--                method = DeclaringType.TypeAsTBD.GetMethods(flags).FirstOrDefault(i => i.Name == mb.Name && i.GetParameters().Select(j => j.ParameterType).SequenceEqual(types) && i.ReturnType.Equals(ReturnType.TypeAsSignatureType));
-+                method = DeclaringType.TypeAsTBD.GetMethods(flags).FirstOrDefault(i => i.Name == mb.Name && i.GetParameters().Select(j => j.ParameterType).SequenceEqual(types) && SignatureTypesMatch(i.ReturnType, ReturnType.TypeAsSignatureType));
-                 if (method == null)
-                     method = DeclaringType.TypeAsTBD.GetConstructor(flags, null, types, null);
-                 if (method == null)
+             // TODO this is too late to generate LinkageErrors so we need to figure this out earlier
+             if (!TypesMatchForOverride(mw1.ReturnType, mw2.ReturnType))
+                 return true;
+ 
+             var args1 = mw1.GetParameters();
+             var args2 = mw2.GetParameters();
++            if (args1.Length != args2.Length)
++                return true;
++
+             for (int i = 0; i < args1.Length; i++)
+                 if (!TypesMatchForOverride(args1[i], args2[i]))
+                     return true;
+@@ -1069,4 +1075,4 @@ internal void EmitLevel4Warning(HardError error, string message)
+         }
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/IKVM.Runtime/RuntimeJavaType.cs b/src/IKVM.Runtime/RuntimeJavaType.cs
+index 113078629..d1892c25e 100644
+--- a/src/IKVM.Runtime/RuntimeJavaType.cs
++++ b/src/IKVM.Runtime/RuntimeJavaType.cs
+@@ -312,11 +312,38 @@ private static void ResolvePrimitiveTypeWrapperClasses(RuntimeContext context)
+         }
+ #endif
+ 
++        private static readonly bool s_fromClassTraceEnabled =
++            !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("IKVM_FROMCLASS_TRACE"));
++
+         internal static RuntimeJavaType FromClass(java.lang.Class clazz)
+         {
+ #if FIRST_PASS
+             throw new NotImplementedException();
+ #else
++            if (s_fromClassTraceEnabled)
++            {
++                try
++                {
++                    if (clazz == null)
++                    {
++                        System.IO.File.WriteAllText("/dev/stderr", "[FromClass] clazz=<null>\n");
++                    }
++                    else
++                    {
++                        // Touch the .NET-level identity first, before any IKVM-level field access,
++                        // so we can tell whether the OOB happens reading clazz.typeWrapper or
++                        // somewhere later. Calling RuntimeHelpers.GetHashCode avoids virtual
++                        // dispatch on a possibly-corrupted vtable.
++                        int idHash = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(clazz);
++                        System.IO.File.WriteAllText("/dev/stderr",
++                            $"[FromClass] enter clazz_hash=0x{idHash:x8}\n");
++                    }
++                }
++                catch
++                {
++                }
++            }
++
+             // MONOBUG redundant cast to workaround mcs bug
+             var tw = (RuntimeJavaType)(object)clazz.typeWrapper;
+             if (tw == null)
+@@ -328,6 +355,18 @@ internal static RuntimeJavaType FromClass(java.lang.Class clazz)
+                     return FromClass(clazz);
+                 }
+ 
++                if (s_fromClassTraceEnabled)
++                {
++                    try
++                    {
++                        System.IO.File.WriteAllText("/dev/stderr",
++                            $"[FromClass] resolving type={type.FullName ?? "<null>"}\n");
++                    }
++                    catch
++                    {
++                    }
++                }
++
+                 if (type == typeof(void) || type.IsPrimitive || JVM.Context.ClassLoaderFactory.IsRemappedType(type))
+                     tw = JVM.Context.ManagedJavaTypeFactory.GetJavaTypeFromManagedType(type);
+                 else
 diff --git a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs b/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
 index 05961e1ed..5492a5393 100644
 --- a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
@@ -3574,6 +3978,36 @@ index 05961e1ed..5492a5393 100644
          }
  
          /// <summary>
+diff --git a/src/IKVM.Runtime/compiler.cs b/src/IKVM.Runtime/compiler.cs
+index b98d8eb5a..bc67a9ebe 100644
+--- a/src/IKVM.Runtime/compiler.cs
++++ b/src/IKVM.Runtime/compiler.cs
+@@ -1157,15 +1157,21 @@ void Compile(Block block, int startIndex)
+                         ilGenerator.EmitLdc_I8(1L);
+                         break;
+                     case NormalizedByteCode.__fconst_0:
+-                    case NormalizedByteCode.__dconst_0:
+-                        // floats are stored as native size on the stack, so both R4 and R8 are the same
+                         ilGenerator.EmitLdc_R4(0.0f);
+                         break;
++                    case NormalizedByteCode.__dconst_0:
++                        // Java dconst_0 pushes a double, must be R8 — passing as
++                        // R4 corrupts the value when stored into a double call
++                        // argument slot (only 4 bytes get written).
++                        ilGenerator.EmitLdc_R8(0.0);
++                        break;
+                     case NormalizedByteCode.__fconst_1:
+-                    case NormalizedByteCode.__dconst_1:
+-                        // floats are stored as native size on the stack, so both R4 and R8 are the same
+                         ilGenerator.EmitLdc_R4(1.0f);
+                         break;
++                    case NormalizedByteCode.__dconst_1:
++                        // Java dconst_1 pushes a double, must be R8.
++                        ilGenerator.EmitLdc_R8(1.0);
++                        break;
+                     case NormalizedByteCode.__fconst_2:
+                         ilGenerator.EmitLdc_R4(2.0f);
+                         break;
 diff --git a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs b/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
 index 6714bea45..1fb144dc5 100644
 --- a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs

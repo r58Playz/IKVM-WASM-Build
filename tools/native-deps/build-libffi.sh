@@ -204,5 +204,11 @@ fi
 mkdir -p "$OUTPUT_DIR"
 cp "$LIBFFI_ARCHIVE" "$OUTPUT_DIR/libffi.a"
 
+LIBFFI_INCLUDE_DIR="$OUTPUT_DIR/libffi-include"
+rm -rf "$LIBFFI_INCLUDE_DIR"
+mkdir -p "$LIBFFI_INCLUDE_DIR"
+cp "$LIBFFI_BUILD_DIR/include/ffi.h" "$LIBFFI_INCLUDE_DIR/ffi.h"
+cp "$LIBFFI_BUILD_DIR/include/ffitarget.h" "$LIBFFI_INCLUDE_DIR/ffitarget.h"
+
 log "Artifacts written to: $OUTPUT_DIR"
 ls -lh "$OUTPUT_DIR"

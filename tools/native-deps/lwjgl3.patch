@@ -1,21 +1,8 @@
-diff --git a/config/cli/kotlinc.args b/config/cli/kotlinc.args
-index 69dc398..07d43be 100644
---- a/config/cli/kotlinc.args
-+++ b/config/cli/kotlinc.args
-@@ -7,5 +7,5 @@
- -Xno-param-assertions
- -Xno-receiver-assertions
- -Xreport-perf
---Xbackend-threads=0
---verbose
-\ No newline at end of file
-+-Xbackend-threads=1
-+-verbose
 diff --git a/modules/lwjgl/core/src/main/c/common_tools.c b/modules/lwjgl/core/src/main/c/common_tools.c
-index 2b613b6..47e0b83 100644
+index f7d18c5..1907d4e 100644
 --- a/modules/lwjgl/core/src/main/c/common_tools.c
 +++ b/modules/lwjgl/core/src/main/c/common_tools.c
-@@ -198,7 +198,7 @@ JNIEnv* getEnv(jboolean *async) {
+@@ -180,7 +180,7 @@ inline jint getErrno(void) { return getEnvData()->errnum; }
  
  EXTERN_C_ENTER
  
@@ -24,230 +11,211 @@ index 2b613b6..47e0b83 100644
      UNUSED_PARAM(reserved)
  
      jvm = vm;
-@@ -208,7 +208,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+@@ -189,7 +189,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
      return JNI_VERSION_1_6;
  }
  
 -JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
 +JNIEXPORT void JNICALL __liblwjgl_JNI_OnUnload(JavaVM *vm, void *reserved) {
      UNUSED_PARAMS(vm, reserved);
-     tlsDestroy();
+     envTLSDestroy();
  }
-diff --git a/modules/lwjgl/core/src/main/c/libffi/ffi.h b/modules/lwjgl/core/src/main/c/libffi/ffi.h
-index f58609e..33b7ab1 100644
---- a/modules/lwjgl/core/src/main/c/libffi/ffi.h
-+++ b/modules/lwjgl/core/src/main/c/libffi/ffi.h
-@@ -379,6 +379,13 @@ typedef struct {
- FFI_API void *ffi_closure_alloc (size_t size, void **code);
- FFI_API void ffi_closure_free (void *);
- 
-+FFI_API ffi_status
-+ffi_alloc_prep_closure (ffi_closure **pclosure,
-+			ffi_cif *cif,
-+			void (*fun)(ffi_cif*,void*,void**,void*),
-+			void *user_data,
-+			void **code);
+diff --git a/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c b/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
+new file mode 100644
+index 0000000..293ce84
+--- /dev/null
++++ b/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
+@@ -0,0 +1,41 @@
++/*
++ * Copyright LWJGL. All rights reserved.
++ * License terms: https://www.lwjgl.org/license
++ */
++#include "common_tools.h"
 +
- FFI_API ffi_status
- ffi_prep_closure (ffi_closure*,
- 		  ffi_cif *,
++extern void* JVM_LoadLibrary(const char* name) __attribute__((weak));
++extern void* JVM_FindLibraryEntry(void* handle, const char* name) __attribute__((weak));
++
++static void throwUnsatisfiedLinkError(JNIEnv* env, const char* message) {
++    jclass errorClass = (*env)->FindClass(env, "java/lang/UnsatisfiedLinkError");
++    if (errorClass != NULL) {
++        (*env)->ThrowNew(env, errorClass, message);
++    }
++}
++
++EXTERN_C_ENTER
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_linux_StaticLinkLoader_nloadLibrary(JNIEnv *env, jclass clazz, jlong nameAddress) {
++    UNUSED_PARAM(clazz)
++
++    if (JVM_LoadLibrary == NULL) {
++        throwUnsatisfiedLinkError(env, "JVM_LoadLibrary is unavailable in this runtime");
++        return 0;
++    }
++
++    return (jlong)(uintptr_t)JVM_LoadLibrary((const char*)(uintptr_t)nameAddress);
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_linux_StaticLinkLoader_nfindLibraryEntry(JNIEnv *env, jclass clazz, jlong handleAddress, jlong nameAddress) {
++    UNUSED_PARAM(clazz)
++
++    if (JVM_FindLibraryEntry == NULL) {
++        throwUnsatisfiedLinkError(env, "JVM_FindLibraryEntry is unavailable in this runtime");
++        return 0;
++    }
++
++    return (jlong)(uintptr_t)JVM_FindLibraryEntry((void*)(uintptr_t)handleAddress, (const char*)(uintptr_t)nameAddress);
++}
++
++EXTERN_C_EXIT
+diff --git a/modules/lwjgl/core/src/main/c/org_lwjgl_system_Callback.c b/modules/lwjgl/core/src/main/c/org_lwjgl_system_Callback.c
+index 69cf6e8..03ad210 100644
+--- a/modules/lwjgl/core/src/main/c/org_lwjgl_system_Callback.c
++++ b/modules/lwjgl/core/src/main/c/org_lwjgl_system_Callback.c
+@@ -93,11 +93,14 @@ EXTERN_C_ENTER
+     javaCallback##Type = (*env)->FromReflectedMethod(env, (*env)->GetObjectArrayElement(env, methods, Index)); \
+     callbacks[Index] = (uintptr_t)&cbHandler##Type;
+ 
+-JNIEXPORT void JNICALL Java_org_lwjgl_system_Callback_getNativeCallbacks(JNIEnv *env, jclass clazz, jobjectArray methods, jlong callbacksAddress) {
++/* Returns jlong to match Callback.java's native signature `static native long getNativeCallbacks(...)`.
++ * Upstream LWJGL 3.2.2 declared this as void in C, which works on most platforms thanks to
++ * lax JNI calling conventions but breaks under Emscripten/wasm's strict indirect-call typing. */
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_Callback_getNativeCallbacks(JNIEnv *env, jclass clazz, jobjectArray methods, jlong callbacksAddress) {
+     uintptr_t* callbacks = (uintptr_t *)(intptr_t)callbacksAddress;
+ 
+     UNUSED_PARAMS(env, clazz)
+-    
++
+     SETUP_CALLBACK(0, V)
+     SETUP_CALLBACK(1, Z)
+     SETUP_CALLBACK(2, B)
+@@ -107,6 +110,8 @@ JNIEXPORT void JNICALL Java_org_lwjgl_system_Callback_getNativeCallbacks(JNIEnv
+     SETUP_CALLBACK(6, F)
+     SETUP_CALLBACK(7, D)
+     SETUP_CALLBACK(8, P)
++
++    return 0;
+ }
+ 
+ EXTERN_C_EXIT
 diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
-index 92de410..8ffc752 100644
+index e838aa8..ce33559 100644
 --- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
 +++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/MemoryUtil.java
-@@ -3572,6 +3572,8 @@ public final class MemoryUtil {
+@@ -2674,60 +2674,49 @@ public final class MemoryUtil {
+         throw new UnsupportedOperationException("LWJGL requires sun.misc.Unsafe to be available.");
+     }
  
-     private static long getAddressOffset() {
-         long MAGIC_ADDRESS = 0xDEADBEEF8BADF00DL & (BITS32 ? 0xFFFF_FFFFL : 0xFFFF_FFFF_FFFF_FFFFL);
-+		if (BITS32)
-+			System.out.println("[LWJGL] we are bits32 :3");
- 
-         ByteBuffer bb = Objects.requireNonNull(NewDirectByteBuffer(MAGIC_ADDRESS, 0));
- 
-diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java
-index a5efe9e..d46fc51 100644
---- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java
-+++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/SharedLibraryLoader.java
-@@ -293,6 +293,7 @@ final class SharedLibraryLoader {
-             try {
-                 Files.createDirectories(file.getParent());
-             } catch (IOException ignored) {
-+				ignored.printStackTrace();
-                 return false;
+-    private static long getAddressOffset() {
+-        long MAGIC_ADDRESS = 0xDEADBEEF8BADF00DL;
+-        if (BITS32) {
+-            MAGIC_ADDRESS &= 0xFFFFFFFFL;
+-        }
+-
+-        ByteBuffer bb = Objects.requireNonNull(NewDirectByteBuffer(MAGIC_ADDRESS, 0));
+-
+-        long offset = 8L; // 8 byte aligned, cannot be at 0
+-        while (true) {
+-            if (UNSAFE.getLong(bb, offset) == MAGIC_ADDRESS) {
+-                return offset;
++    // Reflection-based field offset lookup. The original code scanned raw byte offsets via
++    // UNSAFE.get{Int,Long} looking for sentinel values, which assumes a stable byte-offset
++    // memory layout (HotSpot-style). IKVM uses encoded field offsets, so the scan crashes.
++    // Resolving the field via reflection and then calling objectFieldOffset gives the same
++    // result on HotSpot and still works on IKVM.
++    private static long fieldOffset(Class<?> startClass, String fieldName) {
++        for (Class<?> c = startClass; c != null; c = c.getSuperclass()) {
++            try {
++                return UNSAFE.objectFieldOffset(c.getDeclaredField(fieldName));
++            } catch (NoSuchFieldException ignored) {
              }
-             testFile = file;
-@@ -317,6 +318,7 @@ final class SharedLibraryLoader {
- 
-             return true;
-         } catch (Throwable ignored) {
-+			ignored.printStackTrace();
-             if (file == testFile) {
-                 canWriteCleanup(root, file);
-             }
-@@ -344,4 +346,4 @@ final class SharedLibraryLoader {
+-            offset += 8L;
          }
++        throw new UnsupportedOperationException("Cannot find field '" + fieldName + "' on " + startClass.getName());
      }
  
--}
-\ No newline at end of file
-+}
-diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
-index 9ddee4d..72e5256 100644
---- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
-+++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
-@@ -172,6 +172,7 @@ public final class ThreadLocalUtil {
-     private static native long setupEnvData(int functionCount);
- 
-     public static void setCapabilities(long capabilities) {
-+		System.out.println("[LWJGL] [ThreadLocalUtil] setting capabilities");
-         // Get thread's JNIEnv
-         long env_pp = getThreadJNIEnv();
-         long env_p  = memGetAddress(env_pp);
-@@ -191,6 +192,7 @@ public final class ThreadLocalUtil {
- 
-     // Ensures FUNCTION_MISSING_ABORT will be called even if no context is current,
-     public static void setFunctionMissingAddresses(int functionCount) {
-+		System.out.println("[LWJGL] [ThreadLocalUtil] setting functionmissing");
-         long ptr = JNI_NATIVE_INTERFACE + CAPABILITIES_OFFSET;
- 
-         long currentTable = memGetAddress(ptr);
-@@ -207,6 +209,7 @@ public final class ThreadLocalUtil {
-             if (currentTable != NULL) {
-                 // check reserved0 to see if this Native Image or EspressoVM.
-                 if (memGetAddress(JNI_NATIVE_INTERFACE) == RESERVED_NULL) { // NativeImage
-+                    System.err.println("[LWJGL] [ThreadLocalUtil] Silently aborting. NativeImage detected");
-                     // silently abort on Native Image, the global JNIEnv object lives in read-only memory by default. (see #875)
-                     return;
-                 } else { // EspressoVM
-@@ -241,4 +244,4 @@ public final class ThreadLocalUtil {
-         return false;
-     }
- 
--}
-\ No newline at end of file
-+}
-diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
-index aaab4de..75a5cf8 100644
---- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
-+++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Upcalls.java
-@@ -37,56 +37,24 @@ final class Upcalls {
-     }
- 
-     static {
--        // Detect whether we need to maintain a mapping from executable addresses to FFIClosure structs.
--        try (MemoryStack stack = stackPush()) {
--            PointerBuffer code = stack.mallocPointer(1);
-+        apiLog("Closure Registry: ConcurrentHashMap");
- 
--            FFIClosure closure = ffi_closure_alloc(CLOSURE_SIZE, code);
--            if (closure == null) {
--                throw new OutOfMemoryError();
+-    private static final int MAGIC_CAPACITY = 0x0D15EA5E;
+-    private static final int MAGIC_POSITION = 0x00FACADE;
+-
+-    private static long getIntFieldOffset(ByteBuffer bb, int magicValue) {
+-        long offset = 4L; // 4 byte aligned, cannot be at 0
+-        while (true) {
+-            if (UNSAFE.getInt(bb, offset) == magicValue) {
+-                return offset;
 -            }
-+        CLOSURE_REGISTRY = new ClosureRegistry() {
-+            private final ConcurrentHashMap<Long, FFIClosure> map = new ConcurrentHashMap<>();
- 
--            if (code.get(0) == closure.address()) {
--                apiLog("Closure Registry: simple");
--
--                // When the closure address matches the executable address, we don't have to maintain any mappings.
--                // We can simply cast the executable address to ffi_closure. This is true on many platforms.
--                CLOSURE_REGISTRY = new ClosureRegistry() {
--                    @Override
--                    public void put(long executableAddress, FFIClosure closure) {
--                        // no-op
--                    }
--                    @Override
--                    public FFIClosure get(long executableAddress) {
--                        return FFIClosure.create(executableAddress);
--                    }
--                    @Override
--                    public FFIClosure remove(long executableAddress) {
--                        return get(executableAddress);
--                    }
--                };
--            } else {
--                apiLog("Closure Registry: ConcurrentHashMap");
--
--                CLOSURE_REGISTRY = new ClosureRegistry() {
--                    private final ConcurrentHashMap<Long, FFIClosure> map = new ConcurrentHashMap<>();
--
--                    @Override
--                    public void put(long executableAddress, FFIClosure closure) {
--                        map.put(executableAddress, closure);
--                    }
--                    @Override
--                    public FFIClosure get(long executableAddress) {
--                        return map.get(executableAddress);
--                    }
--                    @Override
--                    public FFIClosure remove(long executableAddress) {
--                        return map.remove(executableAddress);
--                    }
--                };
-+            @Override
-+            public void put(long executableAddress, FFIClosure closure) {
-+                map.put(executableAddress, closure);
-             }
--            ffi_closure_free(closure);
+-            offset += 4L;
 -        }
-+            @Override
-+            public FFIClosure get(long executableAddress) {
-+                return map.get(executableAddress);
-+            }
-+            @Override
-+            public FFIClosure remove(long executableAddress) {
-+                return map.remove(executableAddress);
-+            }
-+        };
++    private static long getAddressOffset() {
++        return fieldOffset(BUFFER_BYTE, "address");
      }
  
-     /** Address of the native upcall handler that will call the Java method when the native callback function is invoked. */
-@@ -124,26 +92,26 @@ final class Upcalls {
-         long executableAddress;
-         try (MemoryStack stack = stackPush()) {
-             PointerBuffer code = stack.mallocPointer(1);
-+            PointerBuffer pclosure = stack.mallocPointer(1);
+     private static long getMarkOffset() {
+-        ByteBuffer bb = Objects.requireNonNull(NewDirectByteBuffer(1L, 0));
+-        return getIntFieldOffset(bb, -1);
++        return fieldOffset(BUFFER_BYTE, "mark");
+     }
  
--            closure = ffi_closure_alloc(CLOSURE_SIZE, code);
--            if (closure == null) {
--                throw new OutOfMemoryError();
-+            long user_data = NewGlobalRef(instance);
-+            int errcode = nffi_alloc_prep_closure(memAddress(pclosure), descriptor.cif.address(), CALLBACK_HANDLER, user_data, memAddress(code));
-+            if (errcode != FFI_OK) {
-+                DeleteGlobalRef(user_data);
-+                throw new RuntimeException("Failed to prepare the libffi closure");
-             }
+     private static long getPositionOffset() {
+-        ByteBuffer bb = Objects.requireNonNull(NewDirectByteBuffer(-1L, MAGIC_CAPACITY));
+-        bb.position(MAGIC_POSITION);
+-        return getIntFieldOffset(bb, MAGIC_POSITION);
++        return fieldOffset(BUFFER_BYTE, "position");
+     }
+ 
+     private static long getLimitOffset() {
+-        ByteBuffer bb = Objects.requireNonNull(NewDirectByteBuffer(-1L, MAGIC_CAPACITY));
+-        bb.limit(MAGIC_POSITION);
+-        return getIntFieldOffset(bb, MAGIC_POSITION);
++        return fieldOffset(BUFFER_BYTE, "limit");
+     }
+ 
+     private static long getCapacityOffset() {
+-        ByteBuffer bb = Objects.requireNonNull(NewDirectByteBuffer(-1L, MAGIC_CAPACITY));
+-        bb.limit(0);
+-        return getIntFieldOffset(bb, MAGIC_CAPACITY);
++        return fieldOffset(BUFFER_BYTE, "capacity");
+     }
+ 
+     private static <T extends Buffer> long getParentOffset(int oopSize, T parent, Function<T, T> childFactory) {
++        // Direct buffer slices/duplicates hold the source reference in "att"; resolve it
++        // reflectively for IKVM compatibility, fall back to the original differ-scan otherwise.
++        try {
++            return fieldOffset(parent.getClass(), "att");
++        } catch (UnsupportedOperationException ignored) {
++        }
 +
-             executableAddress = code.get(0);
-+            closure = FFIClosure.createSafe(pclosure.get(0));
-+            if (closure == null) {
-+                DeleteGlobalRef(user_data);
-+                throw new RuntimeException("Failed to allocate the libffi closure");
-+            }
-             if (DEBUG_ALLOCATOR) {
-                 MemoryManage.DebugAllocator.track(executableAddress, CLOSURE_SIZE);
-             }
-         }
+         T child = childFactory.apply(parent);
  
--        long user_data = NewGlobalRef(instance);
--
--        int errcode = ffi_prep_closure_loc(closure, descriptor.cif, CALLBACK_HANDLER, user_data, executableAddress);
--        if (errcode != FFI_OK) {
--            DeleteGlobalRef(user_data);
--            ffi_closure_free(closure);
--            throw new RuntimeException("Failed to prepare the libffi closure");
--        }
--
-         CLOSURE_REGISTRY.put(executableAddress, closure);
+         long offset = oopSize; // pointer aligned, cannot be at 0
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Platform.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Platform.java
+index a0a169b..cd15991 100644
+--- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/Platform.java
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/Platform.java
+@@ -77,7 +77,13 @@ public enum Platform {
+     }
  
-         return executableAddress;
+     public static String mapLibraryNameBundled(String name) {
+-        return Pointer.BITS64 ? name : name + "32";
++        // The "32" suffix on BITS32 is a historical LWJGL convention to allow shipping both
++        // 32-bit and 64-bit natives side-by-side in the same JAR. In our static-linked
++        // emscripten build there's only one variant per library, so always use the plain name.
++        // This affects "system"-loaded helpers (lwjgl_opengl, lwjgl_stb, lwjgl_jemalloc, …)
++        // and bundled libraries (glfw, openal, …). The pointer size of the JVM is wasm32, but
++        // the corresponding "*.so" filenames in /tmp/lwjgl/ don't carry the suffix.
++        return name;
+     }
+ 
+ }
+\ No newline at end of file
 diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
-index 5c4e929..bd82a6f 100644
+index 1dc93e1..f2bd53b 100644
 --- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
 +++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
-@@ -8,6 +8,9 @@ import org.jspecify.annotations.*;
+@@ -6,7 +6,12 @@ package org.lwjgl.system.linux;
+ 
  import org.lwjgl.system.*;
  
++import javax.annotation.*;
++
  import java.nio.*;
 +import java.nio.file.*;
 +import java.util.*;
@@ -255,7 +223,7 @@ index 5c4e929..bd82a6f 100644
  
  import static org.lwjgl.system.MemoryStack.*;
  import static org.lwjgl.system.MemoryUtil.*;
-@@ -16,15 +19,87 @@ import static org.lwjgl.system.linux.DynamicLinkLoader.*;
+@@ -15,15 +20,88 @@ import static org.lwjgl.system.linux.DynamicLinkLoader.*;
  /** Implements a {@link SharedLibrary} on the Linux OS. */
  public class LinuxLibrary extends SharedLibrary.Default {
  
@@ -263,7 +231,8 @@ index 5c4e929..bd82a6f 100644
 +    private static final Pattern SO = Pattern.compile("(?:^|/)[^/]+[.]so(?:[.]\\d+)*$");
 +
 +    private final boolean staticLinked;
-+    private final @Nullable String path;
++    @Nullable
++    private final String path;
 +
      public LinuxLibrary(String name) {
          this(name, loadLibrary(name));
@@ -315,9 +284,8 @@ index 5c4e929..bd82a6f 100644
 +        }
 +
 +        throw new UnsatisfiedLinkError("Failed to load statically-linked library: " + name);
-     }
- 
--    private static long loadLibrary(String name) {
++    }
++
 +    private static List<String> staticLookupCandidates(String name) {
 +        LinkedHashSet<String> candidates = new LinkedHashSet<>(4);
 +        candidates.add(name);
@@ -331,8 +299,9 @@ index 5c4e929..bd82a6f 100644
 +        }
 +
 +        return new ArrayList<>(candidates);
-+    }
-+
+     }
+ 
+-    private static long loadLibrary(String name) {
 +    private static String mapLibraryName(String name) {
 +        if (SO.matcher(name).find()) {
 +            return name;
@@ -343,17 +312,20 @@ index 5c4e929..bd82a6f 100644
 +    private static long loadDynamicLibrary(String name) {
          long handle;
          try (MemoryStack stack = stackPush()) {
-             handle = dlopen(stack.UTF8(name), RTLD_LAZY | RTLD_LOCAL);
-@@ -37,17 +112,38 @@ public class LinuxLibrary extends SharedLibrary.Default {
+             handle = dlopen(stack.ASCII(name), RTLD_LAZY | RTLD_LOCAL);
+@@ -34,14 +112,42 @@ public class LinuxLibrary extends SharedLibrary.Default {
+         return handle;
+     }
  
-     @Override
-     public @Nullable String getPath() {
++    @Nullable
++    @Override
++    public String getPath() {
 +        if (staticLinked) {
 +            return path;
 +        }
-         return SharedLibraryUtil.getLibraryPath(address());
-     }
- 
++        return super.getPath();
++    }
++
      @Override
      public long getFunctionAddress(ByteBuffer functionName) {
 +        if (staticLinked) {
@@ -374,7 +346,8 @@ index 5c4e929..bd82a6f 100644
 +
 +        final long handle;
 +        final boolean staticLinked;
-+        final @Nullable String path;
++        @Nullable
++        final String path;
 +
 +        LoadedLibrary(long handle, boolean staticLinked, @Nullable String path) {
 +            this.handle = handle;
@@ -386,84 +359,9 @@ index 5c4e929..bd82a6f 100644
 -}
 \ No newline at end of file
 +}
-diff --git a/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt b/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt
-index 7508e5d..70d156d 100644
---- a/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt
-+++ b/modules/lwjgl/core/src/templates/kotlin/core/libffi/templates/LibFFI.kt
-@@ -226,6 +226,16 @@ typedef void (*FFI_CLOSURE_FUN)(ffi_cif*, void*, void**, void*);
-         ffi_closure.p("writable")
-     )
- 
-+    ffi_status(
-+        "alloc_prep_closure",
-+
-+        Check(1)..ffi_closure.p.p("pclosure"),
-+        ffi_cif.p("cif"),
-+        FFI_CLOSURE_FUN("fun"),
-+        nullable..opaque_p("user_data"),
-+        Check(1)..void.p.p("code")
-+    )
-+
-     ffi_status(
-         "prep_closure_loc",
- 
-@@ -235,4 +245,4 @@ typedef void (*FFI_CLOSURE_FUN)(ffi_cif*, void*, void**, void*);
-         nullable..opaque_p("user_data"),
-         opaque_p("codeloc")
-     )
--}
-\ No newline at end of file
-+}
-diff --git a/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c b/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
-new file mode 100644
-index 0000000..293ce84
---- /dev/null
-+++ b/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
-@@ -0,0 +1,41 @@
-+/*
-+ * Copyright LWJGL. All rights reserved.
-+ * License terms: https://www.lwjgl.org/license
-+ */
-+#include "common_tools.h"
-+
-+extern void* JVM_LoadLibrary(const char* name) __attribute__((weak));
-+extern void* JVM_FindLibraryEntry(void* handle, const char* name) __attribute__((weak));
-+
-+static void throwUnsatisfiedLinkError(JNIEnv* env, const char* message) {
-+    jclass errorClass = (*env)->FindClass(env, "java/lang/UnsatisfiedLinkError");
-+    if (errorClass != NULL) {
-+        (*env)->ThrowNew(env, errorClass, message);
-+    }
-+}
-+
-+EXTERN_C_ENTER
-+
-+JNIEXPORT jlong JNICALL Java_org_lwjgl_system_linux_StaticLinkLoader_nloadLibrary(JNIEnv *env, jclass clazz, jlong nameAddress) {
-+    UNUSED_PARAM(clazz)
-+
-+    if (JVM_LoadLibrary == NULL) {
-+        throwUnsatisfiedLinkError(env, "JVM_LoadLibrary is unavailable in this runtime");
-+        return 0;
-+    }
-+
-+    return (jlong)(uintptr_t)JVM_LoadLibrary((const char*)(uintptr_t)nameAddress);
-+}
-+
-+JNIEXPORT jlong JNICALL Java_org_lwjgl_system_linux_StaticLinkLoader_nfindLibraryEntry(JNIEnv *env, jclass clazz, jlong handleAddress, jlong nameAddress) {
-+    UNUSED_PARAM(clazz)
-+
-+    if (JVM_FindLibraryEntry == NULL) {
-+        throwUnsatisfiedLinkError(env, "JVM_FindLibraryEntry is unavailable in this runtime");
-+        return 0;
-+    }
-+
-+    return (jlong)(uintptr_t)JVM_FindLibraryEntry((void*)(uintptr_t)handleAddress, (const char*)(uintptr_t)nameAddress);
-+}
-+
-+EXTERN_C_EXIT
 diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/StaticLinkLoader.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/StaticLinkLoader.java
 new file mode 100644
-index 0000000..f8b2a8e
+index 0000000..9fe350f
 --- /dev/null
 +++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/StaticLinkLoader.java
 @@ -0,0 +1,45 @@
@@ -494,7 +392,7 @@ index 0000000..f8b2a8e
 +    static long loadLibrary(CharSequence name) {
 +        MemoryStack stack = stackGet(); int stackPointer = stack.getPointer();
 +        try {
-+            stack.nUTF8(name, true);
++            stack.nASCII(name, true);
 +            return nloadLibrary(stack.getPointerAddress());
 +        } finally {
 +            stack.setPointer(stackPointer);
@@ -512,3 +410,795 @@ index 0000000..f8b2a8e
 +    }
 +
 +}
+diff --git a/modules/lwjgl/core/src/main/c/dyncall_libffi_bridge.c b/modules/lwjgl/core/src/main/c/dyncall_libffi_bridge.c
+new file mode 100644
+index 0000000..315320c
+--- /dev/null
++++ b/modules/lwjgl/core/src/main/c/dyncall_libffi_bridge.c
+@@ -0,0 +1,412 @@
++/*
++ * Bridge: dyncall callback API → libffi closures.
++ *
++ * LWJGL 3.2.2 wraps dyncall for FFI/callback support. Upstream LWJGL ships
++ * libdyncall_s.a/libdyncallback_s.a binaries for x86/ARM Linux/macOS/Windows,
++ * not for Emscripten/wasm. This file reimplements just enough of the
++ * dyncallback API (dcbNewCallback/dcbFreeCallback + dcbArg*) on top of
++ * libffi closures so that LWJGL's Callback machinery works on wasm.
++ *
++ * Notes
++ * -----
++ * - Only the parts of dyncall used by LWJGL's Callback/CallbackI plumbing are
++ *   covered. dcCall* (forward calls) and DynLoad are out of scope; LWJGL only
++ *   uses dcCall for the generic Function path, which our bindings (glfw, gl,
++ *   stb) bypass via per-method JNI.
++ * - The handle returned by dcbNewCallback is the libffi closure's executable
++ *   code address. A small global map records the metadata needed to free it
++ *   later (libffi requires the writable closure pointer, not the executable
++ *   one, for ffi_closure_free).
++ */
++
++#include "common_tools.h"
++#include "ffi.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <pthread.h>
++
++/* Failure paths always log; successful traces are gated on IKVM_DCB_DEBUG. */
++#define DCB_ERR(...) do { fprintf(stderr, "[dcb] " __VA_ARGS__); fflush(stderr); } while (0)
++#define DCB_LOG(...) do { \
++    static int _dcb_debug = -1; \
++    if (_dcb_debug < 0) { \
++        const char* _v = getenv("IKVM_DCB_DEBUG"); \
++        _dcb_debug = (_v && _v[0] && _v[0] != '0') ? 1 : 0; \
++    } \
++    if (_dcb_debug) { fprintf(stderr, "[dcb] " __VA_ARGS__); fflush(stderr); } \
++} while (0)
++
++/* DCArgs replacement: cursor over libffi-supplied args. */
++typedef struct dc_args_s {
++    void** args;
++    int    cursor;
++} dc_args_t;
++
++/* dyncall callback handler signature (see dyncall_callback.h). */
++typedef char (*dc_handler_fn)(void* cb, dc_args_t* args, void* result, void* userdata);
++
++/* Per-callback metadata. */
++typedef struct dc_entry_s {
++    void*              code;        /* executable address — what callers pass back to free */
++    ffi_closure*       closure;     /* writable closure pointer (for ffi_closure_free) */
++    ffi_cif            cif;
++    ffi_type**         arg_types;
++    int                nargs;
++    dc_handler_fn      user_handler;
++    void*              user_data;
++    struct dc_entry_s* next;
++} dc_entry_t;
++
++static dc_entry_t*     g_entries = NULL;
++static pthread_mutex_t g_lock    = PTHREAD_MUTEX_INITIALIZER;
++
++static void entry_register(dc_entry_t* e) {
++    pthread_mutex_lock(&g_lock);
++    e->next   = g_entries;
++    g_entries = e;
++    pthread_mutex_unlock(&g_lock);
++}
++
++static dc_entry_t* entry_unregister(void* code) {
++    pthread_mutex_lock(&g_lock);
++    dc_entry_t* prev = NULL;
++    dc_entry_t* e    = g_entries;
++    while (e && e->code != code) {
++        prev = e;
++        e    = e->next;
++    }
++    if (e) {
++        if (prev) prev->next = e->next;
++        else      g_entries  = e->next;
++    }
++    pthread_mutex_unlock(&g_lock);
++    return e;
++}
++
++/* dyncall sig char → libffi type. Returns NULL on unknown char. */
++static ffi_type* sig_to_ffi(char c) {
++    switch (c) {
++        case 'v': return &ffi_type_void;
++        case 'B': return &ffi_type_uint8;   /* bool */
++        case 'c': return &ffi_type_sint8;
++        case 'C': return &ffi_type_uint8;
++        case 's': return &ffi_type_sint16;
++        case 'S': return &ffi_type_uint16;
++        case 'i': return &ffi_type_sint32;
++        case 'I': return &ffi_type_uint32;
++        case 'j': return sizeof(long) == 8 ? &ffi_type_sint64 : &ffi_type_sint32;
++        case 'J': return sizeof(long) == 8 ? &ffi_type_uint64 : &ffi_type_uint32;
++        case 'l': return &ffi_type_sint64;
++        case 'L': return &ffi_type_uint64;
++        case 'f': return &ffi_type_float;
++        case 'd': return &ffi_type_double;
++        case 'p':
++        case 'Z': return &ffi_type_pointer;
++        default:  return NULL;
++    }
++}
++
++/* libffi closure callback: bridges to dyncall-style handler.
++ *
++ * Note on the ret buffer: libffi promises ffi_arg-aligned storage for narrow
++ * integer return types (bool/byte/short). LWJGL's cbHandlerZ/B/S write only
++ * sizeof(jboolean|jbyte|jshort), leaving upper bits undefined for libffi's
++ * caller. Pre-zero the slot so partial writes are safe. Void returns are a
++ * no-op for libffi here, so skipping is fine but the memset costs little. */
++static void closure_trampoline(ffi_cif* cif, void* ret, void** args, void* user_data) {
++    dc_entry_t* e = (dc_entry_t*)user_data;
++    dc_args_t   a = { args, 0 };
++    if (ret != NULL && cif->rtype != NULL && cif->rtype != &ffi_type_void) {
++        size_t sz = cif->rtype->size;
++        if (sz < sizeof(ffi_arg)) sz = sizeof(ffi_arg);
++        memset(ret, 0, sz);
++    }
++    e->user_handler(e, &a, ret, e->user_data);
++}
++
++EXTERN_C_ENTER
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbNewCallback(
++    JNIEnv* env, jclass clazz, jlong signatureAddress, jlong funcptrAddress, jlong userdataAddress
++) {
++    UNUSED_PARAMS(env, clazz)
++
++    const char* sig = (const char*)(intptr_t)signatureAddress;
++    if (sig == NULL) { DCB_ERR("ndcbNewCallback: signatureAddress=0\n"); return 0; }
++
++    DCB_LOG("ndcbNewCallback enter: sig=\"%s\" funcptr=%p ud=%p\n",
++        sig, (void*)(intptr_t)funcptrAddress, (void*)(intptr_t)userdataAddress);
++
++    /* Skip optional calling-convention prefix: '_' followed by a cc char. */
++    if (sig[0] == '_' && sig[1] != '\0') sig += 2;
++
++    /* LWJGL writes signatures as "(args)ret". The leading '(' is optional in
++     * dyncall's grammar (it's just an opening marker), but LWJGL always includes
++     * it, so skip if present. */
++    if (sig[0] == '(') sig += 1;
++
++    /* Count argument chars up to ')'. */
++    const char* p = sig;
++    int nargs = 0;
++    while (*p && *p != ')') { nargs++; p++; }
++    if (*p != ')' || *(p + 1) == '\0') {
++        DCB_ERR("ndcbNewCallback: malformed signature \"%s\"\n",
++            (const char*)(intptr_t)signatureAddress);
++        return 0;
++    }
++    char retchar = *(p + 1);
++
++    dc_entry_t* e = (dc_entry_t*)calloc(1, sizeof(dc_entry_t));
++    if (e == NULL) { DCB_ERR("calloc(dc_entry_t) failed\n"); return 0; }
++    e->nargs        = nargs;
++    e->user_handler = (dc_handler_fn)(intptr_t)funcptrAddress;
++    e->user_data    = (void*)(intptr_t)userdataAddress;
++
++    if (nargs > 0) {
++        e->arg_types = (ffi_type**)malloc(sizeof(ffi_type*) * nargs);
++        if (e->arg_types == NULL) { DCB_ERR("malloc(arg_types) failed\n"); free(e); return 0; }
++        const char* q = sig;
++        for (int i = 0; i < nargs; i++) {
++            char c = *q++;
++            ffi_type* t = sig_to_ffi(c);
++            if (t == NULL) {
++                DCB_ERR("ndcbNewCallback: unknown arg sig char '%c' at index %d in \"%s\"\n",
++                    c, i, (const char*)(intptr_t)signatureAddress);
++                free(e->arg_types); free(e); return 0;
++            }
++            e->arg_types[i] = t;
++        }
++    }
++
++    ffi_type* rettype = sig_to_ffi(retchar);
++    if (rettype == NULL) {
++        DCB_ERR("ndcbNewCallback: unknown return sig char '%c' in \"%s\"\n",
++            retchar, (const char*)(intptr_t)signatureAddress);
++        if (e->arg_types) free(e->arg_types);
++        free(e);
++        return 0;
++    }
++
++    ffi_status st = ffi_prep_cif(&e->cif, FFI_DEFAULT_ABI, (unsigned)nargs, rettype, e->arg_types);
++    if (st != FFI_OK) {
++        DCB_ERR("ffi_prep_cif failed: status=%d sig=\"%s\"\n",
++            (int)st, (const char*)(intptr_t)signatureAddress);
++        if (e->arg_types) free(e->arg_types);
++        free(e);
++        return 0;
++    }
++
++    /* On wasm/emscripten, libffi's split ffi_closure_alloc + ffi_prep_closure_loc
++     * path is a no-op stub (returns NULL/FFI_BAD_TYPEDEF). The combined
++     * ffi_alloc_prep_closure call — added by our libffi patch — is required
++     * because wasm closures are claimed from a pool of pre-emitted signature
++     * trampolines, so signature info must be known at allocation time. */
++    void* code = NULL;
++    st = ffi_alloc_prep_closure(&e->closure, &e->cif, closure_trampoline, e, &code);
++    if (st != FFI_OK || e->closure == NULL || code == NULL) {
++        DCB_ERR("ffi_alloc_prep_closure failed: status=%d closure=%p code=%p sig=\"%s\"\n",
++            (int)st, (void*)e->closure, code, (const char*)(intptr_t)signatureAddress);
++        if (e->arg_types) free(e->arg_types);
++        free(e);
++        return 0;
++    }
++
++    e->code = code;
++    entry_register(e);
++    DCB_LOG("ndcbNewCallback ok: sig=\"%s\" code=%p closure=%p\n",
++        (const char*)(intptr_t)signatureAddress, code, (void*)e->closure);
++    return (jlong)(intptr_t)code;
++}
++
++JNIEXPORT void JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbFreeCallback(
++    JNIEnv* env, jclass clazz, jlong pcbAddress
++) {
++    UNUSED_PARAMS(env, clazz)
++    dc_entry_t* e = entry_unregister((void*)(intptr_t)pcbAddress);
++    if (e == NULL) return;
++    if (e->closure) ffi_closure_free(e->closure);
++    if (e->arg_types) free(e->arg_types);
++    free(e);
++}
++
++JNIEXPORT void JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbInitCallback(
++    JNIEnv* env, jclass clazz, jlong pcbAddress, jlong signatureAddress, jlong handlerAddress, jlong userdataAddress
++) {
++    UNUSED_PARAMS(env, clazz)
++    UNUSED_PARAM(pcbAddress)
++    UNUSED_PARAM(signatureAddress)
++    UNUSED_PARAM(handlerAddress)
++    UNUSED_PARAM(userdataAddress)
++    /* dcbInitCallback is the in-place variant of dcbNewCallback; LWJGL's Callback path
++     * uses dcbNewCallback. Not implementing in-place reinit here. */
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbGetUserData(
++    JNIEnv* env, jclass clazz, jlong pcbAddress
++) {
++    UNUSED_PARAMS(env, clazz)
++    pthread_mutex_lock(&g_lock);
++    dc_entry_t* e = g_entries;
++    while (e && e->code != (void*)(intptr_t)pcbAddress) e = e->next;
++    void* ud = e ? e->user_data : NULL;
++    pthread_mutex_unlock(&g_lock);
++    return (jlong)(intptr_t)ud;
++}
++
++/* JavaCritical_ variants — LWJGL emits these alongside Java_ on JDK <= 9; just
++ * delegate to the same logic by skipping JNIEnv/jclass args. */
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbNewCallback(jlong sig, jlong fp, jlong ud) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbNewCallback(NULL, NULL, sig, fp, ud);
++}
++JNIEXPORT void JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbFreeCallback(jlong pcb) {
++    Java_org_lwjgl_system_dyncall_DynCallback_ndcbFreeCallback(NULL, NULL, pcb);
++}
++JNIEXPORT void JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbInitCallback(jlong pcb, jlong sig, jlong h, jlong ud) {
++    Java_org_lwjgl_system_dyncall_DynCallback_ndcbInitCallback(NULL, NULL, pcb, sig, h, ud);
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbGetUserData(jlong pcb) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbGetUserData(NULL, NULL, pcb);
++}
++
++/* ---- dcbArg* readers ------------------------------------------------------ */
++
++#define DC_ARG_FETCH(TYPE) \
++    dc_args_t* a = (dc_args_t*)(intptr_t)argsAddress; \
++    TYPE v = *(TYPE*)a->args[a->cursor++];
++
++JNIEXPORT jint JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgBool(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jboolean)
++    return v ? 1 : 0;
++}
++JNIEXPORT jint JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgBool(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgBool(NULL, NULL, a);
++}
++
++JNIEXPORT jbyte JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgChar(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jbyte)
++    return v;
++}
++JNIEXPORT jbyte JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgChar(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgChar(NULL, NULL, a);
++}
++
++JNIEXPORT jbyte JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgUChar(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jbyte)
++    return v;
++}
++JNIEXPORT jbyte JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgUChar(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgUChar(NULL, NULL, a);
++}
++
++JNIEXPORT jshort JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgShort(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jshort)
++    return v;
++}
++JNIEXPORT jshort JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgShort(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgShort(NULL, NULL, a);
++}
++
++JNIEXPORT jshort JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgUShort(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jshort)
++    return v;
++}
++JNIEXPORT jshort JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgUShort(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgUShort(NULL, NULL, a);
++}
++
++JNIEXPORT jint JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgInt(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jint)
++    return v;
++}
++JNIEXPORT jint JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgInt(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgInt(NULL, NULL, a);
++}
++
++JNIEXPORT jint JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgUInt(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jint)
++    return v;
++}
++JNIEXPORT jint JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgUInt(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgUInt(NULL, NULL, a);
++}
++
++/* dyncall's 'long' is platform-sized; LWJGL's ndcbArgLong returns jint. */
++JNIEXPORT jint JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgLong(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    dc_args_t* a = (dc_args_t*)(intptr_t)argsAddress;
++    if (sizeof(long) == 8) {
++        long v = *(long*)a->args[a->cursor++];
++        return (jint)v;
++    } else {
++        jint v = *(jint*)a->args[a->cursor++];
++        return v;
++    }
++}
++JNIEXPORT jint JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgLong(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgLong(NULL, NULL, a);
++}
++
++JNIEXPORT jint JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgULong(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgLong(env, clazz, argsAddress);
++}
++JNIEXPORT jint JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgULong(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgULong(NULL, NULL, a);
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgLongLong(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jlong)
++    return v;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgLongLong(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgLongLong(NULL, NULL, a);
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgULongLong(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jlong)
++    return v;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgULongLong(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgULongLong(NULL, NULL, a);
++}
++
++JNIEXPORT jfloat JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgFloat(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jfloat)
++    return v;
++}
++JNIEXPORT jfloat JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgFloat(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgFloat(NULL, NULL, a);
++}
++
++JNIEXPORT jdouble JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgDouble(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    DC_ARG_FETCH(jdouble)
++    return v;
++}
++JNIEXPORT jdouble JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgDouble(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgDouble(NULL, NULL, a);
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgPointer(JNIEnv* env, jclass clazz, jlong argsAddress) {
++    UNUSED_PARAMS(env, clazz)
++    dc_args_t* a = (dc_args_t*)(intptr_t)argsAddress;
++    void* p = *(void**)a->args[a->cursor++];
++    return (jlong)(intptr_t)p;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_system_dyncall_DynCallback_ndcbArgPointer(jlong a) {
++    return Java_org_lwjgl_system_dyncall_DynCallback_ndcbArgPointer(NULL, NULL, a);
++}
++
++EXTERN_C_EXIT
+diff --git a/modules/lwjgl/tinyfd/src/main/c/tinyfd_js_proxy.c b/modules/lwjgl/tinyfd/src/main/c/tinyfd_js_proxy.c
+new file mode 100644
+index 0000000..a86aeda
+--- /dev/null
++++ b/modules/lwjgl/tinyfd/src/main/c/tinyfd_js_proxy.c
+@@ -0,0 +1,368 @@
++/*
++ * JavaScript proxy for LWJGL's org.lwjgl.util.tinyfd.TinyFileDialogs.
++ *
++ * Replaces upstream tinyfiledialogs.c — which would try to spawn native OS
++ * dialogs via fork/exec — with calls into JS-side functions on `window.tinyfd`.
++ * All dialog-returning functions use MAIN_THREAD_EM_ASM_* so callers running
++ * inside a pthread worker block synchronously until the main-thread UI handler
++ * (registered by host JS) completes.
++ *
++ * Expected `window.tinyfd` shape (everything except beep is optional — missing
++ * handlers behave like the user cancelled the dialog):
++ *
++ *   window.tinyfd = {
++ *     beep:               function() {},
++ *     notifyPopup:        function(title, message, iconType) -> int,
++ *     messageBox:         function(title, message, dialogType, iconType, defaultButton) -> int,
++ *     inputBox:           function(title, message, defaultInput) -> string|null,
++ *     saveFileDialog:     function(title, defaultPathAndFile, filterPatterns[], filterDescription) -> string|null,
++ *     openFileDialog:     function(title, defaultPathAndFile, filterPatterns[], filterDescription, allowMultiple) -> string|null,
++ *     selectFolderDialog: function(title, defaultPath) -> string|null,
++ *     colorChooser:       function(title, defaultHexRGB, defaultRGB[3]) -> string|null  // "#RRGGBB"
++ *   };
++ *
++ * tinyfd's API documents that returned strings live in a static buffer that's
++ * overwritten on the next call; we honour that — callers must copy results
++ * before invoking another tinyfd function.
++ */
++
++#include "common_tools.h"
++
++#include <emscripten.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* ---- tinyfd configuration / state ---------------------------------------- */
++
++static const char G_TINYFD_VERSION[] = "lwjgl-wasm-js";
++static const char G_TINYFD_NEEDS[]   = "browser dialogs registered on window.tinyfd";
++
++static int  g_tinyfd_verbose      = 0;
++static int  g_tinyfd_silent       = 0;
++static int  g_tinyfd_winUtf8      = 1;
++static int  g_tinyfd_forceConsole = 0;
++
++/* tinyfd's documented response buffer (last response from message dialog). */
++static char g_tinyfd_response[1024] = "";
++
++/* Static return buffer for char*-returning functions. tinyfd does this too;
++ * callers must copy the string before the next tinyfd call. */
++static char g_tinyfd_strbuf[4096] = "";
++
++/* ---- field-address getters (return long = address) ----------------------- */
++
++EXTERN_C_ENTER
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1version(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    return (jlong)(intptr_t)G_TINYFD_VERSION;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1version(void) {
++    return (jlong)(intptr_t)G_TINYFD_VERSION;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1needs(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    return (jlong)(intptr_t)G_TINYFD_NEEDS;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1needs(void) {
++    return (jlong)(intptr_t)G_TINYFD_NEEDS;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1verbose(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    return (jlong)(intptr_t)&g_tinyfd_verbose;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1verbose(void) {
++    return (jlong)(intptr_t)&g_tinyfd_verbose;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1silent(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    return (jlong)(intptr_t)&g_tinyfd_silent;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1silent(void) {
++    return (jlong)(intptr_t)&g_tinyfd_silent;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1winUtf8(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    return (jlong)(intptr_t)&g_tinyfd_winUtf8;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1winUtf8(void) {
++    return (jlong)(intptr_t)&g_tinyfd_winUtf8;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1forceConsole(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    return (jlong)(intptr_t)&g_tinyfd_forceConsole;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1forceConsole(void) {
++    return (jlong)(intptr_t)&g_tinyfd_forceConsole;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1response(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    return (jlong)(intptr_t)g_tinyfd_response;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1response(void) {
++    return (jlong)(intptr_t)g_tinyfd_response;
++}
++
++/* ---- dialog functions ---------------------------------------------------- *
++ *
++ * All dialogs hop to the main thread synchronously via MAIN_THREAD_EM_ASM_*.
++ * In single-threaded builds this runs inline; in MT builds the worker blocks
++ * until the main thread JS handler returns. Strings are passed as wasm heap
++ * addresses; JS reads them with UTF8ToString() and writes results back into
++ * the static C buffer via stringToUTF8().
++ */
++
++JNIEXPORT void JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_tinyfd_1beep(JNIEnv* env, jclass cls) {
++    UNUSED_PARAMS(env, cls)
++    MAIN_THREAD_EM_ASM({
++        try {
++            var w = (typeof window !== 'undefined') ? window : null;
++            if (w && w.tinyfd && typeof w.tinyfd.beep === 'function') {
++                w.tinyfd.beep();
++            }
++        } catch (e) {}
++    });
++}
++JNIEXPORT void JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_tinyfd_1beep(void) {
++    Java_org_lwjgl_util_tinyfd_TinyFileDialogs_tinyfd_1beep(NULL, NULL);
++}
++
++JNIEXPORT jint JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1notifyPopup(
++    JNIEnv* env, jclass cls, jlong aTitle, jlong aMessage, jlong aIconType
++) {
++    UNUSED_PARAMS(env, cls)
++    int r = MAIN_THREAD_EM_ASM_INT({
++        try {
++            var w = (typeof window !== 'undefined') ? window : null;
++            var f = w && w.tinyfd && w.tinyfd.notifyPopup;
++            if (typeof f !== 'function') return 0;
++            return (f(
++                $0 ? UTF8ToString($0) : null,
++                $1 ? UTF8ToString($1) : null,
++                $2 ? UTF8ToString($2) : null
++            ) | 0);
++        } catch (e) { return 0; }
++    }, (int)(intptr_t)aTitle, (int)(intptr_t)aMessage, (int)(intptr_t)aIconType);
++    return (jint)r;
++}
++JNIEXPORT jint JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1notifyPopup(jlong t, jlong m, jlong i) {
++    return Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1notifyPopup(NULL, NULL, t, m, i);
++}
++
++JNIEXPORT jint JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1messageBox(
++    JNIEnv* env, jclass cls, jlong aTitle, jlong aMessage, jlong aDialogType, jlong aIconType, jint aDefaultButton
++) {
++    UNUSED_PARAMS(env, cls)
++    int r = MAIN_THREAD_EM_ASM_INT({
++        try {
++            var w = (typeof window !== 'undefined') ? window : null;
++            var f = w && w.tinyfd && w.tinyfd.messageBox;
++            if (typeof f !== 'function') return 0;
++            var ret = f(
++                $0 ? UTF8ToString($0) : null,
++                $1 ? UTF8ToString($1) : null,
++                $2 ? UTF8ToString($2) : null,
++                $3 ? UTF8ToString($3) : null,
++                $4 | 0
++            );
++            return (ret | 0);
++        } catch (e) { return 0; }
++    }, (int)(intptr_t)aTitle, (int)(intptr_t)aMessage, (int)(intptr_t)aDialogType, (int)(intptr_t)aIconType, (int)aDefaultButton);
++    return (jint)r;
++}
++JNIEXPORT jint JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1messageBox(
++    jlong t, jlong m, jlong dt, jlong it, jint db
++) {
++    return Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1messageBox(NULL, NULL, t, m, dt, it, db);
++}
++
++/* Helper: invoke a JS callback returning string|null. On null, returns 0;
++ * otherwise writes string into g_tinyfd_strbuf and returns its address. */
++static jlong call_string_dialog(const char* fname, jlong a0, jlong a1, jlong a2, jlong a3, jint i4) {
++    g_tinyfd_strbuf[0] = '\0';
++    int ok = MAIN_THREAD_EM_ASM_INT({
++        try {
++            var w = (typeof window !== 'undefined') ? window : null;
++            var name = $0 ? UTF8ToString($0) : '';
++            var f = w && w.tinyfd && w.tinyfd[name];
++            if (typeof f !== 'function') return 0;
++            var args = [];
++            if ($1) args.push(UTF8ToString($1)); else args.push(null);
++            if ($2) args.push(UTF8ToString($2)); else args.push(null);
++            if ($3) args.push(UTF8ToString($3)); else args.push(null);
++            if ($4) args.push(UTF8ToString($4)); else args.push(null);
++            if ($5 !== -2147483648) args.push($5 | 0);
++            var r = f.apply(w.tinyfd, args);
++            if (r == null) return 0;
++            stringToUTF8(r.toString(), $6, $7);
++            return 1;
++        } catch (e) { return 0; }
++    },
++        (int)(intptr_t)fname,
++        (int)(intptr_t)a0, (int)(intptr_t)a1, (int)(intptr_t)a2, (int)(intptr_t)a3,
++        (int)i4,
++        (int)(intptr_t)g_tinyfd_strbuf, (int)sizeof(g_tinyfd_strbuf));
++    return ok ? (jlong)(intptr_t)g_tinyfd_strbuf : 0;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1inputBox(
++    JNIEnv* env, jclass cls, jlong aTitle, jlong aMessage, jlong aDefaultInput
++) {
++    UNUSED_PARAMS(env, cls)
++    return call_string_dialog("inputBox", aTitle, aMessage, aDefaultInput, 0, INT32_MIN);
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1inputBox(jlong t, jlong m, jlong di) {
++    return Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1inputBox(NULL, NULL, t, m, di);
++}
++
++/* The save/open dialogs receive `aFilterPatterns` as an address of an array of
++ * pointer-to-null-terminated-string. Walk it in JS, building a JS string[]. */
++static jlong call_file_dialog(
++    const char* fname,
++    jlong aTitle, jlong aDefaultPathAndFile,
++    jint  aNumOfFilterPatterns, jlong aFilterPatterns,
++    jlong aSingleFilterDescription,
++    jint  aAllowMultipleSelectsOrNegOne
++) {
++    g_tinyfd_strbuf[0] = '\0';
++    int ok = MAIN_THREAD_EM_ASM_INT({
++        try {
++            var w = (typeof window !== 'undefined') ? window : null;
++            var name = $0 ? UTF8ToString($0) : '';
++            var f = w && w.tinyfd && w.tinyfd[name];
++            if (typeof f !== 'function') return 0;
++            var title = $1 ? UTF8ToString($1) : null;
++            var dflt  = $2 ? UTF8ToString($2) : null;
++            var n     = $3 | 0;
++            var arr   = [];
++            if ($4 && n > 0) {
++                var base = $4 >> 2; /* pointer indexing in HEAPU32 (wasm32) */
++                for (var i = 0; i < n; i++) {
++                    var p = HEAPU32[base + i];
++                    arr.push(p ? UTF8ToString(p) : '');
++                }
++            }
++            var desc = $5 ? UTF8ToString($5) : null;
++            var multi = $6;
++            var r;
++            if (multi < 0) {
++                r = f.call(w.tinyfd, title, dflt, arr, desc);
++            } else {
++                r = f.call(w.tinyfd, title, dflt, arr, desc, multi | 0);
++            }
++            if (r == null) return 0;
++            stringToUTF8(r.toString(), $7, $8);
++            return 1;
++        } catch (e) { return 0; }
++    },
++        (int)(intptr_t)fname,
++        (int)(intptr_t)aTitle, (int)(intptr_t)aDefaultPathAndFile,
++        (int)aNumOfFilterPatterns, (int)(intptr_t)aFilterPatterns,
++        (int)(intptr_t)aSingleFilterDescription,
++        (int)aAllowMultipleSelectsOrNegOne,
++        (int)(intptr_t)g_tinyfd_strbuf, (int)sizeof(g_tinyfd_strbuf));
++    return ok ? (jlong)(intptr_t)g_tinyfd_strbuf : 0;
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1saveFileDialog(
++    JNIEnv* env, jclass cls,
++    jlong aTitle, jlong aDefaultPathAndFile, jint aNumOfFilterPatterns, jlong aFilterPatterns, jlong aSingleFilterDescription
++) {
++    UNUSED_PARAMS(env, cls)
++    return call_file_dialog("saveFileDialog",
++        aTitle, aDefaultPathAndFile, aNumOfFilterPatterns, aFilterPatterns, aSingleFilterDescription, -1);
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1saveFileDialog(
++    jlong t, jlong d, jint n, jlong p, jlong sd
++) {
++    return Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1saveFileDialog(NULL, NULL, t, d, n, p, sd);
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1openFileDialog(
++    JNIEnv* env, jclass cls,
++    jlong aTitle, jlong aDefaultPathAndFile, jint aNumOfFilterPatterns, jlong aFilterPatterns, jlong aSingleFilterDescription,
++    jint aAllowMultipleSelects
++) {
++    UNUSED_PARAMS(env, cls)
++    return call_file_dialog("openFileDialog",
++        aTitle, aDefaultPathAndFile, aNumOfFilterPatterns, aFilterPatterns, aSingleFilterDescription,
++        aAllowMultipleSelects ? 1 : 0);
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1openFileDialog(
++    jlong t, jlong d, jint n, jlong p, jlong sd, jint am
++) {
++    return Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1openFileDialog(NULL, NULL, t, d, n, p, sd, am);
++}
++
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1selectFolderDialog(
++    JNIEnv* env, jclass cls, jlong aTitle, jlong aDefaultPath
++) {
++    UNUSED_PARAMS(env, cls)
++    return call_string_dialog("selectFolderDialog", aTitle, aDefaultPath, 0, 0, INT32_MIN);
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1selectFolderDialog(jlong t, jlong d) {
++    return Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1selectFolderDialog(NULL, NULL, t, d);
++}
++
++/*
++ * tinyfd_colorChooser: returns a "#RRGGBB" string OR null. If a defaultRGB
++ * byte triple is supplied (defaultRGB != 0), we forward it. The selected RGB
++ * is written into oResultRGB[3] if non-null.
++ */
++JNIEXPORT jlong JNICALL Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1colorChooser(
++    JNIEnv* env, jclass cls, jlong aTitle, jlong aDefaultHexRGB, jlong aDefaultRGB, jlong aoResultRGB
++) {
++    UNUSED_PARAMS(env, cls)
++    g_tinyfd_strbuf[0] = '\0';
++    int ok = MAIN_THREAD_EM_ASM_INT({
++        try {
++            var w = (typeof window !== 'undefined') ? window : null;
++            var f = w && w.tinyfd && w.tinyfd.colorChooser;
++            if (typeof f !== 'function') return 0;
++            var title = $0 ? UTF8ToString($0) : null;
++            var hex   = $1 ? UTF8ToString($1) : null;
++            var defRGB = null;
++            if ($2) {
++                defRGB = Array.of(HEAPU8[$2] | 0, HEAPU8[$2 + 1] | 0, HEAPU8[$2 + 2] | 0);
++            }
++            var r = f.call(w.tinyfd, title, hex, defRGB);
++            if (r == null) return 0;
++            var s = r.toString();
++            stringToUTF8(s, $4, $5);
++            /* Parse "#RRGGBB" into oResultRGB if caller passed a buffer. */
++            if ($3) {
++                var m = /^#?([0-9a-fA-F]{6})/.exec(s);
++                if (m) {
++                    var v = parseInt(m[1], 16);
++                    HEAPU8[$3]     = (v >> 16) & 0xff;
++                    HEAPU8[$3 + 1] = (v >>  8) & 0xff;
++                    HEAPU8[$3 + 2] = (v      ) & 0xff;
++                }
++            }
++            return 1;
++        } catch (e) { return 0; }
++    },
++        (int)(intptr_t)aTitle, (int)(intptr_t)aDefaultHexRGB, (int)(intptr_t)aDefaultRGB,
++        (int)(intptr_t)aoResultRGB,
++        (int)(intptr_t)g_tinyfd_strbuf, (int)sizeof(g_tinyfd_strbuf));
++    return ok ? (jlong)(intptr_t)g_tinyfd_strbuf : 0;
++}
++JNIEXPORT jlong JNICALL JavaCritical_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1colorChooser(
++    jlong t, jlong hex, jlong drgb, jlong orgb
++) {
++    return Java_org_lwjgl_util_tinyfd_TinyFileDialogs_ntinyfd_1colorChooser(NULL, NULL, t, hex, drgb, orgb);
++}
++
++/* No separate JNI_OnLoad: these symbols ship inside liblwjgl3.a, which
++ * already exposes common_tools.c's __liblwjgl_JNI_OnLoad. When the harness
++ * aliases /tmp/lwjgl/liblwjgl_tinyfd.so → liblwjgl3.a in statics.c, the
++ * common one handles initialization for the tinyfd handle too. */
++
++EXTERN_C_EXIT

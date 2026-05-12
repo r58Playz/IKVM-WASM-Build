@@ -436,6 +436,13 @@ for src in \
     LIBMGMT_OBJS+=("$obj")
 done
 
+# Emscripten does not provide sysinfo(); supply a local stub used by
+# OperatingSystemImpl.c.
+emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
+    -c "$SCRIPT_DIR/emscripten-stubs/sysinfo_stub.c" -o "$TMP_DIR/libmanagement/sysinfo_stub.o"
+LIBMGMT_OBJS+=("$TMP_DIR/libmanagement/sysinfo_stub.o")
+
 create_archive "$OUT_DIR/native/${PREFIX}libmanagement.a" "${LIBMGMT_OBJS[@]}"
 
 # ── libnio ────────────────────────────────────────────────────────────────────
