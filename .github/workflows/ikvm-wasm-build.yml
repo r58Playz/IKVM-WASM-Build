@@ -255,26 +255,17 @@ jobs:
             native/libnet.a
           zip -r "release/ikvm-wasm-bundle.zip" image
 
-          # GLFW artifacts, one per (backend, variant) matrix cell. Identify
-          # which backend is linked in a built wasm via:
-          #   llvm-nm wasm | grep -E 'krypton_|mobileglues_'
-          for backend in ng-gl4es mobileglues; do
-            for variant in mt st; do
-              cp "glfw/glfw-${backend}-${variant}/libglfw3.a" \
-                "release/libglfw3-${backend}-${variant}.a"
-              cp "glfw/glfw-${backend}-${variant}/lib_emscripten_glfw3.js" \
-                "release/lib_emscripten_glfw3-${backend}-${variant}.js"
-            done
-          done
-
-          # Unsuffixed name == default backend (ng-gl4es / Krypton Wrapper)
-          # for downstream consumers that don't pin a backend.
-          for variant in mt st; do
-            cp "release/libglfw3-ng-gl4es-${variant}.a" \
-               "release/libglfw3-${variant}.a"
-            cp "release/lib_emscripten_glfw3-ng-gl4es-${variant}.js" \
-               "release/lib_emscripten_glfw3-${variant}.js"
-          done
+           # GLFW artifacts, one per (backend, variant) matrix cell. Identify
+           # which backend is linked in a built wasm via:
+           #   llvm-nm wasm | grep -E 'krypton_|mobileglues_'
+           for backend in ng-gl4es mobileglues; do
+             for variant in mt st; do
+               cp "glfw/glfw-${backend}-${variant}/libglfw3.a" \
+                 "release/libglfw3-${backend}-${variant}.a"
+               cp "glfw/glfw-${backend}-${variant}/lib_emscripten_glfw3.js" \
+                 "release/lib_emscripten_glfw3-${backend}-${variant}.js"
+             done
+           done
 
           cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
           cp java-native-deps/mt/liblwjgl3.a release/liblwjgl3-mt.a
