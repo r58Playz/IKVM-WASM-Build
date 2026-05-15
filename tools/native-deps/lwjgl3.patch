@@ -206,6 +206,44 @@ index a0a169b..cd15991 100644
  
  }
 \ No newline at end of file
+diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
+index ba79034..4c0bee6 100644
+--- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
++++ b/modules/lwjgl/core/src/main/java/org/lwjgl/system/ThreadLocalUtil.java
+@@ -200,14 +200,32 @@ public final class ThreadLocalUtil {
+         }
+     }
+ 
++    // Debug instrumentation for ikvm-wasm. Enable via -Dlwjgl.debug.caps=1.
++    // Logs every (slot, field name, raw field value, stored address) tuple so
++    // we can confirm whether glAlphaFunc's resolved address actually lands at
++    // slot 1 of the live PointerBuffer the JNI stubs read via tlsGetFunction.
++    private static final boolean DEBUG_CAPS = System.getProperty("lwjgl.debug.caps") != null;
++
+     public static PointerBuffer getAddressesFromCapabilities(Object caps) {
+         List<Field>   fields    = getFieldsFromCapabilities(caps.getClass());
+         PointerBuffer addresses = BufferUtils.createPointerBuffer(fields.size());
+ 
++        if (DEBUG_CAPS) {
++            System.err.println("[caps] class=" + caps.getClass().getName() + " count=" + fields.size()
++                + " FUNCTION_MISSING_ABORT=0x" + Long.toHexString(FUNCTION_MISSING_ABORT));
++        }
++
+         try {
+             for (int i = 0; i < fields.size(); i++) {
+                 long a = fields.get(i).getLong(caps);
+-                addresses.put(i, a != NULL ? a : FUNCTION_MISSING_ABORT);
++                long stored = a != NULL ? a : FUNCTION_MISSING_ABORT;
++                addresses.put(i, stored);
++                if (DEBUG_CAPS) {
++                    System.err.println("[caps] " + i + " " + fields.get(i).getName()
++                        + " field=0x" + Long.toHexString(a)
++                        + " stored=0x" + Long.toHexString(stored)
++                        + (stored == FUNCTION_MISSING_ABORT ? " MISSING" : ""));
++                }
+             }
+         } catch (IllegalAccessException e) {
+             throw new RuntimeException(e);
 diff --git a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java b/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java
 index 1dc93e1..f2bd53b 100644
 --- a/modules/lwjgl/core/src/main/java/org/lwjgl/system/linux/LinuxLibrary.java

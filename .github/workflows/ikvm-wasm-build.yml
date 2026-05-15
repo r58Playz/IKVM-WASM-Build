@@ -101,6 +101,36 @@ jobs:
           path: tools/ikvm/out/native/*.a
           if-no-files-found: error
 
+  build-glfw:
+    name: build glfw (${{ matrix.gl-backend }}/${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [mt, st]
+        gl-backend: [ng-gl4es, mobileglues]
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+
+      - name: build glfw
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}" --gl-backend="${{ matrix.gl-backend }}"
+
+      - name: Upload GLFW artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: glfw-${{ matrix.gl-backend }}-${{ matrix.variant }}
+          path: |
+            tools/native-deps/out/${{ matrix.variant }}/libglfw3.a
+            tools/native-deps/out/${{ matrix.variant }}/lib_emscripten_glfw3.js
+          if-no-files-found: error
+
   build-java-native-deps:
     name: build java/native deps (${{ matrix.variant }})
     runs-on: ubuntu-24.04
@@ -122,10 +152,6 @@ jobs:
           distribution: temurin
           java-version: '8'
 
-      - name: build glfw
-        shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}"
-
       - name: build libffi
         shell: bash
         run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-libffi.sh" --variant="${{ matrix.variant }}"
@@ -144,7 +170,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-managed, build-wasm-native, build-java-native-deps]
+    needs: [build-managed, build-wasm-native, build-java-native-deps, build-glfw]
     permissions:
       contents: write
     steps:
@@ -180,6 +206,14 @@ jobs:
         with:
           name: java-native-deps-st
           path: java-native-deps/st/
+
+      - name: Download all GLFW artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Each build-glfw matrix cell produced a glfw-<backend>-<variant>
+          # artifact; pull them all in under glfw/<backend>-<variant>/.
+          pattern: glfw-*
+          path: glfw/
 
       - name: Download linux-x64 JRE image
         uses: actions/download-artifact@v4
@@ -221,17 +255,36 @@ jobs:
             native/libnet.a
           zip -r "release/ikvm-wasm-bundle.zip" image
 
-          cp java-native-deps/mt/libglfw3.a release/libglfw3-mt.a
-          cp java-native-deps/mt/lib_emscripten_glfw3.js release/lib_emscripten_glfw3-mt.js
-          cp java-native-deps/st/libglfw3.a release/libglfw3-st.a
-          cp java-native-deps/st/lib_emscripten_glfw3.js release/lib_emscripten_glfw3-st.js
+          # GLFW artifacts, one per (backend, variant) matrix cell. Identify
+          # which backend is linked in a built wasm via:
+          #   llvm-nm wasm | grep -E 'krypton_|mobileglues_'
+          for backend in ng-gl4es mobileglues; do
+            for variant in mt st; do
+              cp "glfw/glfw-${backend}-${variant}/libglfw3.a" \
+                "release/libglfw3-${backend}-${variant}.a"
+              cp "glfw/glfw-${backend}-${variant}/lib_emscripten_glfw3.js" \
+                "release/lib_emscripten_glfw3-${backend}-${variant}.js"
+            done
+          done
+
+          # Unsuffixed name == default backend (ng-gl4es / Krypton Wrapper)
+          # for downstream consumers that don't pin a backend.
+          for variant in mt st; do
+            cp "release/libglfw3-ng-gl4es-${variant}.a" \
+               "release/libglfw3-${variant}.a"
+            cp "release/lib_emscripten_glfw3-ng-gl4es-${variant}.js" \
+               "release/lib_emscripten_glfw3-${variant}.js"
+          done
 
           cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
           cp java-native-deps/mt/liblwjgl3.a release/liblwjgl3-mt.a
           cp java-native-deps/mt/liblwjgl_stb.a release/liblwjgl_stb-mt.a
+          cp java-native-deps/mt/liblwjgl_openal_stubs.a release/liblwjgl_openal_stubs-mt.a
           cp java-native-deps/st/lwjgl3.jar release/lwjgl3-st.jar
           cp java-native-deps/st/liblwjgl3.a release/liblwjgl3-st.a
           cp java-native-deps/st/liblwjgl_stb.a release/liblwjgl_stb-st.a
+          cp java-native-deps/st/liblwjgl_openal_stubs.a release/liblwjgl_openal_stubs-st.a
+          cp java-native-deps/mt/openal-symbols.txt release/openal-symbols.txt
 
           cp java-native-deps/mt/libffi.a release/libffi-mt.a
           cp java-native-deps/st/libffi.a release/libffi-st.a

@@ -190,51 +190,70 @@ index 3b88ced..b4826a5 100644
  
  }
 diff --git a/src/cpp/emscripten/glfw3/Window.cpp b/src/cpp/emscripten/glfw3/Window.cpp
-index cfa866b..c164f3c 100644
+index cfa866b..daeffa9 100644
 --- a/src/cpp/emscripten/glfw3/Window.cpp
 +++ b/src/cpp/emscripten/glfw3/Window.cpp
-@@ -41,6 +41,12 @@ int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
+@@ -41,6 +41,24 @@ int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
  double emscripten_glfw3_context_get_now();
  }
  
++// GL backend WebGL context hooks. Compile-time symbol prefix selects which
++// translation layer is linked: krypton_* for Krypton Wrapper / NG-GL4ES,
++// mobileglues_* for MobileGlues. Pick via -DGL_BACKEND_KRYPTON.
++#ifdef GL_BACKEND_KRYPTON
++#define GL_BACKEND_WEBGL_CREATE_CONTEXT          krypton_webgl_create_context
++#define GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT    krypton_webgl_make_context_current
++#define GL_BACKEND_WEBGL_DESTROY_CONTEXT         krypton_webgl_destroy_context
++#else
++#define GL_BACKEND_WEBGL_CREATE_CONTEXT          mobileglues_webgl_create_context
++#define GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT    mobileglues_webgl_make_context_current
++#define GL_BACKEND_WEBGL_DESTROY_CONTEXT         mobileglues_webgl_destroy_context
++#endif
 +extern "C" {
-+EMSCRIPTEN_WEBGL_CONTEXT_HANDLE mobileglues_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
-+EMSCRIPTEN_RESULT mobileglues_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+EMSCRIPTEN_RESULT mobileglues_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++EMSCRIPTEN_WEBGL_CONTEXT_HANDLE GL_BACKEND_WEBGL_CREATE_CONTEXT(const char *target, const EmscriptenWebGLContextAttributes *attributes);
++EMSCRIPTEN_RESULT GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++EMSCRIPTEN_RESULT GL_BACKEND_WEBGL_DESTROY_CONTEXT(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
 +}
 +
  namespace emscripten::glfw3 {
  
  static ErrorHandler &kErrorHandler = ErrorHandler::instance();
-@@ -134,7 +140,7 @@ void Window::destroy()
+@@ -134,7 +152,7 @@ void Window::destroy()
    {
      addOrRemoveEventListeners(false);
      if(hasGLContext())
 -      emscripten_webgl_destroy_context(fWebGLContextHandle);
-+      mobileglues_webgl_destroy_context(fWebGLContextHandle);
++      GL_BACKEND_WEBGL_DESTROY_CONTEXT(fWebGLContextHandle);
      emscripten_glfw3_window_destroy(asOpaquePtr());
      fDestroyed = true;
    }
-@@ -488,7 +494,7 @@ bool Window::createGLContext()
+@@ -488,7 +506,7 @@ bool Window::createGLContext()
      attributes.stencil = fConfig.fStencilBits > 0;
      attributes.alpha = fConfig.fAlphaBits > 0;
  
 -    fWebGLContextHandle = emscripten_webgl_create_context(getCanvasSelector(), &attributes);
-+    fWebGLContextHandle = mobileglues_webgl_create_context(getCanvasSelector(), &attributes);
++    fWebGLContextHandle = GL_BACKEND_WEBGL_CREATE_CONTEXT(getCanvasSelector(), &attributes);
      if(fWebGLContextHandle == 0)
      {
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot create GL context for [%s]", getCanvasSelector());
-@@ -506,7 +512,7 @@ void Window::makeGLContextCurrent() const
+@@ -506,7 +524,7 @@ void Window::makeGLContextCurrent() const
  {
    if(hasGLContext())
    {
 -    if(emscripten_webgl_make_context_current(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
-+    if(mobileglues_webgl_make_context_current(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
++    if(GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot make GL context current for [%s]", getCanvasSelector());
    }
  }
+@@ -988,4 +1006,4 @@ int Window::unmakeCanvasResizable()
+ }
+ 
+ 
+-}
+\ No newline at end of file
++}
 diff --git a/src/cpp/glfw3.cpp b/src/cpp/glfw3.cpp
-index 8475a25..0d8c4d5 100644
+index 8475a25..14ffa20 100644
 --- a/src/cpp/glfw3.cpp
 +++ b/src/cpp/glfw3.cpp
 @@ -19,7 +19,10 @@
@@ -248,16 +267,25 @@ index 8475a25..0d8c4d5 100644
  #include "emscripten/glfw3/ErrorHandler.h"
  #include "emscripten/glfw3/Keyboard.h"
  
-@@ -117,6 +120,8 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
+@@ -117,6 +120,17 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
  extern "C" {
  #endif
  
-+void* mobileglues_get_proc_address(const char* name);
++// The GL translation backend's proc-address entry point. The symbol prefix
++// is selected at compile time so the resulting wasm makes it obvious which
++// backend is linked (krypton_* for Krypton Wrapper / NG-GL4ES, otherwise
++// mobileglues_* for MobileGlues).
++#ifdef GL_BACKEND_KRYPTON
++#define GL_BACKEND_GET_PROC_ADDRESS krypton_get_proc_address
++#else
++#define GL_BACKEND_GET_PROC_ADDRESS mobileglues_get_proc_address
++#endif
++void* GL_BACKEND_GET_PROC_ADDRESS(const char* name);
 +
  //------------------------------------------------------------------------
  // glfwInit
  //------------------------------------------------------------------------
-@@ -1310,11 +1315,21 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
+@@ -1310,11 +1324,21 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
  //------------------------------------------------------------------------
  GLFWAPI const GLFWvidmode* glfwGetVideoModes(GLFWmonitor* monitor, int* count)
  {
@@ -281,7 +309,7 @@ index 8475a25..0d8c4d5 100644
  GLFWAPI GLFWcharmodsfun glfwSetCharModsCallback(GLFWwindow* window, GLFWcharmodsfun callback)
  {
    ErrorHandler::instance().logWarning("glfwSetCharModsCallback is deprecated.");
-@@ -1324,7 +1339,53 @@ GLFWAPI void glfwInitAllocator(const GLFWallocator* allocator) { logNotImplement
+@@ -1324,7 +1348,53 @@ GLFWAPI void glfwInitAllocator(const GLFWallocator* allocator) { logNotImplement
  GLFWAPI void glfwSetGamma(GLFWmonitor* monitor, float gamma) { logNotAvailable("glfwSetGamma"); }
  GLFWAPI const GLFWgammaramp* glfwGetGammaRamp(GLFWmonitor* monitor) { logNotAvailable("glfwGetGammaRamp"); return nullptr; }
  GLFWAPI void glfwSetGammaRamp(GLFWmonitor* monitor, const GLFWgammaramp* ramp) { logNotAvailable("glfwSetGammaRamp"); }
@@ -336,7 +364,7 @@ index 8475a25..0d8c4d5 100644
  GLFWAPI void glfwIconifyWindow(GLFWwindow* window) { logNotImplemented("glfwIconifyWindow"); }
  GLFWAPI void glfwRestoreWindow(GLFWwindow* window) { logNotImplemented("glfwRestoreWindow"); }
  GLFWAPI void glfwMaximizeWindow(GLFWwindow* window) { logNotImplemented("glfwMaximizeWindow"); }
-@@ -1336,7 +1397,46 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
+@@ -1336,7 +1406,46 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
  GLFWAPI GLFWwindowiconifyfun glfwSetWindowIconifyCallback(GLFWwindow* window, GLFWwindowiconifyfun callback) { logNotImplemented("glfwSetWindowIconifyCallback"); return callback; }
  GLFWAPI GLFWwindowmaximizefun glfwSetWindowMaximizeCallback(GLFWwindow* window, GLFWwindowmaximizefun callback) { logNotImplemented("glfwSetWindowMaximizeCallback"); return callback; }
  GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* window, GLFWdropfun callback) { logNotImplemented("glfwSetDropCallback"); return callback; }
@@ -366,7 +394,7 @@ index 8475a25..0d8c4d5 100644
 +  }
 +
 +  glFlush();
-+
++  EM_ASM({ GL.newRenderingFrameStarted() });
 +  auto const result = emscripten_webgl_commit_frame();
 +  if(result != EMSCRIPTEN_RESULT_SUCCESS &&
 +     result != EMSCRIPTEN_RESULT_DEFERRED &&
@@ -378,16 +406,28 @@ index 8475a25..0d8c4d5 100644
 +
 +GLFWAPI GLFWglproc emscripten_glfw3_get_proc_address(const char* procname)
 +{
-+  return reinterpret_cast<GLFWglproc>(mobileglues_get_proc_address(procname));
++  return reinterpret_cast<GLFWglproc>(GL_BACKEND_GET_PROC_ADDRESS(procname));
 +}
 +
  // GLFWAPI GLFWglproc glfwGetProcAddress(const char* procname) { logNotImplemented("glfwGetProcAddress"); } implemented by emscripten GL
  GLFWAPI int glfwVulkanSupported(void) { return GLFW_FALSE; }
  GLFWAPI const char** glfwGetRequiredInstanceExtensions(uint32_t* count) { logNotImplemented("glfwGetRequiredInstanceExtensions"); *count = 0; return nullptr; }
-@@ -1509,4 +1609,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
+@@ -1509,4 +1618,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
    };
  }
  
 -}
 \ No newline at end of file
 +}
+diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
+index 0cfd23c..c1452d0 100644
+--- a/src/js/lib_emscripten_glfw3.js
++++ b/src/js/lib_emscripten_glfw3.js
+@@ -100,6 +100,7 @@ let emscripten_glfw3_impl = {
+ 
+     // onKeyboardEvent
+     onKeyboardEvent(e) {
++		console.log(e);
+       if(e.type === 'keydown')
+         requestAnimationFrame(GLFW3.executeDeferredActions);
+ 

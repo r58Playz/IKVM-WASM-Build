@@ -39,6 +39,10 @@ Usage
     python3 gen-static-libs.py --add-symbol "libjava.so:my_custom_func" \\
         --add-symbol "libjava.so:another_func" "libjava.so:/path/to/libjava.a"
 
+    # Bulk-add symbols from a file (one symbol per line, # comments allowed):
+    python3 gen-static-libs.py --symbol-list "openal:/path/to/openal-symbols.txt" \\
+        "openal:/path/to/openal-stubs.a"
+
     # Add alternate library names that resolve to the same archive:
     python3 gen-static-libs.py --add-alias "libjava.so:libjava" \\
         --add-alias "libjava.so:java" "libjava.so:/path/to/libjava.a"
@@ -61,10 +65,34 @@ List file format (--list)
 Add symbol format (--add-symbol)
 --------------------------------
     --add-symbol FAKE_PATH:SYMBOL
-   
+    --add-symbol FAKE_PATH:DECLARATION
+
     Manually add a symbol to a library's symbol table. Can be specified multiple
-    times.  Symbols are validated as C identifiers and merged with those extracted
-    from archives.
+    times. Merged with symbols extracted from archives.
+
+    SYMBOL is a bare C identifier (e.g. "myFunc"); the generated extern uses
+    `extern void myFunc();` (K&R style, empty parameter list).
+
+    DECLARATION is a full C function declaration containing `(` (e.g.
+    "void* alcOpenDevice(const char* devicename)"); it is emitted verbatim as
+    `extern <DECLARATION>;`. This matters in wasm: indirect calls
+    (`call_indirect`) dispatch on the signature the function was declared
+    with, so a K&R extern for a function called through a pointer (the
+    `(void*)sym` in the per-library tables here) traps when the table entry
+    was registered with the real signature.
+
+Symbol list format (--symbol-list)
+----------------------------------
+    --symbol-list FAKE_PATH:FILE
+
+    Bulk-add symbols from a text file (one entry per line; blank lines and
+    lines starting with # are ignored). Each entry is either a bare identifier
+    or a full C function declaration, exactly as in --add-symbol. Equivalent
+    to repeating --add-symbol for every entry. Useful for JS-backed emscripten
+    libraries (e.g. -lopenal) where there is no .a archive to nm-scan: pair a
+    tiny stub archive that provides any missing real symbols with a
+    --symbol-list that names every function the JS lib exports — preferably
+    with signatures, so the wasm function-table sigs match.
 
 Library alias format (--add-alias)
 ----------------------------------
@@ -247,6 +275,33 @@ def _parse_alias_spec(token: str) -> tuple[str, str]:
     return token[:idx], token[idx + 1 :]
 
 
+def _parse_symbol_entry(entry: str) -> tuple[str, str | None]:
+    """
+    Parse a manual-symbol entry (used by --add-symbol payloads and --symbol-list
+    file lines).
+
+    Two forms are accepted:
+
+      1. Bare identifier:    "alcOpenDevice"
+         → ("alcOpenDevice", None)
+         The generated extern falls back to `extern void <sym>();` (K&R style).
+
+      2. Full C declaration: "void* alcOpenDevice(const char* devicename)"
+         → ("alcOpenDevice", "void* alcOpenDevice(const char* devicename)")
+         The declaration is emitted verbatim as `extern <decl>;`, so the
+         wasm function-table signature matches the linked implementation.
+
+    The symbol name in form (2) is the identifier immediately preceding `(`.
+    """
+    if "(" not in entry:
+        return entry, None
+    decl = entry.rstrip(";").rstrip()
+    match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", decl)
+    if not match:
+        raise ValueError(f"could not extract symbol name from declaration {entry!r}")
+    return match.group(1), decl
+
+
 def _read_list_file(path: str) -> list[str]:
     """Read FAKE_PATH:ARCHIVE tokens from a file, one per line."""
     tokens: list[str] = []
@@ -286,6 +341,7 @@ def generate(
     libraries: list[tuple[str, list[tuple[str, str]]]],  # [(fake_path, [(sym, type), ...]), ...]
     library_aliases: dict[str, list[str]],
     rename_symbols: dict[str, dict[str, str]],
+    signatures: dict[str, str],
     args_repr: str,
     nm_exe: str,
 ) -> str:
@@ -310,9 +366,15 @@ def generate(
     if all_syms:
         out.append(
             "/* Forward declarations of every symbol referenced below.\n"
-            " * Using empty parameter lists (K&R style) so the declarations\n"
-            " * are compatible with any actual JNI signature without needing\n"
-            " * prototypes.  The cast to void* is done in the tables below. */\n"
+            " * Function symbols default to empty parameter lists (K&R style)\n"
+            " * for compatibility with direct JNI calls, but a --symbol-list\n"
+            " * or --add-symbol entry can supply a full C declaration, which\n"
+            " * is emitted verbatim. That matters in wasm: indirect calls\n"
+            " * (call_indirect) dispatch on the signature the function was\n"
+            " * declared with, so a K&R extern for a function reached through\n"
+            " * the (void*) entries below traps when the table entry was\n"
+            " * registered with the real signature.\n"
+            " * The cast to void* is done in the tables below. */\n"
         )
         # Suppress the pedantic function-pointer → void* warning emitted by
         # -Wpedantic / -Wstrict-prototypes; the cast is intentional here and
@@ -321,7 +383,9 @@ def generate(
         out.append('#pragma clang diagnostic ignored "-Wpedantic"\n')
         out.append('#pragma clang diagnostic ignored "-Wstrict-prototypes"\n\n')
         for sym, sym_type in all_syms.items():
-            if sym_type == "T":
+            if sym in signatures:
+                out.append(f"extern {signatures[sym]};\n")
+            elif sym_type == "T":
                 out.append(f"extern void {sym}();\n")
             else:
                 out.append(f"extern char {sym};\n")
@@ -456,12 +520,30 @@ def main() -> int:
         "--add-symbol",
         action="append",
         dest="add_symbols",
-        metavar="FAKE_PATH:SYMBOL",
+        metavar="FAKE_PATH:SYMBOL_OR_DECL",
         default=[],
         help=(
-            "Manually add a symbol to a library's symbol table. Format: FAKE_PATH:SYMBOL. "
-            "Can be specified multiple times. Symbols are merged with those extracted "
+            "Manually add a symbol to a library's symbol table. Format: "
+            "FAKE_PATH:SYMBOL or FAKE_PATH:DECLARATION. A bare identifier emits "
+            "`extern void <sym>();` (K&R style); a full C declaration "
+            "(containing `(`) is emitted verbatim as `extern <decl>;` so the "
+            "wasm function-table signature matches the real implementation. "
+            "Can be specified multiple times. Merged with symbols extracted "
             "from archives."
+        ),
+    )
+    parser.add_argument(
+        "--symbol-list",
+        action="append",
+        dest="symbol_lists",
+        metavar="FAKE_PATH:FILE",
+        default=[],
+        help=(
+            "Bulk-add symbols from a file. Format: FAKE_PATH:FILE. Each line "
+            "is either a bare identifier or a full C function declaration "
+            "(see --add-symbol). Blank lines and # comments are ignored. "
+            "Equivalent to repeating --add-symbol for every entry. Can be "
+            "specified multiple times."
         ),
     )
     parser.add_argument(
@@ -528,13 +610,20 @@ def main() -> int:
             )
     pairs = unique_pairs
 
-    # Parse manually added symbols
-    manual_symbols: dict[str, set[str]] = {}  # {fake_path: {symbol, ...}}
+    # Parse manually added symbols. Each value maps symbol -> signature (or
+    # None for "no signature, use K&R extern decl"). Signatures matter for
+    # wasm indirect calls — see _parse_symbol_entry.
+    manual_symbols: dict[str, dict[str, str | None]] = {}
     for spec in args.add_symbols:
         try:
-            fake_path, symbol = _parse_pair(spec)
+            fake_path, payload = _parse_pair(spec)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            return 1
+        try:
+            symbol, signature = _parse_symbol_entry(payload)
+        except ValueError as exc:
+            print(f"error: --add-symbol {spec!r}: {exc}", file=sys.stderr)
             return 1
         if not _is_valid_c_ident(symbol):
             print(
@@ -542,9 +631,43 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        if fake_path not in manual_symbols:
-            manual_symbols[fake_path] = set()
-        manual_symbols[fake_path].add(symbol)
+        manual_symbols.setdefault(fake_path, {})[symbol] = signature
+
+    # Parse --symbol-list files (bulk equivalent of --add-symbol)
+    for spec in args.symbol_lists:
+        try:
+            fake_path, list_path = _parse_pair(spec)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        try:
+            with open(list_path) as fh:
+                for lineno, raw in enumerate(fh, 1):
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    try:
+                        symbol, signature = _parse_symbol_entry(line)
+                    except ValueError as exc:
+                        print(
+                            f"error: {list_path}:{lineno}: {exc}",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    if not _is_valid_c_ident(symbol):
+                        print(
+                            f"error: invalid symbol {symbol!r} in "
+                            f"{list_path}:{lineno}: must be a valid C identifier",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    manual_symbols.setdefault(fake_path, {})[symbol] = signature
+        except OSError as exc:
+            print(
+                f"error: cannot read --symbol-list file {list_path!r}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
     # Parse library aliases
     library_aliases: dict[str, list[str]] = {}
@@ -655,12 +778,24 @@ def main() -> int:
     if args.list:
         repr_parts.append(f"--list {args.list}")
     repr_parts.extend(f"--add-symbol {spec}" for spec in args.add_symbols)
+    repr_parts.extend(f"--symbol-list {spec}" for spec in args.symbol_lists)
     repr_parts.extend(f"--add-alias {spec}" for spec in args.library_aliases)
     repr_parts.extend(f"--rename-symbol {spec}" for spec in args.rename_symbols)
     repr_parts.extend(args.pairs)
     args_repr = " ".join(repr_parts) if repr_parts else "(no arguments)"
 
-    source = generate(libraries, library_aliases, rename_symbols, args_repr, nm_exe)
+    # Flatten manual_symbols into a single name → declaration map for
+    # generate(). First non-None signature wins if a symbol appears in
+    # multiple libraries (rare).
+    signatures: dict[str, str] = {}
+    for sym_map in manual_symbols.values():
+        for sym, sig in sym_map.items():
+            if sig is not None and sym not in signatures:
+                signatures[sym] = sig
+
+    source = generate(
+        libraries, library_aliases, rename_symbols, signatures, args_repr, nm_exe
+    )
 
     if args.output == "-":
         sys.stdout.write(source)

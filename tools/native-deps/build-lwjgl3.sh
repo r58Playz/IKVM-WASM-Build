@@ -317,14 +317,25 @@ else
 fi
 apply_patch_once "$LWJGL_SRC_DIR" "$LWJGL_PATCH" "$(basename "$LWJGL_PATCH")"
 
+# LWJGL's GeneratorKt rewrites modules/lwjgl/*/src/generated/ with only the
+# JNI overloads needed by the bindings enabled on THIS run. If a prior run
+# narrowed JNI.java (e.g. compiled without openal), the array-taking invokePV
+# overloads vanish and javac fails. Restore generated/ from git so each build
+# starts from upstream's full set and is independent of prior runs.
+log "Restoring lwjgl3 generated/ trees from git"
+(cd "$LWJGL_SRC_DIR" && \
+    git ls-tree -d --name-only HEAD -r \
+    | grep -E '^modules/lwjgl/[^/]+/src/generated$' \
+    | xargs -r git checkout HEAD --)
+
 ANT_CMD="$(setup_ant)"
 
 declare -a TEMPLATE_BINDING_ARGS
 declare -a COMPILE_BINDING_ARGS
-build_binding_args "glfw,egl,opengl,opengles,opencl,stb,tinyfd,vulkan" TEMPLATE_BINDING_ARGS
+build_binding_args "glfw,egl,opengl,opengles,opencl,openal,stb,tinyfd,vulkan" TEMPLATE_BINDING_ARGS
 # opengl ARBCLEvent and glfw GLFWVulkan are generated unconditionally and require opencl/vulkan
 # classes to be on the classpath. We compile those modules' Java but do not ship their classes.
-build_binding_args "glfw,egl,opengl,opencl,stb,tinyfd,vulkan" COMPILE_BINDING_ARGS
+build_binding_args "glfw,egl,opengl,opencl,openal,stb,tinyfd,vulkan" COMPILE_BINDING_ARGS
 
 log "Compiling lwjgl3 Java classes with Ant"
 (cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${TEMPLATE_BINDING_ARGS[@]}" compile-templates)
@@ -334,9 +345,10 @@ CORE_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/core"
 GLFW_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/glfw"
 EGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/egl"
 OPENGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/opengl"
+OPENAL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/openal"
 STB_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/stb"
 TINYFD_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/tinyfd"
-if [ ! -d "$CORE_CLASSES_DIR" ] || [ ! -d "$GLFW_CLASSES_DIR" ] || [ ! -d "$EGL_CLASSES_DIR" ] || [ ! -d "$OPENGL_CLASSES_DIR" ] || [ ! -d "$STB_CLASSES_DIR" ] || [ ! -d "$TINYFD_CLASSES_DIR" ]; then
+if [ ! -d "$CORE_CLASSES_DIR" ] || [ ! -d "$GLFW_CLASSES_DIR" ] || [ ! -d "$EGL_CLASSES_DIR" ] || [ ! -d "$OPENGL_CLASSES_DIR" ] || [ ! -d "$OPENAL_CLASSES_DIR" ] || [ ! -d "$STB_CLASSES_DIR" ] || [ ! -d "$TINYFD_CLASSES_DIR" ]; then
     echo "ERROR: expected Ant compile outputs not found under $LWJGL_SRC_DIR/bin/classes/lwjgl" >&2
     exit 1
 fi
@@ -348,6 +360,7 @@ cp -a "$CORE_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$GLFW_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$EGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$OPENGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
+cp -a "$OPENAL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$STB_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 cp -a "$TINYFD_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
 jar cf "$OUTPUT_DIR/lwjgl3.jar" -C "$JAR_STAGING_DIR" .
@@ -435,6 +448,24 @@ done
 rm -f "$OUTPUT_DIR/liblwjgl3.a" "$OUTPUT_DIR/liblwjgl_stb.a"
 emar rcs "$OUTPUT_DIR/liblwjgl3.a" "${NATIVE_OBJECTS[@]}"
 emar rcs "$OUTPUT_DIR/liblwjgl_stb.a" "${STB_NATIVE_OBJECTS[@]}"
+
+# openal stubs: emscripten's library_openal.js does not implement
+# alcGetProcAddress / alGetProcAddress. LWJGL's ALC throws if alcGetProcAddress
+# is NULL, so we ship a stub archive that satisfies those two symbols. The
+# remaining openal surface (alcOpenDevice, alSourcePlay, ...) is enumerated in
+# openal-symbols.txt and gets wired up at the final wasm link via -lopenal.
+OPENAL_STUBS_SRC="$WORKSPACE/openal-stubs.c"
+OPENAL_STUBS_OBJ="$NATIVE_BUILD_DIR/obj/openal-stubs.o"
+if [ ! -f "$OPENAL_STUBS_SRC" ]; then
+    echo "ERROR: expected openal stubs source not found: $OPENAL_STUBS_SRC" >&2
+    exit 1
+fi
+emcc -c "$OPENAL_STUBS_SRC" -o "$OPENAL_STUBS_OBJ" \
+    -O2 -fPIC -Wno-error "$PTHREAD_DEFINE" "${PTHREAD_FLAGS[@]}"
+rm -f "$OUTPUT_DIR/liblwjgl_openal_stubs.a"
+emar rcs "$OUTPUT_DIR/liblwjgl_openal_stubs.a" "$OPENAL_STUBS_OBJ"
+
+cp "$WORKSPACE/openal-symbols.txt" "$OUTPUT_DIR/openal-symbols.txt"
 
 log "Artifacts written to: $OUTPUT_DIR"
 ls -lh "$OUTPUT_DIR"

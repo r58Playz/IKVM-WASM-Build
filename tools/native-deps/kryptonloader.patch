@@ -1,0 +1,2009 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c0a2433..27b63a0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,6 +2,19 @@ cmake_minimum_required(VERSION 3.10)
+ 
+ project(ng_gl4es)
+ 
++option(STATICLIB "Build ng_gl4es as static library" OFF)
++option(NOX11 "Disable X11 integration" OFF)
++option(NOEGL "Disable EGL integration" OFF)
++
++if(EMSCRIPTEN)
++    set(STATICLIB ON CACHE BOOL "Build ng_gl4es as static library" FORCE)
++    set(NOX11 ON CACHE BOOL "Disable X11 integration" FORCE)
++    set(NOEGL ON CACHE BOOL "Disable EGL integration" FORCE)
++    # Force-include the Krypton export-name helper so KW_EXPORT() / KW_EXPORT_STR()
++    # are available everywhere without modifying every source file's includes.
++    add_compile_options(-include "${CMAKE_CURRENT_SOURCE_DIR}/src/gl/krypton_export_names.h")
++endif()
++
+ #if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+     include(CheckIPOSupported)
+     check_ipo_supported(RESULT LTOSupported OUTPUT LTOError)
+@@ -57,6 +70,21 @@ if(ANDROID)
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNOX11")
+ endif()
+ 
++if(STATICLIB)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DSTATICLIB")
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DSTATICLIB")
++endif()
++
++if(NOX11)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNOX11")
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNOX11")
++endif()
++
++if(NOEGL)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNOEGL")
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNOEGL")
++endif()
++
+ include_directories(${CMAKE_SOURCE_DIR}/include )
+ 
+ set(C_SRC_FILES
+@@ -89,6 +117,8 @@ set(C_SRC_FILES
+     src/gl/gl_lookup.c
+     src/gl/gl4es.c
+     src/gl/glstate.c
++    src/gl/emscripten_api.c
++    src/gl/emscripten_aliases.c
+     src/gl/hint.c
+     src/gl/init.c
+     src/gl/light.c
+@@ -137,7 +167,9 @@ set(C_SRC_FILES
+     src/gl/samplers.c
+ )
+ 
+-if(NOT ANDROID)
++if(NOX11)
++    list(APPEND C_SRC_FILES src/glx/glx_stubs.c)
++elseif(NOT ANDROID)
+     list(APPEND C_SRC_FILES src/glx/glx.c)
+ endif()
+ 
+@@ -148,7 +180,12 @@ set(CPP_SRC_FILES
+ 
+ set(SRC_FILES ${CPP_SRC_FILES} ${C_SRC_FILES})
+ 
+-add_library(ng_gl4es SHARED ${SRC_FILES})
++set(NG_GL4ES_LIBRARY_TYPE SHARED)
++if(STATICLIB)
++    set(NG_GL4ES_LIBRARY_TYPE STATIC)
++endif()
++
++add_library(ng_gl4es ${NG_GL4ES_LIBRARY_TYPE} ${SRC_FILES})
+ 
+ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+     glslang::glslang
+@@ -181,6 +218,8 @@ target_include_directories(ng_gl4es PUBLIC
+     ${CMAKE_SOURCE_DIR}/include
+ )
+ 
+-set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
+-    LINK_FLAGS "-Wl,--strip-all"
+-)
++if(NOT STATICLIB)
++    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
++        LINK_FLAGS "-Wl,--strip-all"
++    )
++endif()
+diff --git a/src/gl/arbhelper.h b/src/gl/arbhelper.h
+index 3d34153..18e1936 100644
+--- a/src/gl/arbhelper.h
++++ b/src/gl/arbhelper.h
+@@ -8,6 +8,7 @@
+ // #define DEBUG
+ #ifdef DEBUG
+ #include <stdio.h>
++#include "logs.h"
+ 
+ // ARBCONV_DBG - general ArbConverter debug logs
+ #define ARBCONV_DBG(a) a
+diff --git a/src/gl/emscripten_aliases.c b/src/gl/emscripten_aliases.c
+new file mode 100644
+index 0000000..7bbf664
+--- /dev/null
++++ b/src/gl/emscripten_aliases.c
+@@ -0,0 +1,119 @@
++// On Emscripten the AliasExport macro in attributes.h falls back to a
++// declaration-only stub, so the gl4es_glXXX aliases that the non-Emscripten
++// build emits via __attribute__((alias)) are missing. The proc-address
++// dispatch in gl_lookup.c (including the included glesfuncs.inc) references
++// gl4es_glXXX names unconditionally, so the linker needs those symbols to
++// resolve.
++//
++// This file provides thunks for functions whose canonical definitions live as
++// plain glXXX names (no gl4es_ prefix). Sources of the originals:
++//   - src/gl/wrap/glesnative.cpp - NATIVE_FUNCTION_HEAD definitions
++//   - src/gl/framebuffers.c     - VISIBLE void glReadBuffer
++//   - src/gl/buffers.c          - VISIBLE void glTexBuffer
++//   - VISIBLE void glVertexAttribI* / glBindFragDataLocationIndexed / etc.
++//
++// The bodies forward to the upstream un-prefixed names. The thunks are only
++// reachable via the proc-address dispatch in gl_lookup.c, so the extra call
++// frame is paid only on glfwGetProcAddress / krypton_get_proc_address.
++
++#if defined(__EMSCRIPTEN__)
++
++#include <GL/gl.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/* Declarations of the canonical (un-prefixed) targets. */
++extern GLsync   krypton_glFenceSync(GLenum, GLbitfield);
++extern GLboolean krypton_glIsSync(GLsync);
++extern void     krypton_glDeleteSync(GLsync);
++extern GLenum   krypton_glClientWaitSync(GLsync, GLbitfield, GLuint64);
++extern void     krypton_glWaitSync(GLsync, GLbitfield, GLuint64);
++extern void     krypton_glGetSynciv(GLsync, GLenum, GLsizei, GLsizei*, GLint*);
++extern void     krypton_glDrawArraysIndirect(GLenum, const void*);
++extern void     krypton_glReadBuffer(GLenum);
++extern void     krypton_glBindFragDataLocationIndexed(GLuint, GLuint, GLuint, const char*);
++extern GLint    krypton_glGetFragDataIndex(GLuint, const char*);
++extern GLint    krypton_glGetProgramResourceLocationIndex(GLuint, GLenum, const char*);
++extern void     krypton_glGetVertexAttribIiv(GLuint, GLenum, GLint*);
++extern void     krypton_glGetVertexAttribIuiv(GLuint, GLenum, GLuint*);
++extern void     krypton_glVertexAttribI1i(GLuint, GLint);
++extern void     krypton_glVertexAttribI1iv(GLuint, const GLint*);
++extern void     krypton_glVertexAttribI1ui(GLuint, GLuint);
++extern void     krypton_glVertexAttribI1uiv(GLuint, const GLuint*);
++extern void     krypton_glVertexAttribI2i(GLuint, GLint, GLint);
++extern void     krypton_glVertexAttribI2iv(GLuint, const GLint*);
++extern void     krypton_glVertexAttribI2ui(GLuint, GLuint, GLuint);
++extern void     krypton_glVertexAttribI2uiv(GLuint, const GLuint*);
++extern void     krypton_glVertexAttribI3i(GLuint, GLint, GLint, GLint);
++extern void     krypton_glVertexAttribI3iv(GLuint, const GLint*);
++extern void     krypton_glVertexAttribI3ui(GLuint, GLuint, GLuint, GLuint);
++extern void     krypton_glVertexAttribI3uiv(GLuint, const GLuint*);
++extern void     krypton_glVertexAttribI4i(GLuint, GLint, GLint, GLint, GLint);
++extern void     krypton_glVertexAttribI4iv(GLuint, const GLint*);
++extern void     krypton_glVertexAttribI4ui(GLuint, GLuint, GLuint, GLuint, GLuint);
++extern void     krypton_glVertexAttribI4uiv(GLuint, const GLuint*);
++extern void     krypton_glVertexAttribP1ui(GLuint, GLenum, GLboolean, GLuint);
++extern void     krypton_glVertexAttribP1uiv(GLuint, GLenum, GLboolean, const GLuint*);
++extern void     krypton_glVertexAttribP2ui(GLuint, GLenum, GLboolean, GLuint);
++extern void     krypton_glVertexAttribP2uiv(GLuint, GLenum, GLboolean, const GLuint*);
++extern void     krypton_glVertexAttribP3ui(GLuint, GLenum, GLboolean, GLuint);
++extern void     krypton_glVertexAttribP3uiv(GLuint, GLenum, GLboolean, const GLuint*);
++extern void     krypton_glVertexAttribP4ui(GLuint, GLenum, GLboolean, GLuint);
++extern void     krypton_glVertexAttribP4uiv(GLuint, GLenum, GLboolean, const GLuint*);
++extern void     krypton_glVertexAttribLPointer(GLuint, GLint, GLenum, GLsizei, const void*);
++
++#define THUNK0(ret, name) \
++    ret gl4es_##name(void) { return (ret)0; (void)0; }
++
++/* Thunks forward to the krypton_-prefixed canonicals defined in NG-GL4ES
++ * (see krypton_export_names.h + KW_EXPORT() at each glXXX definition). The
++ * concat with ## means `name` isn't pre-expanded, so e.g. THUNK_V(glReadBuffer)
++ * yields a body that calls `krypton_glReadBuffer(s);` regardless of whether
++ * `glReadBuffer` is otherwise a macro elsewhere in the build.
++ */
++#define THUNK_V(name, sig, args) \
++    void gl4es_##name sig { krypton_##name args; }
++
++#define THUNK_R(ret, name, sig, args) \
++    ret gl4es_##name sig { return krypton_##name args; }
++
++THUNK_R(GLsync,    glFenceSync, (GLenum c, GLbitfield f), (c, f))
++THUNK_R(GLboolean, glIsSync,    (GLsync s), (s))
++THUNK_V(           glDeleteSync,(GLsync s), (s))
++THUNK_R(GLenum,    glClientWaitSync, (GLsync s, GLbitfield f, GLuint64 t), (s, f, t))
++THUNK_V(           glWaitSync,  (GLsync s, GLbitfield f, GLuint64 t), (s, f, t))
++THUNK_V(           glGetSynciv, (GLsync s, GLenum p, GLsizei b, GLsizei* l, GLint* v), (s, p, b, l, v))
++THUNK_V(           glDrawArraysIndirect, (GLenum m, const void* i), (m, i))
++THUNK_V(           glReadBuffer, (GLenum s), (s))
++THUNK_V(           glBindFragDataLocationIndexed, (GLuint p, GLuint c, GLuint i, const char* n), (p, c, i, n))
++THUNK_R(GLint,     glGetFragDataIndex, (GLuint p, const char* n), (p, n))
++THUNK_R(GLint,     glGetProgramResourceLocationIndex, (GLuint p, GLenum i, const char* n), (p, i, n))
++THUNK_V(           glGetVertexAttribIiv, (GLuint i, GLenum p, GLint* v), (i, p, v))
++THUNK_V(           glGetVertexAttribIuiv, (GLuint i, GLenum p, GLuint* v), (i, p, v))
++THUNK_V(           glVertexAttribI1i,    (GLuint i, GLint x), (i, x))
++THUNK_V(           glVertexAttribI1iv,   (GLuint i, const GLint* v), (i, v))
++THUNK_V(           glVertexAttribI1ui,   (GLuint i, GLuint x), (i, x))
++THUNK_V(           glVertexAttribI1uiv,  (GLuint i, const GLuint* v), (i, v))
++THUNK_V(           glVertexAttribI2i,    (GLuint i, GLint x, GLint y), (i, x, y))
++THUNK_V(           glVertexAttribI2iv,   (GLuint i, const GLint* v), (i, v))
++THUNK_V(           glVertexAttribI2ui,   (GLuint i, GLuint x, GLuint y), (i, x, y))
++THUNK_V(           glVertexAttribI2uiv,  (GLuint i, const GLuint* v), (i, v))
++THUNK_V(           glVertexAttribI3i,    (GLuint i, GLint x, GLint y, GLint z), (i, x, y, z))
++THUNK_V(           glVertexAttribI3iv,   (GLuint i, const GLint* v), (i, v))
++THUNK_V(           glVertexAttribI3ui,   (GLuint i, GLuint x, GLuint y, GLuint z), (i, x, y, z))
++THUNK_V(           glVertexAttribI3uiv,  (GLuint i, const GLuint* v), (i, v))
++THUNK_V(           glVertexAttribI4i,    (GLuint i, GLint x, GLint y, GLint z, GLint w), (i, x, y, z, w))
++THUNK_V(           glVertexAttribI4iv,   (GLuint i, const GLint* v), (i, v))
++THUNK_V(           glVertexAttribI4ui,   (GLuint i, GLuint x, GLuint y, GLuint z, GLuint w), (i, x, y, z, w))
++THUNK_V(           glVertexAttribI4uiv,  (GLuint i, const GLuint* v), (i, v))
++THUNK_V(           glVertexAttribP1ui,   (GLuint i, GLenum t, GLboolean n, GLuint v), (i, t, n, v))
++THUNK_V(           glVertexAttribP1uiv,  (GLuint i, GLenum t, GLboolean n, const GLuint* v), (i, t, n, v))
++THUNK_V(           glVertexAttribP2ui,   (GLuint i, GLenum t, GLboolean n, GLuint v), (i, t, n, v))
++THUNK_V(           glVertexAttribP2uiv,  (GLuint i, GLenum t, GLboolean n, const GLuint* v), (i, t, n, v))
++THUNK_V(           glVertexAttribP3ui,   (GLuint i, GLenum t, GLboolean n, GLuint v), (i, t, n, v))
++THUNK_V(           glVertexAttribP3uiv,  (GLuint i, GLenum t, GLboolean n, const GLuint* v), (i, t, n, v))
++THUNK_V(           glVertexAttribP4ui,   (GLuint i, GLenum t, GLboolean n, GLuint v), (i, t, n, v))
++THUNK_V(           glVertexAttribP4uiv,  (GLuint i, GLenum t, GLboolean n, const GLuint* v), (i, t, n, v))
++THUNK_V(           glVertexAttribLPointer, (GLuint i, GLint s, GLenum t, GLsizei st, const void* p), (i, s, t, st, p))
++
++#endif /* __EMSCRIPTEN__ */
+diff --git a/src/gl/emscripten_api.c b/src/gl/emscripten_api.c
+new file mode 100644
+index 0000000..a75d0a0
+--- /dev/null
++++ b/src/gl/emscripten_api.c
+@@ -0,0 +1,1158 @@
++#if defined(__EMSCRIPTEN__)
++
++#include "../../include/gl4esinit.h"
++#include <emscripten/html5.h>
++#include <emscripten/html5_webgl.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#ifndef EXPORT
++#if defined(__GNUC__)
++#define EXPORT __attribute__((visibility("default")))
++#else
++#define EXPORT
++#endif
++#endif
++
++static int g_ng_gl4es_initialized = 0;
++static char g_ng_gl4es_canvas_selector[256] = "#canvas";
++
++typedef void (*glGetIntegervShimProc)(unsigned int pname, int* params);
++typedef void (*glGetProgramivShimProc)(unsigned int program, unsigned int pname, int* params);
++typedef void (*glGetShaderivShimProc)(unsigned int shader, unsigned int pname, int* params);
++typedef void (*glBufferDataShimProc)(unsigned int target, intptr_t size, const void* data, unsigned int usage);
++typedef void (*glBufferStorageShimProc)(unsigned int target, intptr_t size, const void* data, unsigned int flags);
++typedef void (*glClearBufferSubDataShimProc)(
++    unsigned int target,
++    unsigned int internalformat,
++    intptr_t offset,
++    intptr_t size,
++    unsigned int format,
++    unsigned int type,
++    const void* data);
++typedef void (*glClipControlShimProc)(unsigned int origin, unsigned int depth);
++typedef void (*glMultiDrawElementsIndirectShimProc)(
++    unsigned int mode,
++    unsigned int type,
++    const void* indirect,
++    int drawcount,
++    int stride);
++typedef void (*glMultiDrawElementsIndirectCountShimProc)(
++    unsigned int mode,
++    unsigned int type,
++    const void* indirect,
++    intptr_t drawcount,
++    int maxdrawcount,
++    int stride);
++typedef void (*glPrimitiveRestartIndexShimProc)(unsigned int index);
++typedef void (*glRenderbufferStorageMultisampleCoverageNVShimProc)(
++    unsigned int target,
++    int coverageSamples,
++    int colorSamples,
++    unsigned int internalformat,
++    int width,
++    int height);
++typedef void (*glRenderbufferStorageMultisampleShimProc)(
++    unsigned int target,
++    int samples,
++    unsigned int internalformat,
++    int width,
++    int height);
++typedef void (*glGenObjectsShimProc)(int n, unsigned int* ids);
++typedef void (*glBindBufferShimProc)(unsigned int target, unsigned int buffer);
++typedef void (*glBindTextureShimProc)(unsigned int target, unsigned int texture);
++typedef void (*glBindFramebufferShimProc)(unsigned int target, unsigned int framebuffer);
++typedef void (*glBindRenderbufferShimProc)(unsigned int target, unsigned int renderbuffer);
++typedef void (*glDrawBuffersShimProc)(int n, const unsigned int* bufs);
++typedef void (*glFramebufferRenderbufferShimProc)(
++    unsigned int target,
++    unsigned int attachment,
++    unsigned int renderbuffertarget,
++    unsigned int renderbuffer);
++typedef void (*glFramebufferTextureShimProc)(
++    unsigned int target,
++    unsigned int attachment,
++    unsigned int texture,
++    int level);
++typedef void (*glFramebufferTexture2DShimProc)(
++    unsigned int target,
++    unsigned int attachment,
++    unsigned int textarget,
++    unsigned int texture,
++    int level);
++typedef unsigned int (*glCheckFramebufferStatusShimProc)(unsigned int target);
++typedef void (*glRenderbufferStorageShimProc)(unsigned int target, unsigned int internalformat, int width, int height);
++typedef void (*glTexStorage2DShimProc)(unsigned int target, int levels, unsigned int internalformat, int width, int height);
++typedef void (*glTextureStorage2DShimProc)(unsigned int texture, int levels, unsigned int internalformat, int width, int height);
++typedef void (*glProgramParameteriShimProc)(unsigned int program, unsigned int pname, int value);
++typedef void (*glBindFragDataLocationShimProc)(unsigned int program, unsigned int color, const char* name);
++typedef void (*glGetFloatvShimProc)(unsigned int pname, float* params);
++typedef void (*glGetObjectParameterivARBShimProc)(unsigned int obj, unsigned int pname, int* params);
++typedef void (*glGetQueryObjectivShimProc)(unsigned int id, unsigned int pname, int* params);
++typedef void (*glGetQueryObjectuivShimProc)(unsigned int id, unsigned int pname, unsigned int* params);
++typedef void (*glGetQueryObjectui64vShimProc)(unsigned int id, unsigned int pname, uint64_t* params);
++typedef unsigned int (*glGetProgramResourceIndexShimProc)(unsigned int program, unsigned int programInterface, const char* name);
++typedef void (*glGetProgramResourceivShimProc)(
++    unsigned int program,
++    unsigned int programInterface,
++    unsigned int index,
++    int propCount,
++    const unsigned int* props,
++    int bufSize,
++    int* length,
++    int* params);
++typedef void (*glVertexAttribPointerShimProc)(
++    unsigned int index,
++    int size,
++    unsigned int type,
++    unsigned char normalized,
++    int stride,
++    const void* pointer);
++typedef void (*glVertexAttribDivisorShimProc)(unsigned int index, unsigned int divisor);
++typedef void (*glDrawTextureNVShimProc)(
++    unsigned int texture,
++    unsigned int sampler,
++    float x0,
++    float y0,
++    float x1,
++    float y1,
++    float z,
++    float s0,
++    float t0,
++    float s1,
++    float t1);
++
++static glGetIntegervShimProc g_glGetIntegerv_shim = NULL;
++static glGetProgramivShimProc g_glGetProgramiv_shim = NULL;
++static glGetShaderivShimProc g_glGetShaderiv_shim = NULL;
++static glBufferDataShimProc g_glBufferData_shim = NULL;
++static glBufferStorageShimProc g_glBufferStorage_shim = NULL;
++static glClearBufferSubDataShimProc g_glClearBufferSubData_shim = NULL;
++static glClipControlShimProc g_glClipControl_shim = NULL;
++static glMultiDrawElementsIndirectShimProc g_glMultiDrawElementsIndirect_shim = NULL;
++static glMultiDrawElementsIndirectCountShimProc g_glMultiDrawElementsIndirectCount_shim = NULL;
++static glPrimitiveRestartIndexShimProc g_glPrimitiveRestartIndex_shim = NULL;
++static glRenderbufferStorageMultisampleCoverageNVShimProc g_glRenderbufferStorageMultisampleCoverageNV_shim = NULL;
++static glRenderbufferStorageMultisampleShimProc g_glRenderbufferStorageMultisample_shim = NULL;
++static glGenObjectsShimProc g_glGenBuffers_shim = NULL;
++static glGenObjectsShimProc g_glGenFramebuffers_shim = NULL;
++static glGenObjectsShimProc g_glGenRenderbuffers_shim = NULL;
++static glGenObjectsShimProc g_glGenSamplers_shim = NULL;
++static glGenObjectsShimProc g_glGenTextures_shim = NULL;
++static glGenObjectsShimProc g_glGenVertexArrays_shim = NULL;
++static glBindBufferShimProc g_glBindBuffer_shim = NULL;
++static glBindTextureShimProc g_glBindTexture_shim = NULL;
++static glBindFramebufferShimProc g_glBindFramebuffer_shim = NULL;
++static glBindRenderbufferShimProc g_glBindRenderbuffer_shim = NULL;
++static glFramebufferRenderbufferShimProc g_glFramebufferRenderbuffer_shim = NULL;
++static glFramebufferTextureShimProc g_glFramebufferTexture_shim = NULL;
++static glFramebufferTexture2DShimProc g_glFramebufferTexture2D_shim = NULL;
++static glCheckFramebufferStatusShimProc g_glCheckFramebufferStatus_shim = NULL;
++static glRenderbufferStorageShimProc g_glRenderbufferStorage_shim = NULL;
++static glTexStorage2DShimProc g_glTexStorage2D_shim = NULL;
++static glTextureStorage2DShimProc g_glTextureStorage2D_shim = NULL;
++static glProgramParameteriShimProc g_glProgramParameteri_shim = NULL;
++static glBindFragDataLocationShimProc g_glBindFragDataLocation_shim = NULL;
++static glGetFloatvShimProc g_glGetFloatv_shim = NULL;
++static glGetObjectParameterivARBShimProc g_glGetObjectParameterivARB_shim = NULL;
++static glGetQueryObjectivShimProc g_glGetQueryObjectiv_shim = NULL;
++static glGetQueryObjectuivShimProc g_glGetQueryObjectuiv_shim = NULL;
++static glGetQueryObjectui64vShimProc g_glGetQueryObjectui64v_shim = NULL;
++static glGetProgramResourceIndexShimProc g_glGetProgramResourceIndex_shim = NULL;
++static glGetProgramResourceivShimProc g_glGetProgramResourceiv_shim = NULL;
++static glVertexAttribPointerShimProc g_glVertexAttribPointer_shim = NULL;
++static glVertexAttribDivisorShimProc g_glVertexAttribDivisor_shim = NULL;
++static glDrawBuffersShimProc g_glDrawBuffers_shim = NULL;
++static glDrawTextureNVShimProc g_glDrawTextureNV_shim = NULL;
++
++enum {
++    NG_GL_ARRAY_BUFFER = 0x8892u,
++    NG_GL_FRAMEBUFFER = 0x8D40u,
++    NG_GL_RENDERBUFFER = 0x8D41u,
++    NG_GL_TEXTURE_2D = 0x0DE1u,
++    NG_GL_DYNAMIC_DRAW = 0x88E8u,
++    NG_GL_FLOAT = 0x1406u,
++    NG_GL_INVALID_INDEX = 0xFFFFFFFFu,
++};
++
++static void* ng_gl4es_lookup_proc_raw(const char* name) {
++    void* proc = gl4es_GetProcAddress(name);
++    if (!proc) {
++        proc = emscripten_webgl_get_proc_address(name);
++    }
++    return proc;
++}
++
++static void* ng_gl4es_lookup_proc_multi(const char* const* names) {
++    int i = 0;
++
++    while (names[i]) {
++        void* proc = ng_gl4es_lookup_proc_raw(names[i]);
++        if (proc) {
++            return proc;
++        }
++        ++i;
++    }
++
++    return NULL;
++}
++
++static int ng_gl4es_glGetInteger(unsigned int pname) {
++    int value = 0;
++
++    if (!g_glGetIntegerv_shim) {
++        g_glGetIntegerv_shim = (glGetIntegervShimProc)ng_gl4es_lookup_proc_raw("glGetIntegerv");
++    }
++
++    if (g_glGetIntegerv_shim) {
++        g_glGetIntegerv_shim(pname, &value);
++    }
++
++    return value;
++}
++
++static int ng_gl4es_glGetProgrami(unsigned int program, unsigned int pname) {
++    int value = 0;
++
++    if (!g_glGetProgramiv_shim) {
++        g_glGetProgramiv_shim = (glGetProgramivShimProc)ng_gl4es_lookup_proc_raw("glGetProgramiv");
++    }
++
++    if (g_glGetProgramiv_shim) {
++        g_glGetProgramiv_shim(program, pname, &value);
++    }
++
++    return value;
++}
++
++static int ng_gl4es_glGetShaderi(unsigned int shader, unsigned int pname) {
++    int value = 0;
++
++    if (!g_glGetShaderiv_shim) {
++        g_glGetShaderiv_shim = (glGetShaderivShimProc)ng_gl4es_lookup_proc_raw("glGetShaderiv");
++    }
++
++    if (g_glGetShaderiv_shim) {
++        g_glGetShaderiv_shim(shader, pname, &value);
++    }
++
++    return value;
++}
++
++static void ng_gl4es_glBufferStorage(unsigned int target, intptr_t size, const void* data, unsigned int flags) {
++    static const char* const names[] = {"glBufferStorage", "glBufferStorageEXT", NULL};
++
++    if (!g_glBufferStorage_shim) {
++        g_glBufferStorage_shim = (glBufferStorageShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glBufferStorage_shim) {
++        g_glBufferStorage_shim(target, size, data, flags);
++        return;
++    }
++
++    if (!g_glBufferData_shim) {
++        g_glBufferData_shim = (glBufferDataShimProc)ng_gl4es_lookup_proc_raw("glBufferData");
++    }
++
++    if (g_glBufferData_shim) {
++        g_glBufferData_shim(target, size, data, 0x88E4u);
++    }
++}
++
++static void ng_gl4es_glClearBufferSubData(
++    unsigned int target,
++    unsigned int internalformat,
++    intptr_t offset,
++    intptr_t size,
++    unsigned int format,
++    unsigned int type,
++    const void* data) {
++    static const char* const names[] = {"glClearBufferSubData", "glClearBufferSubDataEXT", NULL};
++
++    if (!g_glClearBufferSubData_shim) {
++        g_glClearBufferSubData_shim = (glClearBufferSubDataShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glClearBufferSubData_shim) {
++        g_glClearBufferSubData_shim(target, internalformat, offset, size, format, type, data);
++    }
++}
++
++static void ng_gl4es_glClipControl(unsigned int origin, unsigned int depth) {
++    static const char* const names[] = {"glClipControl", "glClipControlEXT", NULL};
++
++    if (!g_glClipControl_shim) {
++        g_glClipControl_shim = (glClipControlShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glClipControl_shim) {
++        g_glClipControl_shim(origin, depth);
++    }
++}
++
++static void ng_gl4es_glMultiDrawElementsIndirect(
++    unsigned int mode,
++    unsigned int type,
++    const void* indirect,
++    int drawcount,
++    int stride) {
++    static const char* const names[] = {
++        "glMultiDrawElementsIndirect",
++        "glMultiDrawElementsIndirectEXT",
++        "glMultiDrawElementsIndirectAMD",
++        NULL};
++
++    if (!g_glMultiDrawElementsIndirect_shim) {
++        g_glMultiDrawElementsIndirect_shim = (glMultiDrawElementsIndirectShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glMultiDrawElementsIndirect_shim) {
++        g_glMultiDrawElementsIndirect_shim(mode, type, indirect, drawcount, stride);
++    }
++}
++
++static void ng_gl4es_glMultiDrawElementsIndirectCountARB(
++    unsigned int mode,
++    unsigned int type,
++    const void* indirect,
++    intptr_t drawcount,
++    int maxdrawcount,
++    int stride) {
++    static const char* const names[] = {"glMultiDrawElementsIndirectCountARB", "glMultiDrawElementsIndirectCount", NULL};
++
++    if (!g_glMultiDrawElementsIndirectCount_shim) {
++        g_glMultiDrawElementsIndirectCount_shim =
++            (glMultiDrawElementsIndirectCountShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glMultiDrawElementsIndirectCount_shim) {
++        g_glMultiDrawElementsIndirectCount_shim(mode, type, indirect, drawcount, maxdrawcount, stride);
++    }
++}
++
++static void ng_gl4es_glPrimitiveRestartIndex(unsigned int index) {
++    static const char* const names[] = {"glPrimitiveRestartIndex", "glPrimitiveRestartIndexNV", NULL};
++
++    if (!g_glPrimitiveRestartIndex_shim) {
++        g_glPrimitiveRestartIndex_shim = (glPrimitiveRestartIndexShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glPrimitiveRestartIndex_shim) {
++        g_glPrimitiveRestartIndex_shim(index);
++    }
++}
++
++static void ng_gl4es_glRenderbufferStorageMultisampleCoverageNV(
++    unsigned int target,
++    int coverageSamples,
++    int colorSamples,
++    unsigned int internalformat,
++    int width,
++    int height) {
++    static const char* const nv_names[] = {"glRenderbufferStorageMultisampleCoverageNV", NULL};
++    static const char* const msaa_names[] = {"glRenderbufferStorageMultisample", NULL};
++
++    if (!g_glRenderbufferStorageMultisampleCoverageNV_shim) {
++        g_glRenderbufferStorageMultisampleCoverageNV_shim =
++            (glRenderbufferStorageMultisampleCoverageNVShimProc)ng_gl4es_lookup_proc_multi(nv_names);
++    }
++
++    if (g_glRenderbufferStorageMultisampleCoverageNV_shim) {
++        g_glRenderbufferStorageMultisampleCoverageNV_shim(target, coverageSamples, colorSamples, internalformat, width, height);
++        return;
++    }
++
++    if (!g_glRenderbufferStorageMultisample_shim) {
++        g_glRenderbufferStorageMultisample_shim =
++            (glRenderbufferStorageMultisampleShimProc)ng_gl4es_lookup_proc_multi(msaa_names);
++    }
++
++    if (g_glRenderbufferStorageMultisample_shim) {
++        g_glRenderbufferStorageMultisample_shim(target, colorSamples, internalformat, width, height);
++    }
++}
++
++static void ng_gl4es_gen_object(glGenObjectsShimProc* cache, const char* lookup_name, int n, unsigned int* ids) {
++    if (!*cache) {
++        *cache = (glGenObjectsShimProc)ng_gl4es_lookup_proc_raw(lookup_name);
++    }
++    if (*cache) {
++        (*cache)(n, ids);
++    }
++}
++
++static void ng_gl4es_glCreateBuffers(int n, unsigned int* buffers) {
++    ng_gl4es_gen_object(&g_glGenBuffers_shim, "glGenBuffers", n, buffers);
++}
++
++static void ng_gl4es_glCreateFramebuffers(int n, unsigned int* framebuffers) {
++    ng_gl4es_gen_object(&g_glGenFramebuffers_shim, "glGenFramebuffers", n, framebuffers);
++}
++
++static void ng_gl4es_glCreateRenderbuffers(int n, unsigned int* renderbuffers) {
++    ng_gl4es_gen_object(&g_glGenRenderbuffers_shim, "glGenRenderbuffers", n, renderbuffers);
++}
++
++static void ng_gl4es_glCreateSamplers(int n, unsigned int* samplers) {
++    ng_gl4es_gen_object(&g_glGenSamplers_shim, "glGenSamplers", n, samplers);
++}
++
++static void ng_gl4es_glCreateTextures(unsigned int target, int n, unsigned int* textures) {
++    int i;
++
++    ng_gl4es_gen_object(&g_glGenTextures_shim, "glGenTextures", n, textures);
++    if (!textures) {
++        return;
++    }
++
++    if (!g_glBindTexture_shim) {
++        g_glBindTexture_shim = (glBindTextureShimProc)ng_gl4es_lookup_proc_raw("glBindTexture");
++    }
++
++    if (g_glBindTexture_shim) {
++        for (i = 0; i < n; ++i) {
++            g_glBindTexture_shim(target, textures[i]);
++        }
++    }
++}
++
++static void ng_gl4es_glCreateVertexArrays(int n, unsigned int* arrays) {
++    ng_gl4es_gen_object(&g_glGenVertexArrays_shim, "glGenVertexArrays", n, arrays);
++}
++
++static void ng_gl4es_glBindBufferBase(unsigned int target, unsigned int index, unsigned int buffer) {
++    static const char* const names[] = {"glBindBufferBase", "glBindBufferBaseARB", NULL};
++    static glBindBufferShimProc bind_buffer_base = NULL;
++
++    if (!bind_buffer_base) {
++        bind_buffer_base = (glBindBufferShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++    if (bind_buffer_base) {
++        ((void (*)(unsigned int, unsigned int, unsigned int))bind_buffer_base)(target, index, buffer);
++    }
++}
++
++static void ng_gl4es_glBeginTransformFeedback(unsigned int primitiveMode) {
++    static void (*begin_tf)(unsigned int) = NULL;
++
++    if (!begin_tf) {
++        begin_tf = (void (*)(unsigned int))ng_gl4es_lookup_proc_raw("glBeginTransformFeedback");
++    }
++    if (begin_tf) {
++        begin_tf(primitiveMode);
++    }
++}
++
++static void ng_gl4es_glEndTransformFeedback(void) {
++    static void (*end_tf)(void) = NULL;
++
++    if (!end_tf) {
++        end_tf = (void (*)(void))ng_gl4es_lookup_proc_raw("glEndTransformFeedback");
++    }
++    if (end_tf) {
++        end_tf();
++    }
++}
++
++static void ng_gl4es_glTransformFeedbackVaryings(
++    unsigned int program,
++    int count,
++    const char* const* varyings,
++    unsigned int bufferMode) {
++    static void (*tf_varyings)(unsigned int, int, const char* const*, unsigned int) = NULL;
++
++    if (!tf_varyings) {
++        tf_varyings = (void (*)(unsigned int, int, const char* const*, unsigned int))
++            ng_gl4es_lookup_proc_raw("glTransformFeedbackVaryings");
++    }
++    if (tf_varyings) {
++        tf_varyings(program, count, varyings, bufferMode);
++    }
++}
++
++static void ng_gl4es_glBindFragDataLocation(unsigned int program, unsigned int color, const char* name) {
++    if (!g_glBindFragDataLocation_shim) {
++        g_glBindFragDataLocation_shim =
++            (glBindFragDataLocationShimProc)ng_gl4es_lookup_proc_raw("glBindFragDataLocation");
++    }
++    if (g_glBindFragDataLocation_shim) {
++        g_glBindFragDataLocation_shim(program, color, name);
++    }
++}
++
++static unsigned int ng_gl4es_glCheckNamedFramebufferStatus(unsigned int framebuffer, unsigned int target) {
++    if (!g_glBindFramebuffer_shim) {
++        g_glBindFramebuffer_shim = (glBindFramebufferShimProc)ng_gl4es_lookup_proc_raw("glBindFramebuffer");
++    }
++    if (!g_glCheckFramebufferStatus_shim) {
++        g_glCheckFramebufferStatus_shim =
++            (glCheckFramebufferStatusShimProc)ng_gl4es_lookup_proc_raw("glCheckFramebufferStatus");
++    }
++    if (!g_glBindFramebuffer_shim || !g_glCheckFramebufferStatus_shim) {
++        return 0;
++    }
++
++    g_glBindFramebuffer_shim(target, framebuffer);
++    return g_glCheckFramebufferStatus_shim(target);
++}
++
++static void ng_gl4es_glFramebufferTexture(unsigned int target, unsigned int attachment, unsigned int texture, int level) {
++    static const char* const names[] = {"glFramebufferTexture", "glFramebufferTexture2D", NULL};
++
++    if (!g_glFramebufferTexture_shim) {
++        g_glFramebufferTexture_shim = (glFramebufferTextureShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glFramebufferTexture_shim) {
++        g_glFramebufferTexture_shim(target, attachment, texture, level);
++        return;
++    }
++
++    if (!g_glFramebufferTexture2D_shim) {
++        g_glFramebufferTexture2D_shim =
++            (glFramebufferTexture2DShimProc)ng_gl4es_lookup_proc_raw("glFramebufferTexture2D");
++    }
++    if (g_glFramebufferTexture2D_shim) {
++        g_glFramebufferTexture2D_shim(target, attachment, NG_GL_TEXTURE_2D, texture, level);
++    }
++}
++
++static void ng_gl4es_glNamedBufferStorage(unsigned int buffer, intptr_t size, const void* data, unsigned int flags) {
++    if (!g_glBindBuffer_shim) {
++        g_glBindBuffer_shim = (glBindBufferShimProc)ng_gl4es_lookup_proc_raw("glBindBuffer");
++    }
++    if (!g_glBindBuffer_shim) {
++        return;
++    }
++    g_glBindBuffer_shim(NG_GL_ARRAY_BUFFER, buffer);
++    ng_gl4es_glBufferStorage(NG_GL_ARRAY_BUFFER, size, data, flags);
++}
++
++static void ng_gl4es_glNamedFramebufferDrawBuffers(unsigned int framebuffer, int n, const unsigned int* bufs) {
++    if (!g_glBindFramebuffer_shim) {
++        g_glBindFramebuffer_shim = (glBindFramebufferShimProc)ng_gl4es_lookup_proc_raw("glBindFramebuffer");
++    }
++    if (!g_glDrawBuffers_shim) {
++        g_glDrawBuffers_shim = (glDrawBuffersShimProc)ng_gl4es_lookup_proc_raw("glDrawBuffers");
++    }
++    if (!g_glBindFramebuffer_shim || !g_glDrawBuffers_shim) {
++        return;
++    }
++
++    g_glBindFramebuffer_shim(NG_GL_FRAMEBUFFER, framebuffer);
++    g_glDrawBuffers_shim(n, bufs);
++}
++
++static void ng_gl4es_glNamedFramebufferRenderbuffer(
++    unsigned int framebuffer,
++    unsigned int attachment,
++    unsigned int renderbuffertarget,
++    unsigned int renderbuffer) {
++    if (!g_glBindFramebuffer_shim) {
++        g_glBindFramebuffer_shim = (glBindFramebufferShimProc)ng_gl4es_lookup_proc_raw("glBindFramebuffer");
++    }
++    if (!g_glFramebufferRenderbuffer_shim) {
++        g_glFramebufferRenderbuffer_shim =
++            (glFramebufferRenderbufferShimProc)ng_gl4es_lookup_proc_raw("glFramebufferRenderbuffer");
++    }
++    if (!g_glBindFramebuffer_shim || !g_glFramebufferRenderbuffer_shim) {
++        return;
++    }
++
++    g_glBindFramebuffer_shim(NG_GL_FRAMEBUFFER, framebuffer);
++    g_glFramebufferRenderbuffer_shim(NG_GL_FRAMEBUFFER, attachment, renderbuffertarget, renderbuffer);
++}
++
++static void ng_gl4es_glNamedFramebufferTexture(
++    unsigned int framebuffer,
++    unsigned int attachment,
++    unsigned int texture,
++    int level) {
++    if (!g_glBindFramebuffer_shim) {
++        g_glBindFramebuffer_shim = (glBindFramebufferShimProc)ng_gl4es_lookup_proc_raw("glBindFramebuffer");
++    }
++    if (!g_glBindFramebuffer_shim) {
++        return;
++    }
++    g_glBindFramebuffer_shim(NG_GL_FRAMEBUFFER, framebuffer);
++    ng_gl4es_glFramebufferTexture(NG_GL_FRAMEBUFFER, attachment, texture, level);
++}
++
++static void ng_gl4es_glNamedRenderbufferStorage(
++    unsigned int renderbuffer,
++    unsigned int internalformat,
++    int width,
++    int height) {
++    if (!g_glBindRenderbuffer_shim) {
++        g_glBindRenderbuffer_shim = (glBindRenderbufferShimProc)ng_gl4es_lookup_proc_raw("glBindRenderbuffer");
++    }
++    if (!g_glRenderbufferStorage_shim) {
++        g_glRenderbufferStorage_shim =
++            (glRenderbufferStorageShimProc)ng_gl4es_lookup_proc_raw("glRenderbufferStorage");
++    }
++    if (!g_glBindRenderbuffer_shim || !g_glRenderbufferStorage_shim) {
++        return;
++    }
++
++    g_glBindRenderbuffer_shim(NG_GL_RENDERBUFFER, renderbuffer);
++    g_glRenderbufferStorage_shim(NG_GL_RENDERBUFFER, internalformat, width, height);
++}
++
++static void ng_gl4es_glTextureStorage2D(
++    unsigned int texture,
++    int levels,
++    unsigned int internalformat,
++    int width,
++    int height) {
++    if (!g_glTextureStorage2D_shim) {
++        g_glTextureStorage2D_shim =
++            (glTextureStorage2DShimProc)ng_gl4es_lookup_proc_raw("glTextureStorage2D");
++    }
++    if (g_glTextureStorage2D_shim) {
++        g_glTextureStorage2D_shim(texture, levels, internalformat, width, height);
++        return;
++    }
++
++    if (!g_glBindTexture_shim) {
++        g_glBindTexture_shim = (glBindTextureShimProc)ng_gl4es_lookup_proc_raw("glBindTexture");
++    }
++    if (!g_glTexStorage2D_shim) {
++        g_glTexStorage2D_shim = (glTexStorage2DShimProc)ng_gl4es_lookup_proc_raw("glTexStorage2D");
++    }
++    if (!g_glBindTexture_shim || !g_glTexStorage2D_shim) {
++        return;
++    }
++
++    g_glBindTexture_shim(NG_GL_TEXTURE_2D, texture);
++    g_glTexStorage2D_shim(NG_GL_TEXTURE_2D, levels, internalformat, width, height);
++}
++
++static void ng_gl4es_glProgramParameteriEXT(unsigned int program, unsigned int pname, int value) {
++    if (!g_glProgramParameteri_shim) {
++        g_glProgramParameteri_shim = (glProgramParameteriShimProc)ng_gl4es_lookup_proc_raw("glProgramParameteri");
++    }
++    if (g_glProgramParameteri_shim) {
++        g_glProgramParameteri_shim(program, pname, value);
++    }
++}
++
++static float ng_gl4es_glGetFloat(unsigned int pname) {
++    float value = 0.0f;
++
++    if (!g_glGetFloatv_shim) {
++        g_glGetFloatv_shim = (glGetFloatvShimProc)ng_gl4es_lookup_proc_raw("glGetFloatv");
++    }
++    if (g_glGetFloatv_shim) {
++        g_glGetFloatv_shim(pname, &value);
++    }
++    return value;
++}
++
++static int ng_gl4es_glGetObjectParameteriARB(unsigned int obj, unsigned int pname) {
++    int value = 0;
++
++    if (!g_glGetObjectParameterivARB_shim) {
++        g_glGetObjectParameterivARB_shim =
++            (glGetObjectParameterivARBShimProc)ng_gl4es_lookup_proc_raw("glGetObjectParameterivARB");
++    }
++    if (g_glGetObjectParameterivARB_shim) {
++        g_glGetObjectParameterivARB_shim(obj, pname, &value);
++    }
++    return value;
++}
++
++static int ng_gl4es_glGetQueryObjectiARB(unsigned int id, unsigned int pname) {
++    int value = 0;
++
++    if (!g_glGetQueryObjectiv_shim) {
++        g_glGetQueryObjectiv_shim = (glGetQueryObjectivShimProc)ng_gl4es_lookup_proc_raw("glGetQueryObjectiv");
++    }
++    if (!g_glGetQueryObjectiv_shim) {
++        g_glGetQueryObjectiv_shim =
++            (glGetQueryObjectivShimProc)ng_gl4es_lookup_proc_raw("glGetQueryObjectivARB");
++    }
++    if (g_glGetQueryObjectiv_shim) {
++        g_glGetQueryObjectiv_shim(id, pname, &value);
++    }
++    return value;
++}
++
++static uint64_t ng_gl4es_glGetQueryObjectui64(unsigned int id, unsigned int pname) {
++    uint64_t value = 0;
++
++    if (!g_glGetQueryObjectui64v_shim) {
++        g_glGetQueryObjectui64v_shim =
++            (glGetQueryObjectui64vShimProc)ng_gl4es_lookup_proc_raw("glGetQueryObjectui64v");
++    }
++    if (g_glGetQueryObjectui64v_shim) {
++        g_glGetQueryObjectui64v_shim(id, pname, &value);
++        return value;
++    }
++
++    if (!g_glGetQueryObjectuiv_shim) {
++        g_glGetQueryObjectuiv_shim = (glGetQueryObjectuivShimProc)ng_gl4es_lookup_proc_raw("glGetQueryObjectuiv");
++    }
++    if (!g_glGetQueryObjectuiv_shim) {
++        g_glGetQueryObjectuiv_shim =
++            (glGetQueryObjectuivShimProc)ng_gl4es_lookup_proc_raw("glGetQueryObjectuivARB");
++    }
++    if (g_glGetQueryObjectuiv_shim) {
++        unsigned int low = 0;
++        g_glGetQueryObjectuiv_shim(id, pname, &low);
++        value = (uint64_t)low;
++    }
++
++    return value;
++}
++
++static unsigned int ng_gl4es_glGetProgramResourceIndex(
++    unsigned int program,
++    unsigned int programInterface,
++    const char* name) {
++    if (!g_glGetProgramResourceIndex_shim) {
++        g_glGetProgramResourceIndex_shim =
++            (glGetProgramResourceIndexShimProc)ng_gl4es_lookup_proc_raw("glGetProgramResourceIndex");
++    }
++    if (g_glGetProgramResourceIndex_shim) {
++        return g_glGetProgramResourceIndex_shim(program, programInterface, name);
++    }
++    return NG_GL_INVALID_INDEX;
++}
++
++static void ng_gl4es_glGetProgramResourceiv(
++    unsigned int program,
++    unsigned int programInterface,
++    unsigned int index,
++    int propCount,
++    const unsigned int* props,
++    int bufSize,
++    int* length,
++    int* params) {
++    if (!g_glGetProgramResourceiv_shim) {
++        g_glGetProgramResourceiv_shim =
++            (glGetProgramResourceivShimProc)ng_gl4es_lookup_proc_raw("glGetProgramResourceiv");
++    }
++    if (g_glGetProgramResourceiv_shim) {
++        g_glGetProgramResourceiv_shim(program, programInterface, index, propCount, props, bufSize, length, params);
++    }
++}
++
++static void ng_gl4es_glVertexArrayAttribBinding(unsigned int vaobj, unsigned int attribindex, unsigned int bindingindex) {
++    if (!g_glBindBuffer_shim) {
++        g_glBindBuffer_shim = (glBindBufferShimProc)ng_gl4es_lookup_proc_raw("glBindBuffer");
++    }
++    if (!g_glVertexAttribDivisor_shim) {
++        g_glVertexAttribDivisor_shim =
++            (glVertexAttribDivisorShimProc)ng_gl4es_lookup_proc_raw("glVertexAttribDivisor");
++    }
++    if (g_glVertexAttribDivisor_shim) {
++        (void)vaobj;
++        g_glVertexAttribDivisor_shim(attribindex, bindingindex);
++    }
++}
++
++static void ng_gl4es_glVertexArrayAttribFormat(
++    unsigned int vaobj,
++    unsigned int attribindex,
++    int size,
++    unsigned int type,
++    unsigned char normalized,
++    unsigned int relativeoffset) {
++    if (!g_glVertexAttribPointer_shim) {
++        g_glVertexAttribPointer_shim =
++            (glVertexAttribPointerShimProc)ng_gl4es_lookup_proc_raw("glVertexAttribPointer");
++    }
++    if (g_glVertexAttribPointer_shim) {
++        (void)vaobj;
++        g_glVertexAttribPointer_shim(attribindex, size, type, normalized, 0, (const void*)(uintptr_t)relativeoffset);
++    }
++}
++
++static void ng_gl4es_glVertexArrayBindingDivisor(unsigned int vaobj, unsigned int bindingindex, unsigned int divisor) {
++    if (!g_glVertexAttribDivisor_shim) {
++        g_glVertexAttribDivisor_shim =
++            (glVertexAttribDivisorShimProc)ng_gl4es_lookup_proc_raw("glVertexAttribDivisor");
++    }
++    if (g_glVertexAttribDivisor_shim) {
++        (void)vaobj;
++        g_glVertexAttribDivisor_shim(bindingindex, divisor);
++    }
++}
++
++static void ng_gl4es_glVertexArrayVertexBuffer(
++    unsigned int vaobj,
++    unsigned int bindingindex,
++    unsigned int buffer,
++    intptr_t offset,
++    int stride) {
++    if (!g_glBindBuffer_shim) {
++        g_glBindBuffer_shim = (glBindBufferShimProc)ng_gl4es_lookup_proc_raw("glBindBuffer");
++    }
++    if (g_glBindBuffer_shim) {
++        (void)vaobj;
++        (void)bindingindex;
++        (void)offset;
++        (void)stride;
++        g_glBindBuffer_shim(NG_GL_ARRAY_BUFFER, buffer);
++    }
++}
++
++static void ng_gl4es_glDispatchCompute(unsigned int x, unsigned int y, unsigned int z) {
++    static void (*dispatch_compute)(unsigned int, unsigned int, unsigned int) = NULL;
++
++    if (!dispatch_compute) {
++        dispatch_compute =
++            (void (*)(unsigned int, unsigned int, unsigned int))ng_gl4es_lookup_proc_raw("glDispatchCompute");
++    }
++    if (dispatch_compute) {
++        dispatch_compute(x, y, z);
++    }
++}
++
++static void ng_gl4es_glDrawTextureNV(
++    unsigned int texture,
++    unsigned int sampler,
++    float x0,
++    float y0,
++    float x1,
++    float y1,
++    float z,
++    float s0,
++    float t0,
++    float s1,
++    float t1) {
++    static const char* const names[] = {"glDrawTextureNV", "glDrawTexture", NULL};
++
++    if (!g_glDrawTextureNV_shim) {
++        g_glDrawTextureNV_shim = (glDrawTextureNVShimProc)ng_gl4es_lookup_proc_multi(names);
++    }
++
++    if (g_glDrawTextureNV_shim) {
++        g_glDrawTextureNV_shim(texture, sampler, x0, y0, x1, y1, z, s0, t0, s1, t1);
++    }
++}
++
++#ifndef __EMSCRIPTEN_PTHREADS__
++#define __EMSCRIPTEN_PTHREADS__ 0
++#endif
++
++static void ng_gl4es_get_mainfb_size(int* width, int* height) {
++    int canvas_width = 0;
++    int canvas_height = 0;
++    EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context = emscripten_webgl_get_current_context();
++
++    if (context > 0 && emscripten_webgl_get_drawing_buffer_size(context, &canvas_width, &canvas_height) ==
++                           EMSCRIPTEN_RESULT_SUCCESS) {
++        if (width) {
++            *width = canvas_width;
++        }
++        if (height) {
++            *height = canvas_height;
++        }
++        return;
++    }
++
++    if (emscripten_get_canvas_element_size(g_ng_gl4es_canvas_selector, &canvas_width, &canvas_height) ==
++        EMSCRIPTEN_RESULT_SUCCESS) {
++        if (width) {
++            *width = canvas_width;
++        }
++        if (height) {
++            *height = canvas_height;
++        }
++    }
++}
++
++#if defined(__GNUC__)
++__attribute__((weak))
++#endif
++void* emscripten_GetProcAddress(const char* name) {
++    return emscripten_webgl_get_proc_address(name);
++}
++
++static void ng_gl4es_try_initialize(void) {
++    EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context;
++
++    if (g_ng_gl4es_initialized) {
++        return;
++    }
++
++    context = emscripten_webgl_get_current_context();
++    if (context <= 0) {
++        return;
++    }
++
++    set_getprocaddress(emscripten_webgl_get_proc_address);
++    set_getmainfbsize(ng_gl4es_get_mainfb_size);
++    initialize_gl4es();
++    g_ng_gl4es_initialized = 1;
++}
++
++EXPORT void ng_gl4es_proc_init(void) {
++    set_getprocaddress(emscripten_webgl_get_proc_address);
++    set_getmainfbsize(ng_gl4es_get_mainfb_size);
++}
++
++EXPORT void* ng_gl4es_get_proc_address(const char* name) {
++    if (!name) {
++        return NULL;
++    }
++
++    ng_gl4es_try_initialize();
++
++    if (strcmp(name, "glGetInteger") == 0) {
++        return (void*)ng_gl4es_glGetInteger;
++    }
++
++    if (strcmp(name, "glGetProgrami") == 0) {
++        return (void*)ng_gl4es_glGetProgrami;
++    }
++
++    if (strcmp(name, "glGetShaderi") == 0) {
++        return (void*)ng_gl4es_glGetShaderi;
++    }
++
++    if (strcmp(name, "glBufferStorage") == 0) {
++        return (void*)ng_gl4es_glBufferStorage;
++    }
++
++    if (strcmp(name, "glClearBufferSubData") == 0) {
++        return (void*)ng_gl4es_glClearBufferSubData;
++    }
++
++    if (strcmp(name, "glClipControl") == 0) {
++        return (void*)ng_gl4es_glClipControl;
++    }
++
++    if (strcmp(name, "glMultiDrawElementsIndirect") == 0) {
++        return (void*)ng_gl4es_glMultiDrawElementsIndirect;
++    }
++
++    if (strcmp(name, "glMultiDrawElementsIndirectCountARB") == 0) {
++        return (void*)ng_gl4es_glMultiDrawElementsIndirectCountARB;
++    }
++
++    if (strcmp(name, "glMultiDrawElementsIndirectCount") == 0) {
++        return (void*)ng_gl4es_glMultiDrawElementsIndirectCountARB;
++    }
++
++    if (strcmp(name, "glPrimitiveRestartIndex") == 0) {
++        return (void*)ng_gl4es_glPrimitiveRestartIndex;
++    }
++
++    if (strcmp(name, "glRenderbufferStorageMultisampleCoverageNV") == 0) {
++        return (void*)ng_gl4es_glRenderbufferStorageMultisampleCoverageNV;
++    }
++
++    if (strcmp(name, "glCreateBuffers") == 0) {
++        return (void*)ng_gl4es_glCreateBuffers;
++    }
++
++    if (strcmp(name, "glCreateFramebuffers") == 0) {
++        return (void*)ng_gl4es_glCreateFramebuffers;
++    }
++
++    if (strcmp(name, "glCreateRenderbuffers") == 0) {
++        return (void*)ng_gl4es_glCreateRenderbuffers;
++    }
++
++    if (strcmp(name, "glCreateSamplers") == 0) {
++        return (void*)ng_gl4es_glCreateSamplers;
++    }
++
++    if (strcmp(name, "glCreateTextures") == 0) {
++        return (void*)ng_gl4es_glCreateTextures;
++    }
++
++    if (strcmp(name, "glCreateVertexArrays") == 0) {
++        return (void*)ng_gl4es_glCreateVertexArrays;
++    }
++
++    if (strcmp(name, "glBindBufferBase") == 0) {
++        return (void*)ng_gl4es_glBindBufferBase;
++    }
++
++    if (strcmp(name, "glBeginTransformFeedback") == 0) {
++        return (void*)ng_gl4es_glBeginTransformFeedback;
++    }
++
++    if (strcmp(name, "glEndTransformFeedback") == 0) {
++        return (void*)ng_gl4es_glEndTransformFeedback;
++    }
++
++    if (strcmp(name, "glTransformFeedbackVaryings") == 0) {
++        return (void*)ng_gl4es_glTransformFeedbackVaryings;
++    }
++
++    if (strcmp(name, "glBindFragDataLocation") == 0) {
++        return (void*)ng_gl4es_glBindFragDataLocation;
++    }
++
++    if (strcmp(name, "glCheckNamedFramebufferStatus") == 0) {
++        return (void*)ng_gl4es_glCheckNamedFramebufferStatus;
++    }
++
++    if (strcmp(name, "glFramebufferTexture") == 0) {
++        return (void*)ng_gl4es_glFramebufferTexture;
++    }
++
++    if (strcmp(name, "glNamedBufferStorage") == 0) {
++        return (void*)ng_gl4es_glNamedBufferStorage;
++    }
++
++    if (strcmp(name, "glNamedFramebufferDrawBuffers") == 0) {
++        return (void*)ng_gl4es_glNamedFramebufferDrawBuffers;
++    }
++
++    if (strcmp(name, "glNamedFramebufferRenderbuffer") == 0) {
++        return (void*)ng_gl4es_glNamedFramebufferRenderbuffer;
++    }
++
++    if (strcmp(name, "glNamedFramebufferTexture") == 0) {
++        return (void*)ng_gl4es_glNamedFramebufferTexture;
++    }
++
++    if (strcmp(name, "glNamedRenderbufferStorage") == 0) {
++        return (void*)ng_gl4es_glNamedRenderbufferStorage;
++    }
++
++    if (strcmp(name, "glTextureStorage2D") == 0) {
++        return (void*)ng_gl4es_glTextureStorage2D;
++    }
++
++    if (strcmp(name, "glProgramParameteriEXT") == 0) {
++        return (void*)ng_gl4es_glProgramParameteriEXT;
++    }
++
++    if (strcmp(name, "glGetFloat") == 0) {
++        return (void*)ng_gl4es_glGetFloat;
++    }
++
++    if (strcmp(name, "glGetObjectParameteriARB") == 0) {
++        return (void*)ng_gl4es_glGetObjectParameteriARB;
++    }
++
++    if (strcmp(name, "glGetQueryObjectiARB") == 0) {
++        return (void*)ng_gl4es_glGetQueryObjectiARB;
++    }
++
++    if (strcmp(name, "glGetQueryObjectui64") == 0) {
++        return (void*)ng_gl4es_glGetQueryObjectui64;
++    }
++
++    if (strcmp(name, "glGetProgramResourceIndex") == 0) {
++        return (void*)ng_gl4es_glGetProgramResourceIndex;
++    }
++
++    if (strcmp(name, "glGetProgramResourceiv") == 0) {
++        return (void*)ng_gl4es_glGetProgramResourceiv;
++    }
++
++    if (strcmp(name, "glVertexArrayAttribBinding") == 0) {
++        return (void*)ng_gl4es_glVertexArrayAttribBinding;
++    }
++
++    if (strcmp(name, "glVertexArrayAttribFormat") == 0) {
++        return (void*)ng_gl4es_glVertexArrayAttribFormat;
++    }
++
++    if (strcmp(name, "glVertexArrayBindingDivisor") == 0) {
++        return (void*)ng_gl4es_glVertexArrayBindingDivisor;
++    }
++
++    if (strcmp(name, "glVertexArrayVertexBuffer") == 0) {
++        return (void*)ng_gl4es_glVertexArrayVertexBuffer;
++    }
++
++    if (strcmp(name, "glDispatchCompute") == 0) {
++        return (void*)ng_gl4es_glDispatchCompute;
++    }
++
++    if (strcmp(name, "glDrawTextureNV") == 0) {
++        return (void*)ng_gl4es_glDrawTextureNV;
++    }
++
++    return ng_gl4es_lookup_proc_raw(name);
++}
++
++EXPORT EMSCRIPTEN_WEBGL_CONTEXT_HANDLE
++ng_gl4es_webgl_create_context(const char* target, const EmscriptenWebGLContextAttributes* attributes) {
++    EmscriptenWebGLContextAttributes local_attributes;
++    const char* context_target = target;
++
++    if (attributes) {
++        local_attributes = *attributes;
++    } else {
++        emscripten_webgl_init_context_attributes(&local_attributes);
++    }
++
++	local_attributes.explicitSwapControl = 1;
++	local_attributes.alpha = 0;
++
++    if (target && target[0] != '\0') {
++        strncpy(g_ng_gl4es_canvas_selector, target, sizeof(g_ng_gl4es_canvas_selector) - 1);
++        g_ng_gl4es_canvas_selector[sizeof(g_ng_gl4es_canvas_selector) - 1] = '\0';
++    }
++
++    if (!context_target || context_target[0] == '\0') {
++        context_target = g_ng_gl4es_canvas_selector;
++    }
++
++    return emscripten_webgl_create_context(context_target, &local_attributes);
++}
++
++EXPORT EMSCRIPTEN_RESULT ng_gl4es_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context) {
++    EMSCRIPTEN_RESULT result = emscripten_webgl_make_context_current(context);
++
++    if (result == EMSCRIPTEN_RESULT_SUCCESS) {
++        ng_gl4es_try_initialize();
++    }
++
++    return result;
++}
++
++EXPORT EMSCRIPTEN_RESULT ng_gl4es_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context) {
++    return emscripten_webgl_destroy_context(context);
++}
++
++/* Exports consumed by the emscripten-glfw GL-backend hooks. The prefix
++ * (krypton_*) identifies this build as Krypton Wrapper / NG-GL4ES so it's
++ * trivial to tell from the linked wasm which translation layer is in use. */
++EXPORT void* krypton_get_proc_address(const char* name) {
++    return ng_gl4es_get_proc_address(name);
++}
++
++EXPORT EMSCRIPTEN_WEBGL_CONTEXT_HANDLE
++krypton_webgl_create_context(const char* target, const EmscriptenWebGLContextAttributes* attributes) {
++    return ng_gl4es_webgl_create_context(target, attributes);
++}
++
++EXPORT EMSCRIPTEN_RESULT krypton_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context) {
++    return ng_gl4es_webgl_make_context_current(context);
++}
++
++EXPORT EMSCRIPTEN_RESULT krypton_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context) {
++    return ng_gl4es_webgl_destroy_context(context);
++}
++
++EXPORT void krypton_proc_init(void) {
++    ng_gl4es_proc_init();
++}
++
++/* GLX-style entry points so LWJGL's Linux SharedLibraryGL bootstrap (which
++ * dlsyms `glXGetProcAddress` / `glXGetProcAddressARB` out of libGL.so.1 and
++ * uses the returned function for every GL function lookup) can route through
++ * the Krypton Wrapper chain. The user's libGL.so.1 setup just needs to
++ * re-export these symbols (e.g. via wasm symbol-rename) for LWJGL to find
++ * them via JVM_FindLibraryEntry. */
++EXPORT void* glXGetProcAddress(const unsigned char* procName) {
++    return ng_gl4es_get_proc_address((const char*)procName);
++}
++
++EXPORT void* glXGetProcAddressARB(const unsigned char* procName) {
++    return ng_gl4es_get_proc_address((const char*)procName);
++}
++
++#endif
+diff --git a/src/gl/fpe.c b/src/gl/fpe.c
+index 721c3ff..58ddcf2 100644
+--- a/src/gl/fpe.c
++++ b/src/gl/fpe.c
+@@ -33,7 +33,7 @@
+ #ifdef DEBUG
+ #pragma GCC optimize 0
+ #define DBG(a) a
+-#define DBGLOGD(...) SHUT_LOGD(__VA_ARGS__);
++#define DBGLOGD(...) SHUT_LOGD(__VA_ARGS__)
+ #else
+ #define DBG(a)
+ #define DBGLOGD(...)                                                                                                   \
+diff --git a/src/gl/framebuffers.c b/src/gl/framebuffers.c
+index 3d56b6e..f448151 100644
+--- a/src/gl/framebuffers.c
++++ b/src/gl/framebuffers.c
+@@ -1575,7 +1575,7 @@ void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX
+     // #endif
+ }
+ 
+-VISIBLE void glReadBuffer(GLenum src) {
++VISIBLE void KW_EXPORT(glReadBuffer)(GLenum src) {
+     DBG(SHUT_LOGD("glReadBuffer, src:%s", PrintEnum(src));)
+     LOAD_GLES3(glReadBuffer);
+     gles_glReadBuffer(src);
+diff --git a/src/gl/getter.cpp b/src/gl/getter.cpp
+index 3e3dcb9..27f294b 100644
+--- a/src/gl/getter.cpp
++++ b/src/gl/getter.cpp
+@@ -1040,6 +1040,15 @@ extern "C"
+         case GL_CONTEXT_PROFILE_MASK:
+             *params = GL_CONTEXT_COMPATIBILITY_PROFILE_BIT;
+             break;
++        case GL_CONTEXT_FLAGS:
++            // GLES has no GL_CONTEXT_FLAGS; falling through to the default
++            // branch lets WebGL raise GL_INVALID_ENUM AND leaves *params
++            // untouched, which makes LWJGL3 read whatever junk the caller had
++            // there before (e.g. the previous GL_NUM_EXTENSIONS result, often
++            // odd → FORWARD_COMPATIBLE_BIT spuriously set). Returning 0
++            // forces forwardCompatible=false in GL.createCapabilities.
++            *params = 0;
++            break;
+         case GL_MAX_IMAGE_UNITS: {
+             int es_params = 16;
+             gles_glGetIntegerv(pname, &es_params);
+diff --git a/src/gl/gl_lookup.c b/src/gl/gl_lookup.c
+index 4008caf..8b8e6cf 100644
+--- a/src/gl/gl_lookup.c
++++ b/src/gl/gl_lookup.c
+@@ -35,9 +35,48 @@ void gl4es_Stub(void* x, ...) {
+ void APIENTRY_GL4ES gl4es_Stub(void* x) {}
+ #endif
+ 
++#ifdef __EMSCRIPTEN__
++/* Forward declarations of the gl4es_glXXX thunks defined in
++ * src/gl/emscripten_aliases.c that aren't declared by wrap/gles.h. They
++ * forward to the krypton_glXXX canonicals. The MAP macro only takes
++ * (void*) of these so empty signatures are fine. */
++extern void gl4es_glBindFragDataLocationIndexed(void);
++extern void gl4es_glGetFragDataIndex(void);
++extern void gl4es_glGetProgramResourceLocationIndex(void);
++extern void gl4es_glGetVertexAttribIiv(void);
++extern void gl4es_glGetVertexAttribIuiv(void);
++extern void gl4es_glVertexAttribI1i(void);
++extern void gl4es_glVertexAttribI2i(void);
++extern void gl4es_glVertexAttribI3i(void);
++extern void gl4es_glVertexAttribI4i(void);
++extern void gl4es_glVertexAttribI1ui(void);
++extern void gl4es_glVertexAttribI2ui(void);
++extern void gl4es_glVertexAttribI3ui(void);
++extern void gl4es_glVertexAttribI4ui(void);
++extern void gl4es_glVertexAttribI1iv(void);
++extern void gl4es_glVertexAttribI2iv(void);
++extern void gl4es_glVertexAttribI3iv(void);
++extern void gl4es_glVertexAttribI4iv(void);
++extern void gl4es_glVertexAttribI1uiv(void);
++extern void gl4es_glVertexAttribI2uiv(void);
++extern void gl4es_glVertexAttribI3uiv(void);
++extern void gl4es_glVertexAttribI4uiv(void);
++extern void gl4es_glVertexAttribP1ui(void);
++extern void gl4es_glVertexAttribP2ui(void);
++extern void gl4es_glVertexAttribP3ui(void);
++extern void gl4es_glVertexAttribP4ui(void);
++extern void gl4es_glVertexAttribP1uiv(void);
++extern void gl4es_glVertexAttribP2uiv(void);
++extern void gl4es_glVertexAttribP3uiv(void);
++extern void gl4es_glVertexAttribP4uiv(void);
++extern void gl4es_glVertexAttribLPointer(void);
++/* gl4es_glIsSync / glWaitSync / glGetSynciv / glDrawArraysIndirect are
++ * already declared in src/gl/wrap/gles.h with full signatures. */
++#endif
++
+ void* APIENTRY_GL4ES gl4es_GetProcAddress(const char* name) {
+     DBG(SHUT_LOGD("glGetProcAddress(\"%s\")", name);)
+-    /*
++    
+     // generated gles wrappers
+     #include "glesfuncs.inc"
+ 
+@@ -484,7 +523,7 @@ void* APIENTRY_GL4ES gl4es_GetProcAddress(const char* name) {
+         _EXT(glFogCoordfv);
+         _EXT(glFogCoordPointer);
+     }
+-    */
++    
+     /*STUB(glEdgeFlagPointerEXT);
+     STUB(glIndexPointerEXT);*/
+ 
+@@ -997,6 +1036,67 @@ void* APIENTRY_GL4ES gl4es_GetProcAddress(const char* name) {
+     _EXT(glVertexAttribDivisor);
+     _ARB(glVertexAttribDivisor);
+ 
++    // GL 3.0+ / WebGL2 paths used by LWJGL demos. Functions defined with the
++    // gl4es_ prefix use _EX/_ARB/_EXT. The sync funcs (glFenceSync et al.)
++    // are renamed to krypton_glXXX at the C-level on Emscripten to avoid
++    // colliding with emscripten's libGL; gl_lookup still resolves them via
++    // the gl4es_glXXX thunks in emscripten_aliases.c. glTexBuffer is not
++    // exported by emscripten libGL and remains bare-named, so it uses EX().
++    _EX(glBindBufferRange);
++    _ARB(glBindBufferRange);
++    _EX(glGetUniformBlockIndex);
++    _ARB(glGetUniformBlockIndex);
++    EX(glTexBuffer);
++    ARB(glTexBuffer);
++    EXT(glTexBuffer);
++    _EX(glFenceSync);
++    _ARB(glFenceSync);
++    _EX(glDeleteSync);
++    _ARB(glDeleteSync);
++    _EX(glClientWaitSync);
++    _ARB(glClientWaitSync);
++    _EX(glIsSync);
++    _ARB(glIsSync);
++    _EX(glWaitSync);
++    _ARB(glWaitSync);
++    _EX(glGetSynciv);
++    _ARB(glGetSynciv);
++    _EX(glDrawArraysIndirect);
++    _ARB(glDrawArraysIndirect);
++    _EX(glBindFragDataLocationIndexed);
++    _EX(glGetFragDataIndex);
++    _EX(glGetProgramResourceLocationIndex);
++
++    // GL 3.0 integer / packed vertex attribute entry points (thunks live in
++    // emscripten_aliases.c on Emscripten and forward to krypton_glXXX).
++    _EX(glGetVertexAttribIiv);
++    _EX(glGetVertexAttribIuiv);
++    _EX(glVertexAttribI1i);
++    _EX(glVertexAttribI2i);
++    _EX(glVertexAttribI3i);
++    _EX(glVertexAttribI4i);
++    _EX(glVertexAttribI1ui);
++    _EX(glVertexAttribI2ui);
++    _EX(glVertexAttribI3ui);
++    _EX(glVertexAttribI4ui);
++    _EX(glVertexAttribI1iv);
++    _EX(glVertexAttribI2iv);
++    _EX(glVertexAttribI3iv);
++    _EX(glVertexAttribI4iv);
++    _EX(glVertexAttribI1uiv);
++    _EX(glVertexAttribI2uiv);
++    _EX(glVertexAttribI3uiv);
++    _EX(glVertexAttribI4uiv);
++    _EX(glVertexAttribP1ui);
++    _EX(glVertexAttribP2ui);
++    _EX(glVertexAttribP3ui);
++    _EX(glVertexAttribP4ui);
++    _EX(glVertexAttribP1uiv);
++    _EX(glVertexAttribP2uiv);
++    _EX(glVertexAttribP3uiv);
++    _EX(glVertexAttribP4uiv);
++    _EX(glVertexAttribLPointer);
++
+     // stub non-squared matrix access
+     STUB(glUniformMatrix2x3fv);
+     STUB(glUniformMatrix3x2fv);
+diff --git a/src/gl/krypton_export_names.h b/src/gl/krypton_export_names.h
+new file mode 100644
+index 0000000..c23345d
+--- /dev/null
++++ b/src/gl/krypton_export_names.h
+@@ -0,0 +1,29 @@
++/* Krypton Wrapper export-name helper.
++ *
++ * NG-GL4ES defines a handful of GL entry points with bare `glXXX` names
++ * (sync objects, glReadBuffer, glTexBuffer, glVertexAttribI/P*, ...) that
++ * collide with emscripten's stock libGL at the final WASM link step. On
++ * Emscripten we rename those definitions to `krypton_glXXX` at the C-level
++ * so the archive's public surface is conflict-free; gl4es' proc-address
++ * dispatcher still resolves the original names via gl4es_glXXX thunks (see
++ * emscripten_aliases.c).
++ *
++ *   VISIBLE void KW_EXPORT(glReadBuffer)(GLenum src) { ... }
++ *
++ * KW_EXPORT_STR(name) is the stringized form, used in __attribute__((alias))
++ * payloads when an alias has to point at the renamed canonical symbol.
++ */
++
++#ifndef KRYPTON_EXPORT_NAMES_H
++#define KRYPTON_EXPORT_NAMES_H
++
++#ifdef __EMSCRIPTEN__
++#define KW_EXPORT(name)        krypton_##name
++#define KW_EXPORT_STR_(name)   "krypton_" #name
++#define KW_EXPORT_STR(name)    KW_EXPORT_STR_(name)
++#else
++#define KW_EXPORT(name)        name
++#define KW_EXPORT_STR(name)    #name
++#endif
++
++#endif /* KRYPTON_EXPORT_NAMES_H */
+diff --git a/src/gl/loader.h b/src/gl/loader.h
+index 9c564ed..b272699 100644
+--- a/src/gl/loader.h
++++ b/src/gl/loader.h
+@@ -239,6 +239,20 @@ extern "C"
+     DEFINE_RAW(gles, name);                                                                                            \
+     { LOAD_RAW_SILENT(gles, name, proc_address(gles, #name)); }
+ 
++#define LOAD_GLES3_OR_EXT(name)                                                                                        \
++    DEFINE_RAW(gles, name);                                                                                            \
++    {                                                                                                                  \
++        static bool first = true;                                                                                      \
++        if (first) {                                                                                                   \
++            first = false;                                                                                             \
++            if (gles != NULL) {                                                                                        \
++                name##_PTR origin = (name##_PTR)proc_address(gles, #name);                                            \
++                gles_##name = (name##_PTR)(origin ? origin : proc_address(gles, #name "EXT"));                       \
++            }                                                                                                          \
++            WARN_NULL(gles_##name);                                                                                    \
++        }                                                                                                              \
++    }
++
+ #else // defined(AMIGAOS4) || defined(NOEGL)
+ 
+ #define LOAD_EGL_EXT(name)                                                                                             \
+diff --git a/src/gl/preproc.c b/src/gl/preproc.c
+index 7615413..9f35033 100644
+--- a/src/gl/preproc.c
++++ b/src/gl/preproc.c
+@@ -10,6 +10,7 @@
+ 
+ //#define DEBUG
+ #ifdef DEBUG
++#include "logs.h"
+ #define DBG(a) a
+ #pragma GCC optimize 0
+ #else
+diff --git a/src/gl/texture.c b/src/gl/texture.c
+index 3fc443f..affb969 100644
+--- a/src/gl/texture.c
++++ b/src/gl/texture.c
+@@ -110,9 +110,26 @@ void internal_convert(GLenum* internal_format, GLenum* type, GLenum* format) {
+         if (type) *type = GL_FLOAT;
+         break;
+     case GL_DEPTH_COMPONENT:
++        // WebGL2/ES3 reject unsized GL_DEPTH_COMPONENT as a texture
++        // internalformat for renderable depth attachments. Promote to a sized
++        // variant chosen by the requested transfer type so the resulting
++        // texture can be attached to a framebuffer's GL_DEPTH_ATTACHMENT.
+         if (type) {
+-            *internal_format = GL_DEPTH_COMPONENT;
+-            *type = GL_UNSIGNED_INT;
++            switch (*type) {
++            case GL_FLOAT:
++                *internal_format = GL_DEPTH_COMPONENT32F;
++                break;
++            case GL_UNSIGNED_SHORT:
++                *internal_format = GL_DEPTH_COMPONENT16;
++                break;
++            case GL_UNSIGNED_INT:
++            default:
++                *internal_format = GL_DEPTH_COMPONENT24;
++                *type = GL_UNSIGNED_INT;
++                break;
++            }
++        } else {
++            *internal_format = GL_DEPTH_COMPONENT24;
+         }
+         break;
+     case GL_DEPTH_STENCIL:
+diff --git a/src/gl/texture_params.c b/src/gl/texture_params.c
+index 914646d..e33b75f 100644
+--- a/src/gl/texture_params.c
++++ b/src/gl/texture_params.c
+@@ -321,7 +321,19 @@ void APIENTRY_GL4ES gl4es_glTexParameterfv(GLenum target, GLenum pname, const GL
+     LOAD_GLES(glTexParameterfv);
+     realize_bound(glstate->texture.active, target);
+ 
+-    gles_glTexParameterfv(rtarget, pname, params);
++    // WebGL2/ES3 reject legacy desktop GL_CLAMP (0x2900) for wrap parameters.
++    // Translate to GL_CLAMP_TO_EDGE before the passthrough so strict drivers
++    // don't raise GL_INVALID_ENUM. Also applies the existing NPOT/repeat
++    // remapping baked into get_texture_wrap().
++    GLfloat _kw_sanitized[4];
++    const GLfloat* _kw_params = params;
++    if (params && (pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ||
++                   pname == GL_TEXTURE_WRAP_R)) {
++        _kw_sanitized[0] = (GLfloat)get_texture_wrap((GLenum)params[0], texture);
++        _kw_params = _kw_sanitized;
++    }
++
++    gles_glTexParameterfv(rtarget, pname, _kw_params);
+     errorGL();
+ 
+     if (!samplerParameterfv(&texture->sampler, pname, params)) {
+diff --git a/src/gl/vertexattrib.c b/src/gl/vertexattrib.c
+index 7ed9e14..e9d22ab 100644
+--- a/src/gl/vertexattrib.c
++++ b/src/gl/vertexattrib.c
+@@ -338,7 +338,7 @@ void APIENTRY_GL4ES gl4es_glVertexAttribDivisor(GLuint index, GLuint divisor) {
+ }
+ 
+ 
+-VISIBLE void glVertexAttribI1i(GLuint index, GLint x) {
++VISIBLE void KW_EXPORT(glVertexAttribI1i)(GLuint index, GLint x) {
+     DBG(SHUT_LOGD("glVertexAttribI1i(%d, %d)\n", index, x);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -348,7 +348,7 @@ VISIBLE void glVertexAttribI1i(GLuint index, GLint x) {
+     glstate->vavalue[index][0] = (GLfloat)x;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI2i(GLuint index, GLint x, GLint y) {
++VISIBLE void KW_EXPORT(glVertexAttribI2i)(GLuint index, GLint x, GLint y) {
+     DBG(SHUT_LOGD("glVertexAttribI2i(%d, %d, %d)\n", index, x, y);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -359,7 +359,7 @@ VISIBLE void glVertexAttribI2i(GLuint index, GLint x, GLint y) {
+     glstate->vavalue[index][1] = (GLfloat)y;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI3i(GLuint index, GLint x, GLint y, GLint z) {
++VISIBLE void KW_EXPORT(glVertexAttribI3i)(GLuint index, GLint x, GLint y, GLint z) {
+     DBG(SHUT_LOGD("glVertexAttribI3i(%d, %d, %d, %d)\n", index, x, y, z);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -371,7 +371,7 @@ VISIBLE void glVertexAttribI3i(GLuint index, GLint x, GLint y, GLint z) {
+     glstate->vavalue[index][2] = (GLfloat)z;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w) {
++VISIBLE void KW_EXPORT(glVertexAttribI4i)(GLuint index, GLint x, GLint y, GLint z, GLint w) {
+     DBG(SHUT_LOGD("glVertexAttribI4i(%d, %d, %d, %d, %d)\n", index, x, y, z, w);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -384,7 +384,7 @@ VISIBLE void glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w)
+     glstate->vavalue[index][3] = (GLfloat)w;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI1ui(GLuint index, GLuint x) {
++VISIBLE void KW_EXPORT(glVertexAttribI1ui)(GLuint index, GLuint x) {
+     DBG(SHUT_LOGD("glVertexAttribI1ui(%d, %u)\n", index, x);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -394,7 +394,7 @@ VISIBLE void glVertexAttribI1ui(GLuint index, GLuint x) {
+     glstate->vavalue[index][0] = (GLfloat)x;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI2ui(GLuint index, GLuint x, GLuint y) {
++VISIBLE void KW_EXPORT(glVertexAttribI2ui)(GLuint index, GLuint x, GLuint y) {
+     DBG(SHUT_LOGD("glVertexAttribI2ui(%d, %u, %u)\n", index, x, y);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -405,7 +405,7 @@ VISIBLE void glVertexAttribI2ui(GLuint index, GLuint x, GLuint y) {
+     glstate->vavalue[index][1] = (GLfloat)y;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI3ui(GLuint index, GLuint x, GLuint y, GLuint z) {
++VISIBLE void KW_EXPORT(glVertexAttribI3ui)(GLuint index, GLuint x, GLuint y, GLuint z) {
+     DBG(SHUT_LOGD("glVertexAttribI3ui(%d, %u, %u, %u)\n", index, x, y, z);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -417,7 +417,7 @@ VISIBLE void glVertexAttribI3ui(GLuint index, GLuint x, GLuint y, GLuint z) {
+     glstate->vavalue[index][2] = (GLfloat)z;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w) {
++VISIBLE void KW_EXPORT(glVertexAttribI4ui)(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w) {
+     DBG(SHUT_LOGD("glVertexAttribI4ui(%d, %u, %u, %u, %u)\n", index, x, y, z, w);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -430,7 +430,7 @@ VISIBLE void glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z, GLui
+     glstate->vavalue[index][3] = (GLfloat)w;
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI1iv(GLuint index, const GLint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI1iv)(GLuint index, const GLint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI1iv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -440,7 +440,7 @@ VISIBLE void glVertexAttribI1iv(GLuint index, const GLint* v) {
+     glstate->vavalue[index][0] = (GLfloat)v[0];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI2iv(GLuint index, const GLint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI2iv)(GLuint index, const GLint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI2iv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -451,7 +451,7 @@ VISIBLE void glVertexAttribI2iv(GLuint index, const GLint* v) {
+     glstate->vavalue[index][1] = (GLfloat)v[1];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI3iv(GLuint index, const GLint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI3iv)(GLuint index, const GLint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI3iv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -463,7 +463,7 @@ VISIBLE void glVertexAttribI3iv(GLuint index, const GLint* v) {
+     glstate->vavalue[index][2] = (GLfloat)v[2];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI4iv(GLuint index, const GLint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI4iv)(GLuint index, const GLint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI4iv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -476,7 +476,7 @@ VISIBLE void glVertexAttribI4iv(GLuint index, const GLint* v) {
+     glstate->vavalue[index][3] = (GLfloat)v[3];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI1uiv(GLuint index, const GLuint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI1uiv)(GLuint index, const GLuint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI1uiv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -486,7 +486,7 @@ VISIBLE void glVertexAttribI1uiv(GLuint index, const GLuint* v) {
+     glstate->vavalue[index][0] = (GLfloat)v[0];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI2uiv(GLuint index, const GLuint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI2uiv)(GLuint index, const GLuint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI2uiv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -497,7 +497,7 @@ VISIBLE void glVertexAttribI2uiv(GLuint index, const GLuint* v) {
+     glstate->vavalue[index][1] = (GLfloat)v[1];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI3uiv(GLuint index, const GLuint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI3uiv)(GLuint index, const GLuint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI3uiv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -509,7 +509,7 @@ VISIBLE void glVertexAttribI3uiv(GLuint index, const GLuint* v) {
+     glstate->vavalue[index][2] = (GLfloat)v[2];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribI4uiv(GLuint index, const GLuint* v) {
++VISIBLE void KW_EXPORT(glVertexAttribI4uiv)(GLuint index, const GLuint* v) {
+     DBG(SHUT_LOGD("glVertexAttribI4uiv(%d, %p)\n", index, v);)
+         FLUSH_BEGINEND;
+     if (index < 0 || index >= hardext.maxvattrib) {
+@@ -522,7 +522,7 @@ VISIBLE void glVertexAttribI4uiv(GLuint index, const GLuint* v) {
+     glstate->vavalue[index][3] = (GLfloat)v[3];
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
++VISIBLE void KW_EXPORT(glVertexAttribP1ui)(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+     DBG(SHUT_LOGD("glVertexAttribP1ui(%d, %s, %d, %u)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -540,7 +540,7 @@ VISIBLE void glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized,
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP2ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
++VISIBLE void KW_EXPORT(glVertexAttribP2ui)(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+     DBG(SHUT_LOGD("glVertexAttribP2ui(%d, %s, %d, %u)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -558,7 +558,7 @@ VISIBLE void glVertexAttribP2ui(GLuint index, GLenum type, GLboolean normalized,
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP3ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
++VISIBLE void KW_EXPORT(glVertexAttribP3ui)(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+     DBG(SHUT_LOGD("glVertexAttribP3ui(%d, %s, %d, %u)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -576,7 +576,7 @@ VISIBLE void glVertexAttribP3ui(GLuint index, GLenum type, GLboolean normalized,
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP4ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
++VISIBLE void KW_EXPORT(glVertexAttribP4ui)(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+     DBG(SHUT_LOGD("glVertexAttribP4ui(%d, %s, %d, %u)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -594,7 +594,7 @@ VISIBLE void glVertexAttribP4ui(GLuint index, GLenum type, GLboolean normalized,
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP1uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
++VISIBLE void KW_EXPORT(glVertexAttribP1uiv)(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
+     DBG(SHUT_LOGD("glVertexAttribP1uiv(%d, %s, %d, %p)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -612,7 +612,7 @@ VISIBLE void glVertexAttribP1uiv(GLuint index, GLenum type, GLboolean normalized
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP2uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
++VISIBLE void KW_EXPORT(glVertexAttribP2uiv)(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
+     DBG(SHUT_LOGD("glVertexAttribP2uiv(%d, %s, %d, %p)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -630,7 +630,7 @@ VISIBLE void glVertexAttribP2uiv(GLuint index, GLenum type, GLboolean normalized
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP3uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
++VISIBLE void KW_EXPORT(glVertexAttribP3uiv)(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
+     DBG(SHUT_LOGD("glVertexAttribP3uiv(%d, %s, %d, %p)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -648,7 +648,7 @@ VISIBLE void glVertexAttribP3uiv(GLuint index, GLenum type, GLboolean normalized
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
++VISIBLE void KW_EXPORT(glVertexAttribP4uiv)(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) {
+     DBG(SHUT_LOGD("glVertexAttribP4uiv(%d, %s, %d, %p)\n", index, PrintEnum(type), normalized, value);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -666,7 +666,7 @@ VISIBLE void glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized
+     }
+     noerrorShim();
+ }
+-VISIBLE void glVertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer) {
++VISIBLE void KW_EXPORT(glVertexAttribLPointer)(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer) {
+     DBG(SHUT_LOGD("glVertexAttribLPointer(%d, %d, %s, %d, %p)\n", index, size, PrintEnum(type), stride, pointer);)
+         FLUSH_BEGINEND;
+     if (index >= hardext.maxvattrib) {
+@@ -682,7 +682,7 @@ VISIBLE void glVertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsiz
+     attrib->normalized = 0;
+     noerrorShim();
+ }
+-VISIBLE void glGetVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params) {
++VISIBLE void KW_EXPORT(glGetVertexAttribLdv)(GLuint index, GLenum pname, GLdouble* params) {
+     DBG(SHUT_LOGD("glGetVertexAttribLdv(%d, %s, %p)\n", index, PrintEnum(pname), params);)
+         if (index >= hardext.maxvattrib) {
+             errorShim(GL_INVALID_VALUE);
+@@ -708,7 +708,7 @@ VISIBLE void glGetVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params)
+     }
+     noerrorShim();
+ }
+-VISIBLE void glGetVertexAttribIiv(GLuint index, GLenum pname, GLint* params) {
++VISIBLE void KW_EXPORT(glGetVertexAttribIiv)(GLuint index, GLenum pname, GLint* params) {
+     DBG(SHUT_LOGD("glGetVertexAttribIiv(%d, %s, %p)\n", index, PrintEnum(pname), params);)
+         if (index >= hardext.maxvattrib) {
+             errorShim(GL_INVALID_VALUE);
+@@ -734,7 +734,7 @@ VISIBLE void glGetVertexAttribIiv(GLuint index, GLenum pname, GLint* params) {
+     }
+     noerrorShim();
+ }
+-VISIBLE void glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint* params) {
++VISIBLE void KW_EXPORT(glGetVertexAttribIuiv)(GLuint index, GLenum pname, GLuint* params) {
+     DBG(SHUT_LOGD("glGetVertexAttribIuiv(%d, %s, %p)\n", index, PrintEnum(pname), params);)
+         if (index >= hardext.maxvattrib) {
+             errorShim(GL_INVALID_VALUE);
+diff --git a/src/gl/wrap/glesnative.cpp b/src/gl/wrap/glesnative.cpp
+index 13605f6..9f9967e 100644
+--- a/src/gl/wrap/glesnative.cpp
++++ b/src/gl/wrap/glesnative.cpp
+@@ -5,7 +5,16 @@
+ 
+ // #define DEBUG
+ 
+-#ifndef __APPLE__
++#ifdef __EMSCRIPTEN__
++/* On Emscripten the canonical symbol is renamed to krypton_<name> so it
++ * doesn't collide with emscripten's libGL; the ARB alias is renamed in lock-
++ * step and points at the renamed canonical (note KW_EXPORT_STR(name) inside
++ * the alias payload).
++ */
++#define NATIVE_FUNCTION_HEAD(type, name, ...)                                                                          \
++    extern "C" GLAPI GLAPIENTRY type KW_EXPORT(name##ARB)(__VA_ARGS__) __attribute__((alias(KW_EXPORT_STR(name))));    \
++    extern "C" GLAPI GLAPIENTRY type KW_EXPORT(name)(__VA_ARGS__) {
++#elif !defined(__APPLE__)
+ #define NATIVE_FUNCTION_HEAD(type, name, ...)                                                                          \
+     extern "C" GLAPI GLAPIENTRY type name##ARB(__VA_ARGS__) __attribute__((alias(#name)));                             \
+     extern "C" GLAPI GLAPIENTRY type name(__VA_ARGS__) {
+@@ -47,12 +56,18 @@ NATIVE_FUNCTION_END_NO_RETURN(void, glGetSynciv, sync, pname, bufSize, length, v
+ NATIVE_FUNCTION_HEAD(void, glDrawArraysIndirect, GLenum mode, const void* indirect)
+ NATIVE_FUNCTION_END_NO_RETURN(void, glDrawArraysIndirect, mode, indirect)
+ 
+-VISIBLE void glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber, GLuint index, const char* name) {
++// Force C linkage on the renamed canonicals. The GLES3 headers forward-declare
++// the un-prefixed names as `extern "C"`, but those declarations don't apply to
++// our krypton_* symbols, so without an explicit extern "C" here the C++
++// compiler would emit C++-mangled names and downstream proc-address lookups
++// (which go through gl_lookup.c's gl4es_ thunks) wouldn't find them.
++extern "C" {
++VISIBLE void KW_EXPORT(glBindFragDataLocationIndexed)(GLuint program, GLuint colorNumber, GLuint index, const char* name) {
+     LOAD_GLES3(glBindFragDataLocationIndexedEXT);
+     gles_glBindFragDataLocationIndexedEXT(program, colorNumber, index, name);
+ }
+ 
+-VISIBLE GLint glGetFragDataIndex(GLuint program, const char* name) {
++VISIBLE GLint KW_EXPORT(glGetFragDataIndex)(GLuint program, const char* name) {
+     LOAD_GLES3(glGetFragDataIndexEXT);
+     return gles_glGetFragDataIndexEXT(program, name);
+ }
+@@ -62,7 +77,8 @@ VISIBLE GLint glGetFragDataIndex(GLuint program, const char* name) {
+ //     gles_glBindFragDataLocationEXT(program, colorNumber, name);
+ // }
+ 
+-VISIBLE GLint glGetProgramResourceLocationIndex(GLuint program, GLenum programInterface, const char* name) {
++VISIBLE GLint KW_EXPORT(glGetProgramResourceLocationIndex)(GLuint program, GLenum programInterface, const char* name) {
+     LOAD_GLES3(glGetProgramResourceLocationIndexEXT);
+     return gles_glGetProgramResourceLocationIndexEXT(program, programInterface, name);
+ }
++} // extern "C"
