@@ -138,6 +138,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,178 @@ def _find_nm(hint: str | None) -> str:
     raise FileNotFoundError(
         "No nm tool found.  Install llvm-nm or pass --nm /path/to/nm."
     )
+
+
+def _find_tool(hint: str | None, candidates: list[str]) -> str | None:
+    """Locate one of several tool binaries.  Returns None if none are found."""
+    if hint:
+        found = shutil.which(hint)
+        if found:
+            return found
+    for name in candidates:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+# ---------------------------------------------------------------------------
+# WASM signature extraction
+# ---------------------------------------------------------------------------
+
+
+# Map WASM value types to portable C scalar types. We pick types whose wasm32
+# ABI lowering matches the type byte exactly. The function signature emitted
+# into statics.c is consumed by clang/wasm-ld; what matters for call_indirect
+# is the wasm-level shape, not the C-level type name.
+_WASM_TYPE_TO_C: dict[str, str] = {
+    "i32": "int",
+    "i64": "long long",
+    "f32": "float",
+    "f64": "double",
+}
+
+
+def _wasm_decl(ret: str, params: list[str], name: str) -> str | None:
+    """Build a C declaration from a parsed WASM signature.  Returns None if any
+    type is unsupported (vector, reference types, etc.)."""
+    c_ret = "void" if ret in ("", "nil") else _WASM_TYPE_TO_C.get(ret)
+    if c_ret is None:
+        return None
+    if not params:
+        c_params = "void"
+    else:
+        c_params_list = []
+        for i, p in enumerate(params):
+            cp = _WASM_TYPE_TO_C.get(p)
+            if cp is None:
+                return None
+            c_params_list.append(f"{cp} a{i}")
+        c_params = ", ".join(c_params_list)
+    return f"{c_ret} {name}({c_params})"
+
+
+# Match a Type[N] entry: "type[N] (i32, i32) -> i32" or "type[N] () -> nil"
+_TYPE_RE = re.compile(
+    r"\s*-\s+type\[(\d+)\]\s+\(([^)]*)\)\s+->\s+(\S+)"
+)
+# Match a defined Function[N] entry: "func[X] sig=N <name>"
+_FUNC_RE = re.compile(
+    r"\s*-\s+func\[(\d+)\]\s+sig=(\d+)\s+<([^>]+)>"
+)
+
+
+def _parse_wasm_objdump(text: str) -> dict[str, str]:
+    """Parse `wasm-objdump -x` output for one module. Returns {symbol: c_decl}
+    for every locally-defined function whose signature we can lower to C."""
+    types: dict[int, tuple[list[str], str]] = {}
+    funcs: list[tuple[int, str]] = []  # (sig_idx, name)
+    section: str | None = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        # Section markers look like "Type[N]:", "Import[N]:", "Function[N]:" etc.
+        if re.match(r"^[A-Za-z]+\[\d+\]:$", line):
+            section = line.split("[")[0]
+            continue
+        if section == "Type":
+            m = _TYPE_RE.match(line)
+            if m:
+                idx = int(m.group(1))
+                params_str = m.group(2).strip()
+                params = [p.strip() for p in params_str.split(",")] if params_str else []
+                ret = m.group(3).strip()
+                types[idx] = (params, ret)
+        elif section == "Function":
+            m = _FUNC_RE.match(line)
+            if m:
+                sig_idx = int(m.group(2))
+                name = m.group(3).strip()
+                # Skip imports of the form "env.foo" — Function[] section in a
+                # relocatable .o lists only locally-defined functions, but defend
+                # against unexpected formats from older toolchains.
+                if "." in name and name.startswith("env."):
+                    continue
+                funcs.append((sig_idx, name))
+
+    out: dict[str, str] = {}
+    for sig_idx, name in funcs:
+        sig = types.get(sig_idx)
+        if not sig:
+            continue
+        params, ret = sig
+        decl = _wasm_decl(ret, params, name)
+        if decl is not None:
+            out[name] = decl
+    return out
+
+
+def _get_wasm_signatures(
+    archive: str,
+    objdump_exe: str,
+    ar_exe: str,
+) -> dict[str, str]:
+    """Extract C declarations for every locally-defined function in archive.
+
+    Extracts each .o member of the archive (via llvm-ar/ar) into a tempdir,
+    runs wasm-objdump -x on each, and aggregates parsed signatures.
+    """
+    sigs: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="genstaticlibs_wasm_") as tmp:
+        # List members; output one per line.
+        try:
+            listing = subprocess.run(
+                [ar_exe, "t", archive],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        except subprocess.CalledProcessError as exc:
+            print(
+                f"warn: cannot list {archive!r} with {ar_exe!r} "
+                f"(exit {exc.returncode}); skipping WASM signature extraction",
+                file=sys.stderr,
+            )
+            return sigs
+
+        members = [m.strip() for m in listing.splitlines() if m.strip()]
+        # Extract everything in one shot; members are written into cwd
+        if members:
+            try:
+                subprocess.run(
+                    [ar_exe, "x", os.path.abspath(archive)],
+                    cwd=tmp,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                print(
+                    f"warn: cannot extract {archive!r}: {exc.stderr}",
+                    file=sys.stderr,
+                )
+                return sigs
+
+        for member in members:
+            obj_path = os.path.join(tmp, member)
+            if not os.path.isfile(obj_path):
+                continue
+            try:
+                dump = subprocess.run(
+                    [objdump_exe, "-x", obj_path],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            except subprocess.CalledProcessError:
+                # Non-WASM members in a mixed archive (rare) — skip them.
+                continue
+            for name, decl in _parse_wasm_objdump(dump).items():
+                # First definition wins; one .a shouldn't redefine the same
+                # symbol but tolerate gracefully if it does.
+                sigs.setdefault(name, decl)
+    return sigs
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +690,30 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--wasm-objdump",
+        metavar="TOOL",
+        default=None,
+        help=(
+            "wasm-objdump (wabt) or llvm-objdump binary used to extract per-"
+            "function WASM signatures from each archive. When found, signatures "
+            "are emitted as proper C prototypes instead of K&R `extern void f();` "
+            "— which is required for call_indirect to dispatch correctly. Pass "
+            "--no-wasm-objdump to disable. Default: auto-detect."
+        ),
+    )
+    parser.add_argument(
+        "--no-wasm-objdump",
+        action="store_true",
+        help="Skip WASM signature extraction even if a tool is available.",
+    )
+    parser.add_argument(
+        "--ar",
+        metavar="TOOL",
+        default=None,
+        help="ar binary used to extract .o members from archives for WASM "
+             "signature extraction. Default: auto-detect llvm-ar or ar.",
+    )
+    parser.add_argument(
         "--add-symbol",
         action="append",
         dest="add_symbols",
@@ -715,8 +912,40 @@ def main() -> int:
         return 1
     print(f"Using nm: {nm_exe}", file=sys.stderr)
 
+    # Locate wasm-objdump (or llvm-objdump fallback) and ar for WASM signature
+    # extraction. Without these we emit K&R `extern void f();` which silently
+    # mismatches call_indirect signatures in wasm — only viable for data
+    # symbols and rarely-called functions.
+    wasm_objdump_exe: str | None = None
+    wasm_ar_exe: str | None = None
+    if not args.no_wasm_objdump:
+        wasm_objdump_exe = _find_tool(
+            args.wasm_objdump, ["wasm-objdump", "llvm-objdump"]
+        )
+        wasm_ar_exe = _find_tool(args.ar, ["llvm-ar", "ar"])
+        if wasm_objdump_exe and wasm_ar_exe:
+            print(
+                f"Using wasm-objdump: {wasm_objdump_exe} (ar: {wasm_ar_exe}) "
+                f"for signature extraction",
+                file=sys.stderr,
+            )
+        else:
+            missing = []
+            if not wasm_objdump_exe:
+                missing.append("wasm-objdump/llvm-objdump")
+            if not wasm_ar_exe:
+                missing.append("llvm-ar/ar")
+            print(
+                f"warning: skipping WASM signature extraction; missing tools: "
+                f"{', '.join(missing)} (extern decls will be K&R, which silently "
+                f"breaks call_indirect under wasm legalization)",
+                file=sys.stderr,
+            )
+            wasm_objdump_exe = None
+
     # Extract symbols from each archive
     libraries: list[tuple[str, list[tuple[str, str]]]] = []
+    auto_signatures: dict[str, str] = {}  # symbol -> declaration from wasm-objdump
     total_syms = 0
     for fake_path, archive in pairs:
         if not os.path.exists(archive):
@@ -731,6 +960,16 @@ def main() -> int:
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+
+        if wasm_objdump_exe and wasm_ar_exe:
+            extracted = _get_wasm_signatures(archive, wasm_objdump_exe, wasm_ar_exe)
+            for sym, decl in extracted.items():
+                auto_signatures.setdefault(sym, decl)
+            print(
+                f"    extracted {len(extracted)} WASM signature"
+                f"{'s' if len(extracted) != 1 else ''} from {archive}",
+                file=sys.stderr,
+            )
 
         # Deduplicate symbols within a single library (should be rare)
         seen: set[str] = set()
@@ -786,11 +1025,14 @@ def main() -> int:
 
     # Flatten manual_symbols into a single name → declaration map for
     # generate(). First non-None signature wins if a symbol appears in
-    # multiple libraries (rare).
+    # multiple libraries (rare). Manual signatures override auto-extracted
+    # ones (--add-symbol / --symbol-list lets the user fix up odd cases).
     signatures: dict[str, str] = {}
+    for sym, decl in auto_signatures.items():
+        signatures[sym] = decl
     for sym_map in manual_symbols.values():
         for sym, sig in sym_map.items():
-            if sig is not None and sym not in signatures:
+            if sig is not None:
                 signatures[sym] = sig
 
     source = generate(

@@ -200,7 +200,7 @@ index f54199cef..e2b532371 100644
              }
  
 diff --git a/src/IKVM.Runtime/JNI/JNIEnv.cs b/src/IKVM.Runtime/JNI/JNIEnv.cs
-index 87f4359c1..efb3c273f 100644
+index 87f4359c1..251e32bf1 100644
 --- a/src/IKVM.Runtime/JNI/JNIEnv.cs
 +++ b/src/IKVM.Runtime/JNI/JNIEnv.cs
 @@ -1,4 +1,4 @@
@@ -328,7 +328,22 @@ index 87f4359c1..efb3c273f 100644
          internal static void ExceptionDescribe(JNIEnv* pEnv)
          {
              try
-@@ -425,6 +441,7 @@ internal static void ExceptionDescribe(JNIEnv* pEnv)
+@@ -412,12 +428,14 @@ internal static void ExceptionDescribe(JNIEnv* pEnv)
+                     catch (Exception ex)
+                     {
+                         Debug.Assert(false, ex.ToString());
++						Console.WriteLine($"[IKVM internal] ExceptionDescribe printStackTrace failed {ex} {x}");
+                     }
+                 }
+             }
+             catch (Exception e)
+             {
+                 JVM.SetPendingException(e);
++				Console.WriteLine($"[IKVM internal] ExceptionDescribe failed {e}");
+             }
+         }
+ 
+@@ -425,6 +443,7 @@ internal static void ExceptionDescribe(JNIEnv* pEnv)
          /// Implements the JNI 'ExceptionClear' function.
          /// </summary>
          /// <param name="pEnv"></param>
@@ -336,7 +351,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ExceptionClear(JNIEnv* pEnv)
          {
              try
-@@ -442,6 +459,7 @@ internal static void ExceptionClear(JNIEnv* pEnv)
+@@ -442,6 +461,7 @@ internal static void ExceptionClear(JNIEnv* pEnv)
          /// </summary>
          /// <param name="pEnv"></param>
          /// <param name="msg"></param>
@@ -344,7 +359,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void FatalError(JNIEnv* pEnv, byte* msg)
          {
              Console.Error.WriteLine("FATAL ERROR in native method: {0}", msg == null ? "(null)" : DecodeMUTF8Argument(msg, nameof(msg)));
-@@ -455,6 +473,7 @@ internal static void FatalError(JNIEnv* pEnv, byte* msg)
+@@ -455,6 +475,7 @@ internal static void FatalError(JNIEnv* pEnv, byte* msg)
          /// <param name="pEnv"></param>
          /// <param name="capacity"></param>
          /// <returns></returns>
@@ -352,7 +367,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint PushLocalFrame(JNIEnv* pEnv, jint capacity)
          {
              try
-@@ -474,6 +493,7 @@ internal static jint PushLocalFrame(JNIEnv* pEnv, jint capacity)
+@@ -474,6 +495,7 @@ internal static jint PushLocalFrame(JNIEnv* pEnv, jint capacity)
          /// <param name="pEnv"></param>
          /// <param name="result"></param>
          /// <returns></returns>
@@ -360,7 +375,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint PopLocalFrame(JNIEnv* pEnv, nint result)
          {
              try
-@@ -494,6 +514,7 @@ internal static nint PopLocalFrame(JNIEnv* pEnv, nint result)
+@@ -494,6 +516,7 @@ internal static nint PopLocalFrame(JNIEnv* pEnv, nint result)
          /// <param name="pEnv"></param>
          /// <param name="obj"></param>
          /// <returns></returns>
@@ -368,7 +383,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewGlobalRef(JNIEnv* pEnv, nint obj)
          {
              try
-@@ -513,6 +534,7 @@ internal static nint NewGlobalRef(JNIEnv* pEnv, nint obj)
+@@ -513,6 +536,7 @@ internal static nint NewGlobalRef(JNIEnv* pEnv, nint obj)
          /// </summary>
          /// <param name="pEnv"></param>
          /// <param name="obj"></param>
@@ -376,7 +391,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void DeleteGlobalRef(JNIEnv* pEnv, nint obj)
          {
              try
-@@ -537,6 +559,7 @@ internal static void DeleteGlobalRef(JNIEnv* pEnv, nint obj)
+@@ -537,6 +561,7 @@ internal static void DeleteGlobalRef(JNIEnv* pEnv, nint obj)
          /// </summary>
          /// <param name="pEnv"></param>
          /// <param name="obj"></param>
@@ -384,7 +399,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void DeleteLocalRef(JNIEnv* pEnv, nint obj)
          {
              try
-@@ -556,6 +579,7 @@ internal static void DeleteLocalRef(JNIEnv* pEnv, nint obj)
+@@ -556,6 +581,7 @@ internal static void DeleteLocalRef(JNIEnv* pEnv, nint obj)
          /// <param name="obj1"></param>
          /// <param name="obj2"></param>
          /// <returns></returns>
@@ -392,7 +407,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean IsSameObject(JNIEnv* pEnv, nint obj1, nint obj2)
          {
              try
-@@ -575,6 +599,7 @@ internal static jboolean IsSameObject(JNIEnv* pEnv, nint obj1, nint obj2)
+@@ -575,6 +601,7 @@ internal static jboolean IsSameObject(JNIEnv* pEnv, nint obj1, nint obj2)
          /// <param name="pEnv"></param>
          /// <param name="obj"></param>
          /// <returns></returns>
@@ -400,7 +415,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewLocalRef(JNIEnv* pEnv, nint obj)
          {
              try
-@@ -594,6 +619,7 @@ internal static nint NewLocalRef(JNIEnv* pEnv, nint obj)
+@@ -594,6 +621,7 @@ internal static nint NewLocalRef(JNIEnv* pEnv, nint obj)
          /// <param name="pEnv"></param>
          /// <param name="capacity"></param>
          /// <returns></returns>
@@ -408,7 +423,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint EnsureLocalCapacity(JNIEnv* pEnv, jint capacity)
          {
              // since we can dynamically grow the local ref table, we'll just return success for any number
-@@ -606,6 +632,7 @@ internal static jint EnsureLocalCapacity(JNIEnv* pEnv, jint capacity)
+@@ -606,6 +634,7 @@ internal static jint EnsureLocalCapacity(JNIEnv* pEnv, jint capacity)
          /// <param name="pEnv"></param>
          /// <param name="clazz"></param>
          /// <returns></returns>
@@ -416,7 +431,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint AllocObject(JNIEnv* pEnv, nint clazz)
          {
              try
-@@ -749,6 +776,7 @@ static object InvokeNonVirtual(JNIEnvContext env, RuntimeJavaMethod mw, object o
+@@ -749,6 +778,7 @@ static object InvokeNonVirtual(JNIEnvContext env, RuntimeJavaMethod mw, object o
              }
          }
  
@@ -424,7 +439,7 @@ index 87f4359c1..efb3c273f 100644
          public static nint NewObjectA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -778,6 +806,7 @@ public static nint NewObjectA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* a
+@@ -778,6 +808,7 @@ public static nint NewObjectA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* a
              }
          }
  
@@ -432,7 +447,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint GetObjectClass(JNIEnv* pEnv, nint obj)
          {
              try
-@@ -791,6 +820,7 @@ internal static nint GetObjectClass(JNIEnv* pEnv, nint obj)
+@@ -791,6 +822,7 @@ internal static nint GetObjectClass(JNIEnv* pEnv, nint obj)
              }
          }
  
@@ -440,7 +455,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean IsInstanceOf(JNIEnv* pEnv, nint obj, nint clazz)
          {
              try
-@@ -897,6 +927,7 @@ static nint FindMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig, bool i
+@@ -897,6 +929,7 @@ static nint FindMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig, bool i
              }
          }
  
@@ -448,7 +463,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint GetMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig)
          {
              try
-@@ -910,6 +941,7 @@ internal static nint GetMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig
+@@ -910,6 +943,7 @@ internal static nint GetMethodID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig
              }
          }
  
@@ -456,7 +471,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint CallObjectMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -923,6 +955,7 @@ internal static nint CallObjectMethodA(JNIEnv* pEnv, nint obj, nint methodID, JV
+@@ -923,6 +957,7 @@ internal static nint CallObjectMethodA(JNIEnv* pEnv, nint obj, nint methodID, JV
              }
          }
  
@@ -464,7 +479,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean CallBooleanMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -940,6 +973,7 @@ internal static jboolean CallBooleanMethodA(JNIEnv* pEnv, nint obj, nint methodI
+@@ -940,6 +975,7 @@ internal static jboolean CallBooleanMethodA(JNIEnv* pEnv, nint obj, nint methodI
              }
          }
  
@@ -472,7 +487,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jbyte CallByteMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -957,6 +991,7 @@ internal static jbyte CallByteMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
+@@ -957,6 +993,7 @@ internal static jbyte CallByteMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
              }
          }
  
@@ -480,7 +495,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar CallCharMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -974,6 +1009,7 @@ internal static jchar CallCharMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
+@@ -974,6 +1011,7 @@ internal static jchar CallCharMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
              }
          }
  
@@ -488,7 +503,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jshort CallShortMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -991,6 +1027,7 @@ internal static jshort CallShortMethodA(JNIEnv* pEnv, nint obj, nint methodID, J
+@@ -991,6 +1029,7 @@ internal static jshort CallShortMethodA(JNIEnv* pEnv, nint obj, nint methodID, J
              }
          }
  
@@ -496,7 +511,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint CallIntMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -1008,6 +1045,7 @@ internal static jint CallIntMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValu
+@@ -1008,6 +1047,7 @@ internal static jint CallIntMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValu
              }
          }
  
@@ -504,7 +519,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jlong CallLongMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -1025,6 +1063,7 @@ internal static jlong CallLongMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
+@@ -1025,6 +1065,7 @@ internal static jlong CallLongMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVa
              }
          }
  
@@ -512,7 +527,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jfloat CallFloatMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -1042,6 +1081,7 @@ internal static jfloat CallFloatMethodA(JNIEnv* pEnv, nint obj, nint methodID, J
+@@ -1042,6 +1083,7 @@ internal static jfloat CallFloatMethodA(JNIEnv* pEnv, nint obj, nint methodID, J
              }
          }
  
@@ -520,7 +535,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jdouble CallDoubleMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -1059,6 +1099,7 @@ internal static jdouble CallDoubleMethodA(JNIEnv* pEnv, nint obj, nint methodID,
+@@ -1059,6 +1101,7 @@ internal static jdouble CallDoubleMethodA(JNIEnv* pEnv, nint obj, nint methodID,
              }
          }
  
@@ -528,7 +543,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void CallVoidMethodA(JNIEnv* pEnv, nint obj, nint methodID, JValue* args)
          {
              try
-@@ -1071,6 +1112,7 @@ internal static void CallVoidMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVal
+@@ -1071,6 +1114,7 @@ internal static void CallVoidMethodA(JNIEnv* pEnv, nint obj, nint methodID, JVal
              }
          }
  
@@ -536,7 +551,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint CallNonvirtualObjectMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1084,6 +1126,7 @@ internal static nint CallNonvirtualObjectMethodA(JNIEnv* pEnv, nint obj, nint cl
+@@ -1084,6 +1128,7 @@ internal static nint CallNonvirtualObjectMethodA(JNIEnv* pEnv, nint obj, nint cl
              }
          }
  
@@ -544,7 +559,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean CallNonvirtualBooleanMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1101,6 +1144,7 @@ internal static jboolean CallNonvirtualBooleanMethodA(JNIEnv* pEnv, nint obj, ni
+@@ -1101,6 +1146,7 @@ internal static jboolean CallNonvirtualBooleanMethodA(JNIEnv* pEnv, nint obj, ni
              }
          }
  
@@ -552,7 +567,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jbyte CallNonvirtualByteMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1118,6 +1162,7 @@ internal static jbyte CallNonvirtualByteMethodA(JNIEnv* pEnv, nint obj, nint cla
+@@ -1118,6 +1164,7 @@ internal static jbyte CallNonvirtualByteMethodA(JNIEnv* pEnv, nint obj, nint cla
              }
          }
  
@@ -560,7 +575,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar CallNonvirtualCharMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1135,6 +1180,7 @@ internal static jchar CallNonvirtualCharMethodA(JNIEnv* pEnv, nint obj, nint cla
+@@ -1135,6 +1182,7 @@ internal static jchar CallNonvirtualCharMethodA(JNIEnv* pEnv, nint obj, nint cla
              }
          }
  
@@ -568,7 +583,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jshort CallNonvirtualShortMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1152,6 +1198,7 @@ internal static jshort CallNonvirtualShortMethodA(JNIEnv* pEnv, nint obj, nint c
+@@ -1152,6 +1200,7 @@ internal static jshort CallNonvirtualShortMethodA(JNIEnv* pEnv, nint obj, nint c
              }
          }
  
@@ -576,7 +591,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint CallNonvirtualIntMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1169,6 +1216,7 @@ internal static jint CallNonvirtualIntMethodA(JNIEnv* pEnv, nint obj, nint clazz
+@@ -1169,6 +1218,7 @@ internal static jint CallNonvirtualIntMethodA(JNIEnv* pEnv, nint obj, nint clazz
              }
          }
  
@@ -584,7 +599,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jlong CallNonvirtualLongMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1186,6 +1234,7 @@ internal static jlong CallNonvirtualLongMethodA(JNIEnv* pEnv, nint obj, nint cla
+@@ -1186,6 +1236,7 @@ internal static jlong CallNonvirtualLongMethodA(JNIEnv* pEnv, nint obj, nint cla
              }
          }
  
@@ -592,7 +607,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jfloat CallNonvirtualFloatMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1203,6 +1252,7 @@ internal static jfloat CallNonvirtualFloatMethodA(JNIEnv* pEnv, nint obj, nint c
+@@ -1203,6 +1254,7 @@ internal static jfloat CallNonvirtualFloatMethodA(JNIEnv* pEnv, nint obj, nint c
              }
          }
  
@@ -600,7 +615,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jdouble CallNonvirtualDoubleMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1220,6 +1270,7 @@ internal static jdouble CallNonvirtualDoubleMethodA(JNIEnv* pEnv, nint obj, nint
+@@ -1220,6 +1272,7 @@ internal static jdouble CallNonvirtualDoubleMethodA(JNIEnv* pEnv, nint obj, nint
              }
          }
  
@@ -608,7 +623,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void CallNonvirtualVoidMethodA(JNIEnv* pEnv, nint obj, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1274,6 +1325,7 @@ static nint FindFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig, bool is
+@@ -1274,6 +1327,7 @@ static nint FindFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig, bool is
              }
          }
  
@@ -616,7 +631,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint GetFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig)
          {
              try
-@@ -1292,6 +1344,7 @@ static RuntimeJavaField GetFieldWrapper(nint cookie)
+@@ -1292,6 +1346,7 @@ static RuntimeJavaField GetFieldWrapper(nint cookie)
              return RuntimeJavaField.FromCookie(cookie);
          }
  
@@ -624,7 +639,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint GetObjectField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1309,6 +1362,7 @@ internal static nint GetObjectField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1309,6 +1364,7 @@ internal static nint GetObjectField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -632,7 +647,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean GetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1326,6 +1380,7 @@ internal static jboolean GetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1326,6 +1382,7 @@ internal static jboolean GetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -640,7 +655,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jbyte GetByteField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1343,6 +1398,7 @@ internal static jbyte GetByteField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1343,6 +1400,7 @@ internal static jbyte GetByteField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -648,7 +663,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar GetCharField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1360,6 +1416,7 @@ internal static jchar GetCharField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1360,6 +1418,7 @@ internal static jchar GetCharField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -656,7 +671,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jshort GetShortField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1377,6 +1434,7 @@ internal static jshort GetShortField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1377,6 +1436,7 @@ internal static jshort GetShortField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -664,7 +679,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint GetIntField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1394,6 +1452,7 @@ internal static jint GetIntField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1394,6 +1454,7 @@ internal static jint GetIntField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -672,7 +687,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jlong GetLongField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1411,6 +1470,7 @@ internal static jlong GetLongField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1411,6 +1472,7 @@ internal static jlong GetLongField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -680,7 +695,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jfloat GetFloatField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1428,6 +1488,7 @@ internal static jfloat GetFloatField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1428,6 +1490,7 @@ internal static jfloat GetFloatField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -688,7 +703,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jdouble GetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1445,6 +1506,7 @@ internal static jdouble GetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID)
+@@ -1445,6 +1508,7 @@ internal static jdouble GetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID)
  #endif
          }
  
@@ -696,7 +711,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetObjectField(JNIEnv* pEnv, nint obj, nint fieldID, nint val)
          {
  #if FIRST_PASS
-@@ -1461,6 +1523,7 @@ internal static void SetObjectField(JNIEnv* pEnv, nint obj, nint fieldID, nint v
+@@ -1461,6 +1525,7 @@ internal static void SetObjectField(JNIEnv* pEnv, nint obj, nint fieldID, nint v
  #endif
          }
  
@@ -704,7 +719,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID, jboolean val)
          {
  #if FIRST_PASS
-@@ -1477,6 +1540,7 @@ internal static void SetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID, jbool
+@@ -1477,6 +1542,7 @@ internal static void SetBooleanField(JNIEnv* pEnv, nint obj, nint fieldID, jbool
  #endif
          }
  
@@ -712,7 +727,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetByteField(JNIEnv* pEnv, nint obj, nint fieldID, jbyte val)
          {
  #if FIRST_PASS
-@@ -1493,6 +1557,7 @@ internal static void SetByteField(JNIEnv* pEnv, nint obj, nint fieldID, jbyte va
+@@ -1493,6 +1559,7 @@ internal static void SetByteField(JNIEnv* pEnv, nint obj, nint fieldID, jbyte va
  #endif
          }
  
@@ -720,7 +735,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetCharField(JNIEnv* pEnv, nint obj, nint fieldID, jchar val)
          {
  #if FIRST_PASS
-@@ -1509,6 +1574,7 @@ internal static void SetCharField(JNIEnv* pEnv, nint obj, nint fieldID, jchar va
+@@ -1509,6 +1576,7 @@ internal static void SetCharField(JNIEnv* pEnv, nint obj, nint fieldID, jchar va
  #endif
          }
  
@@ -728,7 +743,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetShortField(JNIEnv* pEnv, nint obj, nint fieldID, jshort val)
          {
  #if FIRST_PASS
-@@ -1525,6 +1591,7 @@ internal static void SetShortField(JNIEnv* pEnv, nint obj, nint fieldID, jshort
+@@ -1525,6 +1593,7 @@ internal static void SetShortField(JNIEnv* pEnv, nint obj, nint fieldID, jshort
  #endif
          }
  
@@ -736,7 +751,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetIntField(JNIEnv* pEnv, nint obj, nint fieldID, jint val)
          {
  #if FIRST_PASS
-@@ -1541,6 +1608,7 @@ internal static void SetIntField(JNIEnv* pEnv, nint obj, nint fieldID, jint val)
+@@ -1541,6 +1610,7 @@ internal static void SetIntField(JNIEnv* pEnv, nint obj, nint fieldID, jint val)
  #endif
          }
  
@@ -744,7 +759,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetLongField(JNIEnv* pEnv, nint obj, nint fieldID, jlong val)
          {
  #if FIRST_PASS
-@@ -1557,6 +1625,7 @@ internal static void SetLongField(JNIEnv* pEnv, nint obj, nint fieldID, jlong va
+@@ -1557,6 +1627,7 @@ internal static void SetLongField(JNIEnv* pEnv, nint obj, nint fieldID, jlong va
  #endif
          }
  
@@ -752,7 +767,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetFloatField(JNIEnv* pEnv, nint obj, nint fieldID, jfloat val)
          {
  #if FIRST_PASS
-@@ -1573,6 +1642,7 @@ internal static void SetFloatField(JNIEnv* pEnv, nint obj, nint fieldID, jfloat
+@@ -1573,6 +1644,7 @@ internal static void SetFloatField(JNIEnv* pEnv, nint obj, nint fieldID, jfloat
  #endif
          }
  
@@ -760,7 +775,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID, jdouble val)
          {
  #if FIRST_PASS
-@@ -1589,11 +1659,13 @@ internal static void SetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID, jdoubl
+@@ -1589,11 +1661,13 @@ internal static void SetDoubleField(JNIEnv* pEnv, nint obj, nint fieldID, jdoubl
  #endif
          }
  
@@ -774,7 +789,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint CallStaticObjectMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1607,6 +1679,7 @@ internal static nint CallStaticObjectMethodA(JNIEnv* pEnv, nint clazz, nint meth
+@@ -1607,6 +1681,7 @@ internal static nint CallStaticObjectMethodA(JNIEnv* pEnv, nint clazz, nint meth
              }
          }
  
@@ -782,7 +797,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean CallStaticBooleanMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1621,6 +1694,7 @@ internal static jboolean CallStaticBooleanMethodA(JNIEnv* pEnv, nint clazz, nint
+@@ -1621,6 +1696,7 @@ internal static jboolean CallStaticBooleanMethodA(JNIEnv* pEnv, nint clazz, nint
              }
          }
  
@@ -790,7 +805,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jbyte CallStaticByteMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1635,6 +1709,7 @@ internal static jbyte CallStaticByteMethodA(JNIEnv* pEnv, nint clazz, nint metho
+@@ -1635,6 +1711,7 @@ internal static jbyte CallStaticByteMethodA(JNIEnv* pEnv, nint clazz, nint metho
              }
          }
  
@@ -798,7 +813,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar CallStaticCharMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1649,6 +1724,7 @@ internal static jchar CallStaticCharMethodA(JNIEnv* pEnv, nint clazz, nint metho
+@@ -1649,6 +1726,7 @@ internal static jchar CallStaticCharMethodA(JNIEnv* pEnv, nint clazz, nint metho
              }
          }
  
@@ -806,7 +821,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jshort CallStaticShortMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1663,6 +1739,7 @@ internal static jshort CallStaticShortMethodA(JNIEnv* pEnv, nint clazz, nint met
+@@ -1663,6 +1741,7 @@ internal static jshort CallStaticShortMethodA(JNIEnv* pEnv, nint clazz, nint met
              }
          }
  
@@ -814,7 +829,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint CallStaticIntMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1677,6 +1754,7 @@ internal static jint CallStaticIntMethodA(JNIEnv* pEnv, nint clazz, nint methodI
+@@ -1677,6 +1756,7 @@ internal static jint CallStaticIntMethodA(JNIEnv* pEnv, nint clazz, nint methodI
              }
          }
  
@@ -822,7 +837,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jlong CallStaticLongMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1691,6 +1769,7 @@ internal static jlong CallStaticLongMethodA(JNIEnv* pEnv, nint clazz, nint metho
+@@ -1691,6 +1771,7 @@ internal static jlong CallStaticLongMethodA(JNIEnv* pEnv, nint clazz, nint metho
              }
          }
  
@@ -830,7 +845,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jfloat CallStaticFloatMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1705,6 +1784,7 @@ internal static jfloat CallStaticFloatMethodA(JNIEnv* pEnv, nint clazz, nint met
+@@ -1705,6 +1786,7 @@ internal static jfloat CallStaticFloatMethodA(JNIEnv* pEnv, nint clazz, nint met
              }
          }
  
@@ -838,7 +853,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jdouble CallStaticDoubleMethodA(JNIEnv* pEnv, nint clazz, nint methodID, JValue* args)
          {
              try
-@@ -1719,6 +1799,7 @@ internal static jdouble CallStaticDoubleMethodA(JNIEnv* pEnv, nint clazz, nint m
+@@ -1719,6 +1801,7 @@ internal static jdouble CallStaticDoubleMethodA(JNIEnv* pEnv, nint clazz, nint m
              }
          }
  
@@ -846,7 +861,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void CallStaticVoidMethodA(JNIEnv* pEnv, nint cls, nint methodID, JValue* args)
          {
              try
-@@ -1731,6 +1812,7 @@ internal static void CallStaticVoidMethodA(JNIEnv* pEnv, nint cls, nint methodID
+@@ -1731,6 +1814,7 @@ internal static void CallStaticVoidMethodA(JNIEnv* pEnv, nint cls, nint methodID
              }
          }
  
@@ -854,7 +869,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint GetStaticFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte* sig)
          {
              try
-@@ -1744,6 +1826,7 @@ internal static nint GetStaticFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte
+@@ -1744,6 +1828,7 @@ internal static nint GetStaticFieldID(JNIEnv* pEnv, nint clazz, byte* name, byte
              }
          }
  
@@ -862,7 +877,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint GetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1761,6 +1844,7 @@ internal static nint GetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID
+@@ -1761,6 +1846,7 @@ internal static nint GetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID
  #endif
          }
  
@@ -870,7 +885,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean GetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1778,6 +1862,7 @@ internal static jboolean GetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fi
+@@ -1778,6 +1864,7 @@ internal static jboolean GetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fi
  #endif
          }
  
@@ -878,7 +893,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jbyte GetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1795,6 +1880,7 @@ internal static jbyte GetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID)
+@@ -1795,6 +1882,7 @@ internal static jbyte GetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID)
  #endif
          }
  
@@ -886,7 +901,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar GetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1812,6 +1898,7 @@ internal static jchar GetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID)
+@@ -1812,6 +1900,7 @@ internal static jchar GetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID)
  #endif
          }
  
@@ -894,7 +909,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jshort GetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1829,6 +1916,7 @@ internal static jshort GetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldI
+@@ -1829,6 +1918,7 @@ internal static jshort GetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldI
  #endif
          }
  
@@ -902,7 +917,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint GetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1846,6 +1934,7 @@ internal static jint GetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID)
+@@ -1846,6 +1936,7 @@ internal static jint GetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID)
  #endif
          }
  
@@ -910,7 +925,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jlong GetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1863,6 +1952,7 @@ internal static jlong GetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID)
+@@ -1863,6 +1954,7 @@ internal static jlong GetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID)
  #endif
          }
  
@@ -918,7 +933,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jfloat GetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1880,6 +1970,7 @@ internal static jfloat GetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldI
+@@ -1880,6 +1972,7 @@ internal static jfloat GetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldI
  #endif
          }
  
@@ -926,7 +941,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jdouble GetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fieldID)
          {
  #if FIRST_PASS
-@@ -1897,6 +1988,7 @@ internal static jdouble GetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fiel
+@@ -1897,6 +1990,7 @@ internal static jdouble GetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fiel
  #endif
          }
  
@@ -934,7 +949,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID, nint val)
          {
  #if FIRST_PASS
-@@ -1913,6 +2005,7 @@ internal static void SetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID
+@@ -1913,6 +2007,7 @@ internal static void SetStaticObjectField(JNIEnv* pEnv, nint clazz, nint fieldID
  #endif
          }
  
@@ -942,7 +957,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fieldID, jboolean val)
          {
  #if FIRST_PASS
-@@ -1929,6 +2022,7 @@ internal static void SetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fieldI
+@@ -1929,6 +2024,7 @@ internal static void SetStaticBooleanField(JNIEnv* pEnv, nint clazz, nint fieldI
  #endif
          }
  
@@ -950,7 +965,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID, jbyte val)
          {
  #if FIRST_PASS
-@@ -1945,6 +2039,7 @@ internal static void SetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID,
+@@ -1945,6 +2041,7 @@ internal static void SetStaticByteField(JNIEnv* pEnv, nint clazz, nint fieldID,
  #endif
          }
  
@@ -958,7 +973,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID, jchar val)
          {
  #if FIRST_PASS
-@@ -1961,6 +2056,7 @@ internal static void SetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID,
+@@ -1961,6 +2058,7 @@ internal static void SetStaticCharField(JNIEnv* pEnv, nint clazz, nint fieldID,
  #endif
          }
  
@@ -966,7 +981,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldID, jshort val)
          {
  #if FIRST_PASS
-@@ -1977,6 +2073,7 @@ internal static void SetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldID,
+@@ -1977,6 +2075,7 @@ internal static void SetStaticShortField(JNIEnv* pEnv, nint clazz, nint fieldID,
  #endif
          }
  
@@ -974,7 +989,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID, jint val)
          {
  #if FIRST_PASS
-@@ -1993,6 +2090,7 @@ internal static void SetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID, j
+@@ -1993,6 +2092,7 @@ internal static void SetStaticIntField(JNIEnv* pEnv, nint clazz, nint fieldID, j
  #endif
          }
  
@@ -982,7 +997,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID, jlong val)
          {
  #if FIRST_PASS
-@@ -2009,6 +2107,7 @@ internal static void SetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID,
+@@ -2009,6 +2109,7 @@ internal static void SetStaticLongField(JNIEnv* pEnv, nint clazz, nint fieldID,
  #endif
          }
  
@@ -990,7 +1005,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldID, jfloat val)
          {
  #if FIRST_PASS
-@@ -2025,6 +2124,7 @@ internal static void SetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldID,
+@@ -2025,6 +2126,7 @@ internal static void SetStaticFloatField(JNIEnv* pEnv, nint clazz, nint fieldID,
  #endif
          }
  
@@ -998,7 +1013,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fieldID, jdouble val)
          {
  #if FIRST_PASS
-@@ -2034,16 +2134,19 @@ internal static void SetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fieldID
+@@ -2034,16 +2136,19 @@ internal static void SetStaticDoubleField(JNIEnv* pEnv, nint clazz, nint fieldID
  #endif
          }
  
@@ -1018,7 +1033,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar* GetStringChars(JNIEnv* pEnv, nint str, jboolean* isCopy)
          {
              try
-@@ -2061,6 +2164,7 @@ internal static jint GetStringLength(JNIEnv* pEnv, nint str)
+@@ -2061,6 +2166,7 @@ internal static jint GetStringLength(JNIEnv* pEnv, nint str)
              }
          }
  
@@ -1026,7 +1041,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseStringChars(JNIEnv* pEnv, nint str, jchar* chars)
          {
              try
-@@ -2074,6 +2178,7 @@ internal static void ReleaseStringChars(JNIEnv* pEnv, nint str, jchar* chars)
+@@ -2074,6 +2180,7 @@ internal static void ReleaseStringChars(JNIEnv* pEnv, nint str, jchar* chars)
              }
          }
  
@@ -1034,7 +1049,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewStringUTF(JNIEnv* pEnv, byte* bytes)
          {
              try
-@@ -2087,6 +2192,7 @@ internal static nint NewStringUTF(JNIEnv* pEnv, byte* bytes)
+@@ -2087,6 +2194,7 @@ internal static nint NewStringUTF(JNIEnv* pEnv, byte* bytes)
              }
          }
  
@@ -1042,7 +1057,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
          {
              try
-@@ -2100,6 +2206,7 @@ internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
+@@ -2100,6 +2208,7 @@ internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
              }
          }
  
@@ -1050,7 +1065,7 @@ index 87f4359c1..efb3c273f 100644
          internal static byte* GetStringUTFChars(JNIEnv* pEnv, nint @string, jboolean* isCopy)
          {
              try
-@@ -2142,16 +2249,19 @@ internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
+@@ -2142,16 +2251,19 @@ internal static jint GetStringUTFLength(JNIEnv* pEnv, nint str)
              }
          }
  
@@ -1070,7 +1085,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewObjectArray(JNIEnv* pEnv, jsize len, nint clazz, nint init)
          {
              try
-@@ -2177,6 +2287,7 @@ internal static nint NewObjectArray(JNIEnv* pEnv, jsize len, nint clazz, nint in
+@@ -2177,6 +2289,7 @@ internal static nint NewObjectArray(JNIEnv* pEnv, jsize len, nint clazz, nint in
              }
          }
  
@@ -1078,7 +1093,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint GetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index)
          {
              try
-@@ -2191,6 +2302,7 @@ internal static nint GetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index
+@@ -2191,6 +2304,7 @@ internal static nint GetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index
              }
          }
  
@@ -1086,7 +1101,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index, nint val)
          {
              try
-@@ -2216,6 +2328,7 @@ internal static void SetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index
+@@ -2216,6 +2330,7 @@ internal static void SetObjectArrayElement(JNIEnv* pEnv, nint array, jsize index
              }
          }
  
@@ -1094,7 +1109,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewBooleanArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2229,6 +2342,7 @@ internal static nint NewBooleanArray(JNIEnv* pEnv, jsize len)
+@@ -2229,6 +2344,7 @@ internal static nint NewBooleanArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1102,7 +1117,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewByteArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2242,6 +2356,7 @@ internal static nint NewByteArray(JNIEnv* pEnv, jsize len)
+@@ -2242,6 +2358,7 @@ internal static nint NewByteArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1110,7 +1125,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewCharArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2255,6 +2370,7 @@ internal static nint NewCharArray(JNIEnv* pEnv, jsize len)
+@@ -2255,6 +2372,7 @@ internal static nint NewCharArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1118,7 +1133,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewShortArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2268,6 +2384,7 @@ internal static nint NewShortArray(JNIEnv* pEnv, jsize len)
+@@ -2268,6 +2386,7 @@ internal static nint NewShortArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1126,7 +1141,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewIntArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2281,6 +2398,7 @@ internal static nint NewIntArray(JNIEnv* pEnv, jsize len)
+@@ -2281,6 +2400,7 @@ internal static nint NewIntArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1134,7 +1149,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewLongArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2294,6 +2412,7 @@ internal static nint NewLongArray(JNIEnv* pEnv, jsize len)
+@@ -2294,6 +2414,7 @@ internal static nint NewLongArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1142,7 +1157,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewFloatArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2307,6 +2426,7 @@ internal static nint NewFloatArray(JNIEnv* pEnv, jsize len)
+@@ -2307,6 +2428,7 @@ internal static nint NewFloatArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1150,7 +1165,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
          {
              try
-@@ -2320,6 +2440,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2320,6 +2442,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              }
          }
  
@@ -1158,7 +1173,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jboolean* GetBooleanArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              var b = (bool[])pEnv->UnwrapRef(array);
-@@ -2333,6 +2454,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2333,6 +2456,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return p;
          }
  
@@ -1166,7 +1181,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jbyte* GetByteArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              byte[] b = (byte[])pEnv->UnwrapRef(array);
-@@ -2346,6 +2468,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2346,6 +2470,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return p;
          }
  
@@ -1174,7 +1189,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar* GetCharArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              char[] b = (char[])pEnv->UnwrapRef(array);
-@@ -2358,6 +2481,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2358,6 +2483,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return (jchar*)(void*)buf;
          }
  
@@ -1182,7 +1197,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jshort* GetShortArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              short[] b = (short[])pEnv->UnwrapRef(array);
-@@ -2370,6 +2494,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2370,6 +2496,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return (jshort*)(void*)buf;
          }
  
@@ -1190,7 +1205,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint* GetIntArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              int[] b = (int[])pEnv->UnwrapRef(array);
-@@ -2382,6 +2507,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2382,6 +2509,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return (jint*)(void*)buf;
          }
  
@@ -1198,7 +1213,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jlong* GetLongArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              long[] b = (long[])pEnv->UnwrapRef(array);
-@@ -2394,6 +2520,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2394,6 +2522,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return (jlong*)(void*)buf;
          }
  
@@ -1206,7 +1221,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jfloat* GetFloatArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              float[] b = (float[])pEnv->UnwrapRef(array);
-@@ -2406,6 +2533,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2406,6 +2535,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return (jfloat*)(void*)buf;
          }
  
@@ -1214,7 +1229,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jdouble* GetDoubleArrayElements(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              double[] b = (double[])pEnv->UnwrapRef(array);
-@@ -2418,6 +2546,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
+@@ -2418,6 +2548,7 @@ internal static nint NewDoubleArray(JNIEnv* pEnv, jsize len)
              return (jdouble*)(void*)buf;
          }
  
@@ -1222,7 +1237,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseBooleanArrayElements(JNIEnv* pEnv, nint array, jboolean* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2434,6 +2563,7 @@ internal static void ReleaseBooleanArrayElements(JNIEnv* pEnv, nint array, jbool
+@@ -2434,6 +2565,7 @@ internal static void ReleaseBooleanArrayElements(JNIEnv* pEnv, nint array, jbool
              }
          }
  
@@ -1230,7 +1245,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseByteArrayElements(JNIEnv* pEnv, nint array, jbyte* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2450,6 +2580,7 @@ internal static void ReleaseByteArrayElements(JNIEnv* pEnv, nint array, jbyte* e
+@@ -2450,6 +2582,7 @@ internal static void ReleaseByteArrayElements(JNIEnv* pEnv, nint array, jbyte* e
              }
          }
  
@@ -1238,7 +1253,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseCharArrayElements(JNIEnv* pEnv, nint array, jchar* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2463,6 +2594,7 @@ internal static void ReleaseCharArrayElements(JNIEnv* pEnv, nint array, jchar* e
+@@ -2463,6 +2596,7 @@ internal static void ReleaseCharArrayElements(JNIEnv* pEnv, nint array, jchar* e
              }
          }
  
@@ -1246,7 +1261,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseShortArrayElements(JNIEnv* pEnv, nint array, jshort* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2476,6 +2608,7 @@ internal static void ReleaseShortArrayElements(JNIEnv* pEnv, nint array, jshort*
+@@ -2476,6 +2610,7 @@ internal static void ReleaseShortArrayElements(JNIEnv* pEnv, nint array, jshort*
              }
          }
  
@@ -1254,7 +1269,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseIntArrayElements(JNIEnv* pEnv, nint array, jint* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2489,6 +2622,7 @@ internal static void ReleaseIntArrayElements(JNIEnv* pEnv, nint array, jint* ele
+@@ -2489,6 +2624,7 @@ internal static void ReleaseIntArrayElements(JNIEnv* pEnv, nint array, jint* ele
              }
          }
  
@@ -1262,7 +1277,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseLongArrayElements(JNIEnv* pEnv, nint array, jlong* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2502,6 +2636,7 @@ internal static void ReleaseLongArrayElements(JNIEnv* pEnv, nint array, jlong* e
+@@ -2502,6 +2638,7 @@ internal static void ReleaseLongArrayElements(JNIEnv* pEnv, nint array, jlong* e
              }
          }
  
@@ -1270,7 +1285,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseFloatArrayElements(JNIEnv* pEnv, nint array, jfloat* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2515,6 +2650,7 @@ internal static void ReleaseFloatArrayElements(JNIEnv* pEnv, nint array, jfloat*
+@@ -2515,6 +2652,7 @@ internal static void ReleaseFloatArrayElements(JNIEnv* pEnv, nint array, jfloat*
              }
          }
  
@@ -1278,7 +1293,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseDoubleArrayElements(JNIEnv* pEnv, nint array, jdouble* elems, jint mode)
          {
              if (mode == 0 || mode == JNI_COMMIT)
-@@ -2528,6 +2664,7 @@ internal static void ReleaseDoubleArrayElements(JNIEnv* pEnv, nint array, jdoubl
+@@ -2528,6 +2666,7 @@ internal static void ReleaseDoubleArrayElements(JNIEnv* pEnv, nint array, jdoubl
              }
          }
  
@@ -1286,7 +1301,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jboolean* buf)
          {
              try
-@@ -2545,6 +2682,7 @@ internal static void GetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start,
+@@ -2545,6 +2684,7 @@ internal static void GetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start,
              }
          }
  
@@ -1294,7 +1309,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jbyte* buf)
          {
              try
-@@ -2562,6 +2700,7 @@ internal static void GetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2562,6 +2702,7 @@ internal static void GetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1302,7 +1317,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jchar* buf)
          {
              try
-@@ -2575,6 +2714,7 @@ internal static void GetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2575,6 +2716,7 @@ internal static void GetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1310,7 +1325,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetShortArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jshort* buf)
          {
              try
-@@ -2588,6 +2728,7 @@ internal static void GetShortArrayRegion(JNIEnv* pEnv, nint array, int start, in
+@@ -2588,6 +2730,7 @@ internal static void GetShortArrayRegion(JNIEnv* pEnv, nint array, int start, in
              }
          }
  
@@ -1318,7 +1333,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jint* buf)
          {
              try
-@@ -2601,6 +2742,7 @@ internal static void GetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2601,6 +2744,7 @@ internal static void GetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1326,7 +1341,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jlong* buf)
          {
              try
-@@ -2614,6 +2756,7 @@ internal static void GetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2614,6 +2758,7 @@ internal static void GetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1334,7 +1349,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jfloat* buf)
          {
              try
-@@ -2627,6 +2770,7 @@ internal static void GetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, in
+@@ -2627,6 +2772,7 @@ internal static void GetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, in
              }
          }
  
@@ -1342,7 +1357,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetDoubleArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jdouble* buf)
          {
              try
-@@ -2640,6 +2784,7 @@ internal static void GetDoubleArrayRegion(JNIEnv* pEnv, nint array, int start, i
+@@ -2640,6 +2786,7 @@ internal static void GetDoubleArrayRegion(JNIEnv* pEnv, nint array, int start, i
              }
          }
  
@@ -1350,7 +1365,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jboolean* buf)
          {
              try
-@@ -2657,6 +2802,7 @@ internal static void SetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start,
+@@ -2657,6 +2804,7 @@ internal static void SetBooleanArrayRegion(JNIEnv* pEnv, nint array, int start,
              }
          }
  
@@ -1358,7 +1373,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jbyte* buf)
          {
              try
-@@ -2674,6 +2820,7 @@ internal static void SetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2674,6 +2822,7 @@ internal static void SetByteArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1366,7 +1381,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jchar* buf)
          {
              try
-@@ -2687,6 +2834,7 @@ internal static void SetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2687,6 +2836,7 @@ internal static void SetCharArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1374,7 +1389,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetShortArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jshort* buf)
          {
              try
-@@ -2700,6 +2848,7 @@ internal static void SetShortArrayRegion(JNIEnv* pEnv, nint array, int start, in
+@@ -2700,6 +2850,7 @@ internal static void SetShortArrayRegion(JNIEnv* pEnv, nint array, int start, in
              }
          }
  
@@ -1382,7 +1397,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jint* buf)
          {
              try
-@@ -2713,6 +2862,7 @@ internal static void SetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2713,6 +2864,7 @@ internal static void SetIntArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1390,7 +1405,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jlong* buf)
          {
              try
-@@ -2726,6 +2876,7 @@ internal static void SetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int
+@@ -2726,6 +2878,7 @@ internal static void SetLongArrayRegion(JNIEnv* pEnv, nint array, int start, int
              }
          }
  
@@ -1398,7 +1413,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jfloat* buf)
          {
              try
-@@ -2739,6 +2890,7 @@ internal static void SetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, in
+@@ -2739,6 +2892,7 @@ internal static void SetFloatArrayRegion(JNIEnv* pEnv, nint array, int start, in
              }
          }
  
@@ -1406,7 +1421,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void SetDoubleArrayRegion(JNIEnv* pEnv, nint array, int start, int len, jdouble* buf)
          {
              try
-@@ -2760,6 +2912,7 @@ unsafe internal struct JNINativeMethod
+@@ -2760,6 +2914,7 @@ unsafe internal struct JNINativeMethod
              public void* fnPtr;
          }
  
@@ -1414,7 +1429,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint RegisterNatives(JNIEnv* pEnv, nint clazz, JNINativeMethod* methods, jint nMethods)
          {
              try
-@@ -2800,6 +2953,7 @@ internal static jint RegisterNatives(JNIEnv* pEnv, nint clazz, JNINativeMethod*
+@@ -2800,6 +2955,7 @@ internal static jint RegisterNatives(JNIEnv* pEnv, nint clazz, JNINativeMethod*
              }
          }
  
@@ -1422,7 +1437,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint UnregisterNatives(JNIEnv* pEnv, nint clazz)
          {
              try
-@@ -2830,6 +2984,7 @@ internal static jint UnregisterNatives(JNIEnv* pEnv, nint clazz)
+@@ -2830,6 +2986,7 @@ internal static jint UnregisterNatives(JNIEnv* pEnv, nint clazz)
              }
          }
  
@@ -1430,7 +1445,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint MonitorEnter(JNIEnv* pEnv, nint obj)
          {
              try
-@@ -2848,6 +3003,7 @@ internal static jint MonitorEnter(JNIEnv* pEnv, nint obj)
+@@ -2848,6 +3005,7 @@ internal static jint MonitorEnter(JNIEnv* pEnv, nint obj)
              }
          }
  
@@ -1438,7 +1453,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jint MonitorExit(JNIEnv* pEnv, nint obj)
          {
              try
-@@ -2862,12 +3018,14 @@ internal static jint MonitorExit(JNIEnv* pEnv, nint obj)
+@@ -2862,12 +3020,14 @@ internal static jint MonitorExit(JNIEnv* pEnv, nint obj)
              }
          }
  
@@ -1453,7 +1468,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetStringRegion(JNIEnv* pEnv, nint str, jsize start, jsize len, jchar* buf)
          {
              string s = (string)pEnv->UnwrapRef(str);
-@@ -2895,6 +3053,7 @@ internal static void GetStringRegion(JNIEnv* pEnv, nint str, jsize start, jsize
+@@ -2895,6 +3055,7 @@ internal static void GetStringRegion(JNIEnv* pEnv, nint str, jsize start, jsize
              }
          }
  
@@ -1461,7 +1476,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void GetStringUTFRegion(JNIEnv* pEnv, nint str, jsize start, jsize len, byte* buf)
          {
              string s = (string)pEnv->UnwrapRef(str);
-@@ -2974,6 +3133,7 @@ void UnpinObject(object obj)
+@@ -2974,6 +3135,7 @@ void UnpinObject(object obj)
              }
          }
  
@@ -1469,7 +1484,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void* GetPrimitiveArrayCritical(JNIEnv* pEnv, nint array, jboolean* isCopy)
          {
              if (isCopy != null)
-@@ -2982,6 +3142,7 @@ void UnpinObject(object obj)
+@@ -2982,6 +3144,7 @@ void UnpinObject(object obj)
              return pEnv->PinObject(pEnv->UnwrapRef(array));
          }
  
@@ -1477,7 +1492,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, void* carray, jint mode)
          {
              pEnv->UnpinObject(pEnv->UnwrapRef(array));
-@@ -2994,6 +3155,7 @@ internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, voi
+@@ -2994,6 +3157,7 @@ internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, voi
          /// <param name="str"></param>
          /// <param name="isCopy"></param>
          /// <returns></returns>
@@ -1485,7 +1500,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jchar* GetStringCritical(JNIEnv* pEnv, nint str, jboolean* isCopy)
          {
              if (isCopy != null)
-@@ -3008,6 +3170,7 @@ internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, voi
+@@ -3008,6 +3172,7 @@ internal static void ReleasePrimitiveArrayCritical(JNIEnv* pEnv, nint array, voi
          /// <param name="pEnv"></param>
          /// <param name="str"></param>
          /// <param name="cstring"></param>
@@ -1493,7 +1508,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void ReleaseStringCritical(JNIEnv* pEnv, nint str, jchar* cstring)
          {
              pEnv->UnpinObject(pEnv->UnwrapRef(str));
-@@ -3019,6 +3182,7 @@ internal static void ReleaseStringCritical(JNIEnv* pEnv, nint str, jchar* cstrin
+@@ -3019,6 +3184,7 @@ internal static void ReleaseStringCritical(JNIEnv* pEnv, nint str, jchar* cstrin
          /// <param name="pEnv"></param>
          /// <param name="obj"></param>
          /// <returns></returns>
@@ -1501,7 +1516,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewWeakGlobalRef(JNIEnv* pEnv, nint obj)
          {
              var o = pEnv->UnwrapRef(obj);
-@@ -3030,6 +3194,7 @@ internal static nint NewWeakGlobalRef(JNIEnv* pEnv, nint obj)
+@@ -3030,6 +3196,7 @@ internal static nint NewWeakGlobalRef(JNIEnv* pEnv, nint obj)
          /// </summary>
          /// <param name="pEnv"></param>
          /// <param name="obj"></param>
@@ -1509,7 +1524,7 @@ index 87f4359c1..efb3c273f 100644
          internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
          {
              if (IsGlobalRef(obj))
-@@ -3047,11 +3212,29 @@ internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
+@@ -3047,11 +3214,29 @@ internal static void DeleteWeakGlobalRef(JNIEnv* pEnv, nint obj)
          /// </summary>
          /// <param name="pEnv"></param>
          /// <returns></returns>
@@ -1539,7 +1554,7 @@ index 87f4359c1..efb3c273f 100644
          internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong capacity)
          {
  #if FIRST_PASS
-@@ -3065,7 +3248,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+@@ -3065,7 +3250,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
                      return IntPtr.Zero;
                  }
  
@@ -1548,7 +1563,7 @@ index 87f4359c1..efb3c273f 100644
              }
              catch (Exception x)
              {
-@@ -3075,11 +3258,12 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+@@ -3075,11 +3260,12 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
  #endif
          }
  
@@ -1562,7 +1577,7 @@ index 87f4359c1..efb3c273f 100644
              }
              catch (Exception x)
              {
-@@ -3088,6 +3272,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
+@@ -3088,6 +3274,7 @@ internal static nint NewDirectByteBuffer(JNIEnv* pEnv, IntPtr address, jlong cap
              }
          }
  
@@ -1570,7 +1585,7 @@ index 87f4359c1..efb3c273f 100644
          internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
          {
              try
-@@ -3101,6 +3286,7 @@ internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
+@@ -3101,6 +3288,7 @@ internal static jlong GetDirectBufferCapacity(JNIEnv* pEnv, nint buf)
              }
          }
  
@@ -2120,6 +2135,18 @@ index 79a7c736c..468b86512 100644
          internal static jint AttachCurrentThreadAsDaemon(JavaVM* pJVM, void** penv, void* args)
          {
              return AttachCurrentThreadImpl(pJVM, penv, (JavaVMAttachArgs*)args, true);
+diff --git a/src/IKVM.Runtime/JVM.cs b/src/IKVM.Runtime/JVM.cs
+index b3c9d17bc..69d1626b8 100644
+--- a/src/IKVM.Runtime/JVM.cs
++++ b/src/IKVM.Runtime/JVM.cs
+@@ -169,6 +169,7 @@ internal static Exception GetPendingException()
+         /// <param name="e"></param>
+         internal static void SetPendingException(Exception e)
+         {
++			Console.WriteLine($"[IKVM internal] SetPendingException {e}");
+             pendingException = e != null ? ikvm.runtime.Util.mapException(e) : null;
+         }
+ 
 diff --git a/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs b/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs
 index 61d1566a4..e93c68c32 100644
 --- a/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs

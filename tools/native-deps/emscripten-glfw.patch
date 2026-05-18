@@ -419,15 +419,3 @@ index 8475a25..14ffa20 100644
 -}
 \ No newline at end of file
 +}
-diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
-index 0cfd23c..c1452d0 100644
---- a/src/js/lib_emscripten_glfw3.js
-+++ b/src/js/lib_emscripten_glfw3.js
-@@ -100,6 +100,7 @@ let emscripten_glfw3_impl = {
- 
-     // onKeyboardEvent
-     onKeyboardEvent(e) {
-+		console.log(e);
-       if(e.type === 'keydown')
-         requestAnimationFrame(GLFW3.executeDeferredActions);
- 
