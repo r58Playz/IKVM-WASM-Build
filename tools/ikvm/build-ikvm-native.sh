@@ -260,6 +260,9 @@ OPENJDK_LIB_INCLUDES=(
 
 JPEG_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/awt/image/jpeg"
 
+# libjpeg's error handler escapes via setjmp/longjmp (jerror.c → cinfo->err).
+# Match the final wasm link's -fwasm-exceptions / SUPPORT_LONGJMP=wasm mode so
+# we emit __wasm_longjmp instead of the emscripten_longjmp shim.
 log "Building ${PREFIX}libjpeg ..."
 LIBJPEG_OBJS=()
 for src in "$JPEG_SRC"/*.c; do
@@ -267,6 +270,7 @@ for src in "$JPEG_SRC"/*.c; do
     fname="$(basename "$src")"
     obj="$TMP_DIR/libjpeg/${fname%.c}.o"
     emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        -fwasm-exceptions \
         "${OPENJDK_LIB_DEFS[@]}" \
         -I"$JPEG_SRC" \
         "${OPENJDK_LIB_INCLUDES[@]}" \
@@ -591,6 +595,365 @@ else
 fi
 
 create_archive "$OUT_DIR/native/${PREFIX}libnet.a" "${LIBNET_OBJS[@]}"
+
+# ── libfreetype ───────────────────────────────────────────────────────────────
+# Builds the bundled FreeType 2.13.2 from ext/freetype as a standalone static
+# archive.  We deliberately avoid Emscripten's -sUSE_FREETYPE=1 port: .NET 10
+# is pinned to emsdk 3.1.56, whose bundled FreeType lacks upstream fixes and
+# can't be updated independently.
+
+FREETYPE_DIR="$IKVM_SRC/ext/freetype"
+
+mkdir -p "$TMP_DIR/libfreetype"
+
+LIBFT_INCLUDES=(
+    -I"$FREETYPE_DIR/include"
+)
+
+LIBFT_DEFS=(
+    -DFT2_BUILD_LIBRARY
+    -DHAVE_UNISTD_H
+    -DHAVE_FCNTL_H
+)
+
+# FreeType's PS/TrueType interpreters use setjmp/longjmp for error recovery.
+# The final wasm link uses -fwasm-exceptions, which switches SUPPORT_LONGJMP
+# to wasm-EH mode and expects archives to emit __wasm_longjmp (not the
+# emscripten_longjmp shim).  Build with -fwasm-exceptions to match.
+LIBFT_EH_FLAGS=(-fwasm-exceptions)
+
+# Mirrors the file list from src/libfreetype/libfreetype.clangproj.
+LIBFT_SRCS=(
+    src/autofit/autofit.c
+    src/base/ftbase.c
+    src/base/ftbbox.c
+    src/base/ftbdf.c
+    src/base/ftbitmap.c
+    src/base/ftcid.c
+    src/base/ftdebug.c
+    src/base/ftfstype.c
+    src/base/ftgasp.c
+    src/base/ftglyph.c
+    src/base/ftgxval.c
+    src/base/ftinit.c
+    src/base/ftmm.c
+    src/base/ftotval.c
+    src/base/ftpatent.c
+    src/base/ftpfr.c
+    src/base/ftstroke.c
+    src/base/ftsynth.c
+    src/base/fttype1.c
+    src/base/ftwinfnt.c
+    src/bdf/bdf.c
+    src/cache/ftcache.c
+    src/cff/cff.c
+    src/cid/type1cid.c
+    src/dlg/dlgwrap.c
+    src/gzip/ftgzip.c
+    src/lzw/ftlzw.c
+    src/pcf/pcf.c
+    src/pfr/pfr.c
+    src/psaux/psaux.c
+    src/pshinter/pshinter.c
+    src/psnames/psmodule.c
+    src/raster/raster.c
+    src/sfnt/sfnt.c
+    src/smooth/smooth.c
+    src/sdf/sdf.c
+    src/svg/svg.c
+    src/truetype/truetype.c
+    src/type1/type1.c
+    src/type42/type42.c
+    src/winfonts/winfnt.c
+    builds/unix/ftsystem.c
+)
+
+log "Building ${PREFIX}libfreetype ..."
+LIBFT_OBJS=()
+for relsrc in "${LIBFT_SRCS[@]}"; do
+    src="$FREETYPE_DIR/$relsrc"
+    [ -f "$src" ] || { log "WARN: missing freetype source $relsrc"; continue; }
+    bname="$(basename "$src")"
+    obj="$TMP_DIR/libfreetype/${bname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${LIBFT_EH_FLAGS[@]}" \
+        "${LIBFT_DEFS[@]}" "${LIBFT_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBFT_OBJS+=("$obj")
+done
+create_archive "$OUT_DIR/native/${PREFIX}libfreetype.a" "${LIBFT_OBJS[@]}"
+
+# ── libmlib_image ─────────────────────────────────────────────────────────────
+# Pure-C bitmap loops used by awt_ImagingLib for hardware-accelerated image
+# operations.  No external deps beyond libc/libm.  Mirrors
+# src/libmlib_image/libmlib_image.clangproj.
+
+MLIB_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/awt/medialib"
+
+mkdir -p "$TMP_DIR/libmlib_image"
+
+LIBMLIB_INCLUDES=(
+    -I"$MLIB_SRC"
+    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/awt/medialib"
+    "${OPENJDK_LIB_INCLUDES[@]}"
+)
+
+LIBMLIB_DEFS=(
+    "${OPENJDK_LIB_DEFS[@]}"
+    -D__USE_J2D_NAMES
+    -D__MEDIALIB_OLD_NAMES
+    -DMLIB_NO_LIBSUNMATH
+    -DMLIB_OS64BIT
+)
+
+# Files excluded by libmlib_image.clangproj.  awt_ImagingLib.c belongs to libawt;
+# mlib_c_ImageBlendTable.c is generated lookup data that lives in libawt.
+MLIB_EXCLUDES="awt_ImagingLib\.c|mlib_c_ImageBlendTable\.c"
+
+log "Building ${PREFIX}libmlib_image ..."
+LIBMLIB_OBJS=()
+for src in "$MLIB_SRC"/*.c; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    if echo "$fname" | grep -qE "^($MLIB_EXCLUDES)$"; then
+        continue
+    fi
+    obj="$TMP_DIR/libmlib_image/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c89 "${PTHREAD_FLAGS[@]}" \
+        "${LIBMLIB_DEFS[@]}" "${LIBMLIB_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBMLIB_OBJS+=("$obj")
+done
+create_archive "$OUT_DIR/native/${PREFIX}libmlib_image.a" "${LIBMLIB_OBJS[@]}"
+
+# ── liblcms ───────────────────────────────────────────────────────────────────
+# Bundled Little CMS color-management engine used by the java.awt.color stack.
+# Pure C99, deps: libm only.  Mirrors src/liblcms/liblcms.clangproj.
+
+LCMS_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/java2d/cmm/lcms"
+LCMS_J2D_INC="$OPENJDK_DIR/jdk/src/share/native/sun/java2d"
+LCMS_AWT_DBG_INC="$OPENJDK_DIR/jdk/src/share/native/sun/awt/debug"
+
+mkdir -p "$TMP_DIR/liblcms"
+
+LIBLCMS_INCLUDES=(
+    -I"$LCMS_SRC"
+    -I"$LCMS_J2D_INC"
+    -I"$LCMS_AWT_DBG_INC"
+    "${OPENJDK_LIB_INCLUDES[@]}"
+)
+
+log "Building ${PREFIX}liblcms ..."
+LIBLCMS_OBJS=()
+for src in "$LCMS_SRC"/*.c; do
+    [ -f "$src" ] || continue
+    fname="$(basename "$src")"
+    obj="$TMP_DIR/liblcms/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${OPENJDK_LIB_DEFS[@]}" "${LIBLCMS_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBLCMS_OBJS+=("$obj")
+done
+create_archive "$OUT_DIR/native/${PREFIX}liblcms.a" "${LIBLCMS_OBJS[@]}"
+
+# ── libawt (headless, merged with libawt_headless) ───────────────────────────
+# Combines libawt + libawt_headless into one archive.  awt_LoadLibrary.c is
+# replaced with emscripten-stubs/awt_LoadLibrary_wasm.c which drops the
+# System.load("libawt_headless.so") + dlopen chain (we don't need it — the
+# only native code in libawt_headless is AWTIsHeadless + a no-op JNI_OnLoad,
+# both already present in the wasm replacement file).
+#
+# Source dirs that exist for linux but aren't usable in wasm — opengl,
+# solaris/java2d/x11, gtk/awt_GraphicsEnv/awt_UNIXToolkit — are excluded
+# below by listing only the platform-independent file set from libawt.clangproj.
+
+AWT_SHARE_AWT="$OPENJDK_DIR/jdk/src/share/native/sun/awt"
+AWT_SHARE_J2D="$OPENJDK_DIR/jdk/src/share/native/sun/java2d"
+AWT_SOLARIS_AWT="$OPENJDK_DIR/jdk/src/solaris/native/sun/awt"
+
+mkdir -p "$TMP_DIR/libawt"
+
+LIBAWT_INCLUDES=(
+    -I"$AWT_SHARE_AWT"
+    -I"$AWT_SHARE_AWT/image"
+    -I"$AWT_SHARE_AWT/image/cvutils"
+    -I"$AWT_SHARE_AWT/image/gif"
+    -I"$AWT_SHARE_AWT/medialib"
+    -I"$AWT_SHARE_AWT/debug"
+    -I"$AWT_SHARE_AWT/utility"
+    -I"$AWT_SHARE_J2D"
+    -I"$AWT_SHARE_J2D/loops"
+    -I"$AWT_SHARE_J2D/pipe"
+    -I"$OPENJDK_DIR/jdk/src/share/native/sun/font"
+    -I"$AWT_SOLARIS_AWT"
+    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/java2d"
+    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/awt/medialib"
+    "${OPENJDK_LIB_INCLUDES[@]}"
+)
+
+LIBAWT_DEFS=(
+    "${OPENJDK_LIB_DEFS[@]}"
+    -D__USE_J2D_NAMES
+    -D__MEDIALIB_OLD_NAMES
+    -DMLIB_NO_LIBSUNMATH
+    -DMLIB_OS64BIT
+    -DHEADLESS
+)
+
+# (file-stem-or-relative-path, src-dir) — duplicated from libawt.clangproj's
+# LibAwtFile list, joined against LibAwtDirs by JoinPathsAndFiles.  We embed
+# the dir explicitly here so the file picker matches openjdk's first-found-wins
+# semantics.
+
+compile_awt() {
+    local src="$1"
+    [ -f "$src" ] || { log "WARN: missing libawt source $src"; return; }
+    local fname obj
+    fname="$(basename "$src")"
+    obj="$TMP_DIR/libawt/${fname%.c}.o"
+    # Skip duplicates (first match wins).
+    for existing in "${LIBAWT_OBJS[@]}"; do
+        if [ "$existing" = "$obj" ]; then
+            return
+        fi
+    done
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${LIBAWT_DEFS[@]}" "${LIBAWT_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBAWT_OBJS+=("$obj")
+}
+
+log "Building ${PREFIX}libawt ..."
+LIBAWT_OBJS=()
+
+# share/native/sun/awt/image/**/*.c (cvutils + gif + jpeg/libpng EXCLUDED,
+# jpeg lives in libjpeg, libpng isn't referenced)
+compile_awt "$AWT_SHARE_AWT/image/BufImgSurfaceData.c"
+compile_awt "$AWT_SHARE_AWT/image/DataBufferNative.c"
+compile_awt "$AWT_SHARE_AWT/image/awt_ImageRep.c"
+compile_awt "$AWT_SHARE_AWT/image/awt_parseImage.c"
+compile_awt "$AWT_SHARE_AWT/image/dither.c"
+compile_awt "$AWT_SHARE_AWT/image/imageInitIDs.c"
+compile_awt "$AWT_SHARE_AWT/image/cvutils/img_colors.c"
+compile_awt "$AWT_SHARE_AWT/image/cvutils/img_globals.c"
+compile_awt "$AWT_SHARE_AWT/image/gif/gifdecoder.c"
+
+# share/native/sun/awt/medialib/awt_ImagingLib.c — function-pointer table
+# that resolves via awt_Mlib.c → libmlib_image.  Will fail to resolve at
+# runtime (no dlopen) and fall back to Java pure-Java implementations.
+compile_awt "$AWT_SHARE_AWT/medialib/awt_ImagingLib.c"
+# mlib_c_ImageBlendTable.c is data, included once here so libawt has it.
+compile_awt "$AWT_SHARE_AWT/medialib/mlib_c_ImageBlendTable.c"
+
+# share/native/sun/awt/debug/*.c
+compile_awt "$AWT_SHARE_AWT/debug/debug_assert.c"
+compile_awt "$AWT_SHARE_AWT/debug/debug_mem.c"
+compile_awt "$AWT_SHARE_AWT/debug/debug_trace.c"
+compile_awt "$AWT_SHARE_AWT/debug/debug_util.c"
+
+# share/native/sun/java2d/*.c
+compile_awt "$AWT_SHARE_J2D/SurfaceData.c"
+compile_awt "$AWT_SHARE_J2D/Disposer.c"
+compile_awt "$AWT_SHARE_J2D/Trace.c"
+
+# share/native/sun/java2d/pipe/*.c
+compile_awt "$AWT_SHARE_J2D/pipe/Region.c"
+compile_awt "$AWT_SHARE_J2D/pipe/BufferedMaskBlit.c"
+compile_awt "$AWT_SHARE_J2D/pipe/BufferedRenderPipe.c"
+compile_awt "$AWT_SHARE_J2D/pipe/ShapeSpanIterator.c"
+compile_awt "$AWT_SHARE_J2D/pipe/SpanClipRenderer.c"
+
+# share/native/sun/java2d/loops/*.c — graphics primitives.
+for src in "$AWT_SHARE_J2D/loops"/*.c; do
+    [ -f "$src" ] || continue
+    compile_awt "$src"
+done
+
+# solaris/native/sun/awt files (linux-applicable subset only)
+compile_awt "$AWT_SOLARIS_AWT/awt_Mlib.c"
+compile_awt "$AWT_SOLARIS_AWT/initIDs.c"
+
+# share/native/sun/font/AccelGlyphCache.c — provides AccelGlyphCache_* symbols
+# referenced by libfontmanager's sunFont.c.  Per the IKVM clangprojs, this
+# file lives in libawt_headless on Linux (and libfontmanager explicitly
+# excludes it); since we merge libawt_headless into libawt, it goes here.
+compile_awt "$OPENJDK_DIR/jdk/src/share/native/sun/font/AccelGlyphCache.c"
+
+# Custom JNI_OnLoad (replaces solaris/native/sun/awt/awt_LoadLibrary.c).
+emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    "${LIBAWT_DEFS[@]}" "${LIBAWT_INCLUDES[@]}" \
+    -c "$SCRIPT_DIR/emscripten-stubs/awt_LoadLibrary_wasm.c" \
+    -o "$TMP_DIR/libawt/awt_LoadLibrary_wasm.o"
+LIBAWT_OBJS+=("$TMP_DIR/libawt/awt_LoadLibrary_wasm.o")
+
+create_archive "$OUT_DIR/native/${PREFIX}libawt.a" "${LIBAWT_OBJS[@]}"
+
+# ── libfontmanager ───────────────────────────────────────────────────────────
+# Provides the sun.font.* native methods (FreeType-backed scaler, glyph list
+# drawing, etc.).  Depends on FreeType headers (we link the static archive at
+# the final wasm link step, not here).  Mirrors
+# src/libfontmanager/libfontmanager.clangproj (linux block).
+
+FONT_SHARE_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/font"
+FONT_SOL_SRC="$OPENJDK_DIR/jdk/src/solaris/native/sun/font"
+
+mkdir -p "$TMP_DIR/libfontmanager"
+
+LIBFM_INCLUDES=(
+    -I"$FONT_SHARE_SRC"
+    -I"$FONT_SHARE_SRC/layout"
+    -I"$AWT_SHARE_AWT/image/cvutils"
+    -I"$AWT_SHARE_AWT/debug"
+    -I"$AWT_SHARE_J2D"
+    -I"$AWT_SHARE_J2D/loops"
+    -I"$AWT_SHARE_J2D/pipe"
+    -I"$AWT_SOLARIS_AWT"
+    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/java2d"
+    -I"$FREETYPE_DIR/include"
+    "${OPENJDK_LIB_INCLUDES[@]}"
+)
+
+LIBFM_DEFS=(
+    "${OPENJDK_LIB_DEFS[@]}"
+    -DLE_STANDALONE
+    -DHEADLESS
+)
+
+# AccelGlyphCache.c is excluded from the linux build per the clangproj.
+# X11TextRenderer.c / X11FontScaler.c are skipped because we don't link libX11;
+# headless ImageIO doesn't call into them.
+FM_EXCLUDES="AccelGlyphCache\.c|X11TextRenderer\.c|X11FontScaler\.c"
+
+log "Building ${PREFIX}libfontmanager ..."
+LIBFM_OBJS=()
+
+# Collect all .c files under share/native/sun/font + solaris/native/sun/font.
+while IFS= read -r src; do
+    fname="$(basename "$src")"
+    if echo "$fname" | grep -qE "^($FM_EXCLUDES)$"; then
+        continue
+    fi
+    obj="$TMP_DIR/libfontmanager/${fname%.c}.o"
+    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        "${LIBFM_DEFS[@]}" "${LIBFM_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBFM_OBJS+=("$obj")
+done < <(find "$FONT_SHARE_SRC" "$FONT_SOL_SRC" -name '*.c' 2>/dev/null)
+
+# C++ layout engine (ICU-derived). Compile separately with em++.
+while IFS= read -r src; do
+    fname="$(basename "$src")"
+    if echo "$fname" | grep -qE "^($FM_EXCLUDES)$"; then
+        continue
+    fi
+    obj="$TMP_DIR/libfontmanager/${fname%.cpp}.o"
+    em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+        "${LIBFM_DEFS[@]}" "${LIBFM_INCLUDES[@]}" \
+        -c "$src" -o "$obj"
+    LIBFM_OBJS+=("$obj")
+done < <(find "$FONT_SHARE_SRC" -name '*.cpp' 2>/dev/null)
+
+create_archive "$OUT_DIR/native/${PREFIX}libfontmanager.a" "${LIBFM_OBJS[@]}"
 
 log "Done! Artifacts written to $OUT_DIR/native/"
 

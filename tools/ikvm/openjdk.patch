@@ -131,3 +131,206 @@ index 9b3ff8194e..a1edb76bc8 100644
  }
  
  
+--- a/jdk/src/share/native/sun/awt/image/jpeg/jpegdecoder.c
++++ b/jdk/src/share/native/sun/awt/image/jpeg/jpegdecoder.c
+@@ -64,12 +64,12 @@
+ 
+ /* Initialize the Java VM instance variable when the library is
+    first loaded */
+-JavaVM *jvm;
++JavaVM *__libjpeg_jvm;
+ 
+ JNIEXPORT jint JNICALL
+-JNI_OnLoad(JavaVM *vm, void *reserved)
++__libjpeg_JNI_OnLoad(JavaVM *vm, void *reserved)
+ {
+-    jvm = vm;
++    __libjpeg_jvm = vm;
+     return JNI_VERSION_1_2;
+ }
+ 
+@@ -284,7 +284,7 @@
+ sun_jpeg_fill_input_buffer(j_decompress_ptr cinfo)
+ {
+     sun_jpeg_source_ptr src = (sun_jpeg_source_ptr) cinfo->src;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     int ret, buflen;
+ 
+     if (src->suspendable) {
+@@ -327,7 +327,7 @@
+ sun_jpeg_fill_suspended_buffer(j_decompress_ptr cinfo)
+ {
+     sun_jpeg_source_ptr src = (sun_jpeg_source_ptr) cinfo->src;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     size_t offset, buflen;
+     int ret;
+ 
+@@ -397,7 +397,7 @@
+ sun_jpeg_skip_input_data(j_decompress_ptr cinfo, long num_bytes)
+ {
+     sun_jpeg_source_ptr src = (sun_jpeg_source_ptr) cinfo->src;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     int ret;
+     int buflen;
+ 
+--- a/jdk/src/share/native/sun/awt/image/jpeg/imageioJPEG.c
++++ b/jdk/src/share/native/sun/awt/image/jpeg/imageioJPEG.c
+@@ -85,7 +85,7 @@
+ /*
+  * Defined in jpegdecoder.c.  Copy code from there if and
+  * when that disappears. */
+-extern JavaVM *jvm;
++extern JavaVM *__libjpeg_jvm;
+ 
+ /*
+  * The following sets of defines must match the warning messages in the
+@@ -557,7 +557,7 @@
+     char buffer[JMSG_LENGTH_MAX];
+     jstring string;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     jobject theObject;
+ 
+     /* Create the message */
+@@ -928,7 +928,7 @@
+     struct jpeg_source_mgr *src = cinfo->src;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+     streamBufferPtr sb = &data->streamBuf;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     int ret;
+     jobject input = NULL;
+ 
+@@ -1021,7 +1021,7 @@
+     struct jpeg_source_mgr *src = cinfo->src;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+     streamBufferPtr sb = &data->streamBuf;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     jint ret;
+     size_t offset, buflen;
+     jobject input = NULL;
+@@ -1122,7 +1122,7 @@
+     struct jpeg_source_mgr *src = cinfo->src;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+     streamBufferPtr sb = &data->streamBuf;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     jlong ret;
+     jobject reader;
+     jobject input = NULL;
+@@ -1211,7 +1211,7 @@
+     // To pushback, just seek back by src->bytes_in_buffer
+     struct jpeg_source_mgr *src = cinfo->src;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     jobject reader = data->imageIOobj;
+     if (src->bytes_in_buffer > 0) {
+          RELEASE_ARRAYS(env, data, src->next_input_byte);
+@@ -2360,7 +2360,7 @@
+     struct jpeg_destination_mgr *dest = cinfo->dest;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+     streamBufferPtr sb = &data->streamBuf;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+ 
+     if (sb->buf == NULL) {
+         // We forgot to pin the array
+@@ -2386,7 +2386,7 @@
+     struct jpeg_destination_mgr *dest = cinfo->dest;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+     streamBufferPtr sb = &data->streamBuf;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+     jobject output = NULL;
+ 
+     RELEASE_ARRAYS(env, data, (const JOCTET *)(dest->next_output_byte));
+@@ -2422,7 +2422,7 @@
+     struct jpeg_destination_mgr *dest = cinfo->dest;
+     imageIODataPtr data = (imageIODataPtr) cinfo->client_data;
+     streamBufferPtr sb = &data->streamBuf;
+-    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++    JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libjpeg_jvm, JNI_VERSION_1_2);
+ 
+     /* find out how much needs to be written */
+     /* this conversion from size_t to jint is safe, because the lenght of the buffer is limited by jint */
+--- a/jdk/src/share/native/sun/java2d/cmm/lcms/LCMS.c
++++ b/jdk/src/share/native/sun/java2d/cmm/lcms/LCMS.c
+@@ -134,7 +134,7 @@
+     JNU_ThrowByName(env, "java/awt/color/CMMException", errMsg);
+ }
+ 
+-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved) {
++JNIEXPORT jint JNICALL __liblcms_JNI_OnLoad(JavaVM *jvm, void *reserved) {
+     javaVM = jvm;
+ 
+     cmsSetLogErrorHandler(errorHandler);
+--- a/jdk/src/solaris/native/sun/awt/awt_Mlib.c
++++ b/jdk/src/solaris/native/sun/awt/awt_Mlib.c
+@@ -36,8 +36,8 @@
+ #include "awt_Mlib.h"
+ #include "java_awt_image_BufferedImage.h"
+ 
+-static void start_timer(int numsec);
+-static void stop_timer(int numsec, int ntimes);
++static void __awtMlib_start_timer(int numsec);
++static void __awtMlib_stop_timer(int numsec, int ntimes);
+ 
+ /*
+  * This is called by awt_ImagingLib.initLib() to figure out if we
+@@ -138,18 +138,18 @@
+ }
+ 
+ mlib_start_timer awt_setMlibStartTimer() {
+-    return start_timer;
++    return __awtMlib_start_timer;
+ }
+ 
+ mlib_stop_timer awt_setMlibStopTimer() {
+-    return stop_timer;
++    return __awtMlib_stop_timer;
+ }
+ 
+ /***************************************************************************
+  *                          Static Functions                               *
+  ***************************************************************************/
+ 
+-static void start_timer(int numsec)
++static void __awtMlib_start_timer(int numsec)
+ {
+     struct itimerval interval;
+ 
+@@ -161,7 +161,7 @@
+ }
+ 
+ 
+-static void stop_timer(int numsec, int ntimes)
++static void __awtMlib_stop_timer(int numsec, int ntimes)
+ {
+     struct itimerval interval;
+     double sec;
+--- a/jdk/src/share/native/sun/awt/image/cvutils/img_colors.c
++++ b/jdk/src/share/native/sun/awt/image/cvutils/img_colors.c
+@@ -36,7 +36,7 @@
+ #include "jvm.h"
+ #include "jni_util.h"
+ 
+-extern JavaVM *jvm;
++extern JavaVM *__libawt_jvm;
+ #endif
+ 
+ #define jio_fprintf fprintf
+@@ -272,7 +272,7 @@
+      */
+     if (virt_cmap == NULL) {
+ #ifndef MAKECUBE_EXE
+-        JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
++        JNIEnv *env = (JNIEnv *)JNU_GetEnv(__libawt_jvm, JNI_VERSION_1_2);
+         JNU_ThrowOutOfMemoryError(env, "init_virt_cmap: OutOfMemoryError");
+         return;
+ #else
