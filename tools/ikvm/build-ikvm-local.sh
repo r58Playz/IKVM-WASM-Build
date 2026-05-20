@@ -530,7 +530,12 @@ else
             "$WORKSPACE/out/native/libzip.a" \
             "$WORKSPACE/out/native/libmanagement.a" \
             "$WORKSPACE/out/native/libnio.a" \
-            "$WORKSPACE/out/native/libnet.a"
+            "$WORKSPACE/out/native/libnet.a" \
+            "$WORKSPACE/out/native/libfreetype.a" \
+            "$WORKSPACE/out/native/libmlib_image.a" \
+            "$WORKSPACE/out/native/liblcms.a" \
+            "$WORKSPACE/out/native/libawt.a" \
+            "$WORKSPACE/out/native/libfontmanager.a"
         zip -r "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" image
         zip -r "$WORKSPACE/out/release/ikvm-wasm-bundle.zip" ikvm-tools
     )
@@ -549,6 +554,11 @@ else
         cp "$WORKSPACE/out/native/ST-libmanagement.a" "$WORKSPACE/out/st-native/libmanagement.a"
         cp "$WORKSPACE/out/native/ST-libnio.a" "$WORKSPACE/out/st-native/libnio.a"
         cp "$WORKSPACE/out/native/ST-libnet.a" "$WORKSPACE/out/st-native/libnet.a"
+        cp "$WORKSPACE/out/native/ST-libfreetype.a" "$WORKSPACE/out/st-native/libfreetype.a"
+        cp "$WORKSPACE/out/native/ST-libmlib_image.a" "$WORKSPACE/out/st-native/libmlib_image.a"
+        cp "$WORKSPACE/out/native/ST-liblcms.a" "$WORKSPACE/out/st-native/liblcms.a"
+        cp "$WORKSPACE/out/native/ST-libawt.a" "$WORKSPACE/out/st-native/libawt.a"
+        cp "$WORKSPACE/out/native/ST-libfontmanager.a" "$WORKSPACE/out/st-native/libfontmanager.a"
         cd "$WORKSPACE/out/bundle-staging"
         zip -j "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" \
             "$WORKSPACE/out/managed/IKVM.Runtime.dll" \
@@ -564,7 +574,12 @@ else
             "$WORKSPACE/out/st-native/libzip.a" \
             "$WORKSPACE/out/st-native/libmanagement.a" \
             "$WORKSPACE/out/st-native/libnio.a" \
-            "$WORKSPACE/out/st-native/libnet.a"
+            "$WORKSPACE/out/st-native/libnet.a" \
+            "$WORKSPACE/out/st-native/libfreetype.a" \
+            "$WORKSPACE/out/st-native/libmlib_image.a" \
+            "$WORKSPACE/out/st-native/liblcms.a" \
+            "$WORKSPACE/out/st-native/libawt.a" \
+            "$WORKSPACE/out/st-native/libfontmanager.a"
         zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" image
         zip -r "$WORKSPACE/out/release/ikvm-wasm-ST-bundle.zip" ikvm-tools
     )
