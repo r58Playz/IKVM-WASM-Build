@@ -1,8 +1,24 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 2d9df93..d06fd66 100644
+index 2d9df93..9486a38 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -83,6 +83,12 @@ add_glfw_lib("glfw3")
+@@ -32,6 +32,7 @@ set(glfw3_headers
+     src/cpp/emscripten/glfw3/Cursor.h
+     src/cpp/emscripten/glfw3/ErrorHandler.h
+     src/cpp/emscripten/glfw3/Events.h
++    src/cpp/emscripten/glfw3/EventQueue.h
+     src/cpp/emscripten/glfw3/Keyboard.h
+     src/cpp/emscripten/glfw3/KeyboardMapping.h
+     src/cpp/emscripten/glfw3/Monitor.h
+@@ -46,6 +47,7 @@ set(glfw3_sources
+     src/cpp/emscripten/glfw3/Clipboard.cpp
+     src/cpp/emscripten/glfw3/Context.cpp
+     src/cpp/emscripten/glfw3/ErrorHandler.cpp
++    src/cpp/emscripten/glfw3/EventQueue.cpp
+     src/cpp/emscripten/glfw3/Keyboard.cpp
+     src/cpp/emscripten/glfw3/Window.cpp
+ )
+@@ -83,6 +85,12 @@ add_glfw_lib("glfw3")
  # library compiled with -pthread
  add_glfw_lib("glfw3_pthread")
  target_compile_options(glfw3_pthread PUBLIC "-pthread")
@@ -48,10 +64,178 @@ index c539cdc..7e04f64 100644
    // GL Context
    int fClientAPI{GLFW_OPENGL_API}; // GLFW_CLIENT_API
 diff --git a/src/cpp/emscripten/glfw3/Context.cpp b/src/cpp/emscripten/glfw3/Context.cpp
-index afb6ea7..028e8e0 100644
+index afb6ea7..742907e 100644
 --- a/src/cpp/emscripten/glfw3/Context.cpp
 +++ b/src/cpp/emscripten/glfw3/Context.cpp
-@@ -130,6 +130,10 @@ Context::Context()
+@@ -21,6 +21,7 @@
+ #include <emscripten/html5.h>
+ 
+ #include "ErrorHandler.h"
++#include "EventQueue.h"
+ 
+ #ifndef EMSCRIPTEN_GLFW3_DISABLE_JOYSTICK
+ #include "Joystick.h"
+@@ -52,6 +53,8 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
+ bool emscripten_glfw3_context_is_runtime_platform_apple();
+ void emscripten_glfw3_create_custom_cursor(GLFWcursor *iCursor, int iWidth, int iHeight, unsigned char *iPixels);
+ void emscripten_glfw3_destroy_custom_cursor(GLFWcursor *iCursor);
++void emscripten_glfw3_context_jspi_settimeout();
++void emscripten_glfw3_context_jspi_raf();
+ }
+ 
+ namespace emscripten::glfw3 {
+@@ -66,12 +69,88 @@ std::unique_ptr<Context> Context::init()
+   return std::unique_ptr<Context>(new Context{});
+ }
+ 
++//------------------------------------------------------------------------
++// JS-routed callbacks: the JS handlers in lib_emscripten_glfw3.js run on the
++// main browser thread and reach these via makeDynCall. They used to dispatch
++// straight into Context, which races with the worker. They now copy their
++// arguments into an EventQueue record and the worker dispatches during
++// pollEvents().
++//------------------------------------------------------------------------
++
++namespace {
++
++struct ScaleChangePayload { Context *context; };
++struct WindowResizePayload { Context *context; GLFWwindow *window; int width; int height; };
++struct KeyboardPayload
++{
++  Context *context;
++  bool keyDown;
++  bool repeat;
++  int codepoint;
++  int modifierBits;
++  char code[64];
++  char key[64];
++};
++struct ClipboardPayload
++{
++  Context *context;
++  char *text;   // heap-allocated copy (or nullptr); freed by the worker invoker
++  char *error;
++};
++
++bool ScaleChangeInvoker(void *, int32_t, void const *iPayload)
++{
++  auto const *p = reinterpret_cast<ScaleChangePayload const *>(iPayload);
++  p->context->onScaleChange();
++  return false;
++}
++
++bool WindowResizeInvoker(void *, int32_t, void const *iPayload)
++{
++  auto const *p = reinterpret_cast<WindowResizePayload const *>(iPayload);
++  p->context->onWindowResize(p->window, p->width, p->height);
++  return false;
++}
++
++bool KeyboardInvoker(void *, int32_t, void const *iPayload)
++{
++  auto const *p = reinterpret_cast<KeyboardPayload const *>(iPayload);
++  Keyboard::Event event{p->code, p->key, p->repeat, p->codepoint, p->modifierBits};
++  if(p->keyDown)
++    return p->context->onKeyDown(event);
++  else
++    return p->context->onKeyUp(event);
++}
++
++bool ClipboardInvoker(void *, int32_t, void const *iPayload)
++{
++  auto const *p = reinterpret_cast<ClipboardPayload const *>(iPayload);
++  p->context->onClipboard(p->text, p->error);
++  std::free(p->text);
++  std::free(p->error);
++  return false;
++}
++
++char *DupString(char const *iSrc)
++{
++  if(!iSrc)
++    return nullptr;
++  auto len = std::strlen(iSrc) + 1;
++  auto *out = static_cast<char *>(std::malloc(len));
++  if(out)
++    std::memcpy(out, iSrc, len);
++  return out;
++}
++
++} // namespace
++
+ //------------------------------------------------------------------------
+ // ContextScaleChangeCallback
+ //------------------------------------------------------------------------
+ void ContextScaleChangeCallback(Context *iContext)
+ {
+-  iContext->onScaleChange();
++  ScaleChangePayload p{iContext};
++  EventQueue::instance().push(&ScaleChangeInvoker, nullptr, 0, &p, sizeof(p));
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -79,7 +158,8 @@ void ContextScaleChangeCallback(Context *iContext)
+ //------------------------------------------------------------------------
+ void ContextWindowResizeCallback(Context *iContext, GLFWwindow *iWindow, int iWidth, int iHeight)
+ {
+-  iContext->onWindowResize(iWindow, iWidth, iHeight);
++  WindowResizePayload p{iContext, iWindow, iWidth, iHeight};
++  EventQueue::instance().push(&WindowResizeInvoker, nullptr, 0, &p, sizeof(p));
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -93,11 +173,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+                              int iCodepoint,
+                              int iModifierBits)
+ {
+-  Keyboard::Event event{iCode, iKey, iRepeat, iCodepoint, iModifierBits};
+-  if(iKeyDown)
+-    return iContext->onKeyDown(event);
+-  else
+-    return iContext->onKeyUp(event);
++  KeyboardPayload p{};
++  p.context = iContext;
++  p.keyDown = iKeyDown;
++  p.repeat = iRepeat;
++  p.codepoint = iCodepoint;
++  p.modifierBits = iModifierBits;
++  if(iCode)
++  {
++    std::strncpy(p.code, iCode, sizeof(p.code) - 1);
++    p.code[sizeof(p.code) - 1] = '\0';
++  }
++  if(iKey)
++  {
++    std::strncpy(p.key, iKey, sizeof(p.key) - 1);
++    p.key[sizeof(p.key) - 1] = '\0';
++  }
++  EventQueue::instance().push(&KeyboardInvoker, nullptr, 0, &p, sizeof(p));
++  // We can't await the real handler's preventDefault verdict from main, so
++  // hardcode: claim handled for keydown (avoids browser shortcuts swallowing
++  // input), pass through keyup.
++  return iKeyDown;
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -105,7 +201,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+ //------------------------------------------------------------------------
+ void ContextClipboardStringCallback(Context *iContext, char const *iText, char const *iError)
+ {
+-  iContext->onClipboard(iText, iError);
++  ClipboardPayload p{};
++  p.context = iContext;
++  p.text = DupString(iText);
++  p.error = DupString(iError);
++  if(!EventQueue::instance().push(&ClipboardInvoker, nullptr, 0, &p, sizeof(p)))
++  {
++    // queue full: drop, free the duplicates we made
++    std::free(p.text);
++    std::free(p.error);
++  }
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -130,6 +235,10 @@ Context::Context()
                                  ContextClipboardStringCallback,
                                  emscripten_glfw_request_fullscreen,
                                  ContextErrorHandler);
@@ -62,7 +246,7 @@ index afb6ea7..028e8e0 100644
    addOrRemoveEventListeners(true);
  }
  
-@@ -1043,7 +1047,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
+@@ -1043,7 +1152,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
  }
  
  //------------------------------------------------------------------------
@@ -71,7 +255,7 @@ index afb6ea7..028e8e0 100644
  //------------------------------------------------------------------------
  GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
  {
-@@ -1054,6 +1058,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
+@@ -1054,6 +1163,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
      return nullptr;
  }
  
@@ -130,7 +314,53 @@ index afb6ea7..028e8e0 100644
  //------------------------------------------------------------------------
  // Context::createStandardCursor
  //------------------------------------------------------------------------
-@@ -1256,4 +1312,4 @@ bool Context::isRuntimePlatformApple() const
+@@ -1178,6 +1339,13 @@ uint64_t Context::getTimerValue()
+ //------------------------------------------------------------------------
+ void Context::pollEvents()
+ {
++  emscripten_glfw3_context_jspi_settimeout();
++
++  // Drain DOM events that the main browser thread enqueued onto our SAB ring
++  // since the last poll. Each record's invoker runs the original C++ lambda
++  // (registered via EventListener<E>::listener) here on the worker.
++  EventQueue::instance().drain();
++
+   computeWindowPos();
+ 
+ #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
+@@ -1199,16 +1367,26 @@ void Context::pollEvents()
+ //------------------------------------------------------------------------
+ // Context::swapInterval
+ //------------------------------------------------------------------------
+-void Context::swapInterval(int iInterval) const
++void Context::swapInterval(int iInterval) 
+ {
+   // Code copied from library_glfw.js
+   // GLFW uses negative values to enable GLX_EXT_swap_control_tear, which we don't have,
+   // so just treat negative and positive the same.
+   iInterval = std::abs(iInterval);
+-  if(iInterval == 0)
+-    emscripten_set_main_loop_timing(EM_TIMING_SETTIMEOUT, 0);
+-  else
+-    emscripten_set_main_loop_timing(EM_TIMING_RAF, iInterval);
++  fInterval = iInterval;
++}
++void Context::swapBuffers() const
++{
++	glFlush();
++	EM_ASM({ try { GL.newRenderingFrameStarted(); } catch {} });
++	if (fInterval == 0)
++		emscripten_glfw3_context_jspi_settimeout();
++	else
++	{
++		for (int i = 0; i < fInterval; ++i) {
++			emscripten_glfw3_context_jspi_raf();
++		}
++	}
+ }
+ 
+ 
+@@ -1256,4 +1434,4 @@ bool Context::isRuntimePlatformApple() const
    return emscripten_glfw3_context_is_runtime_platform_apple();
  }
  
@@ -138,7 +368,7 @@ index afb6ea7..028e8e0 100644
 \ No newline at end of file
 +}
 diff --git a/src/cpp/emscripten/glfw3/Context.h b/src/cpp/emscripten/glfw3/Context.h
-index f7ecca2..8121ca2 100644
+index f7ecca2..b71a3ce 100644
 --- a/src/cpp/emscripten/glfw3/Context.h
 +++ b/src/cpp/emscripten/glfw3/Context.h
 @@ -76,6 +76,10 @@ public:
@@ -152,7 +382,17 @@ index f7ecca2..8121ca2 100644
    // cursor
    GLFWcursor *createStandardCursor(int iShape);
    GLFWcursor* createCursor(GLFWimage const *iImage, int iXHot, int iYHot);
-@@ -138,6 +142,7 @@ private:
+@@ -92,7 +96,8 @@ public:
+ 
+   // events
+   void pollEvents();
+-  void swapInterval(int iInterval) const;
++  void swapInterval(int iInterval);
++  void swapBuffers() const;
+ 
+   // opengl
+   glfw_bool_t isExtensionSupported(const char* extension);
+@@ -138,6 +143,7 @@ private:
    bool onPointerUnlock();
    std::shared_ptr<Window> findFocusedOrSingleWindow() const;
    void computeWindowPos();
@@ -160,6 +400,229 @@ index f7ecca2..8121ca2 100644
  
    // touch
    constexpr bool isTrackingTouch() const { return fTouchPointId.has_value(); }
+@@ -153,6 +159,7 @@ private:
+ #endif
+ 
+ private:
++  int fInterval{0};
+ #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
+   std::vector<std::shared_ptr<Window>> fWindows{};
+ #else
+@@ -206,4 +213,4 @@ private:
+ 
+ }
+ 
+-#endif //EMSCRIPTEN_GLFW_CONTEXT_H
+\ No newline at end of file
++#endif //EMSCRIPTEN_GLFW_CONTEXT_H
+diff --git a/src/cpp/emscripten/glfw3/EventQueue.cpp b/src/cpp/emscripten/glfw3/EventQueue.cpp
+new file mode 100644
+index 0000000..d208959
+--- /dev/null
++++ b/src/cpp/emscripten/glfw3/EventQueue.cpp
+@@ -0,0 +1,53 @@
++#include "EventQueue.h"
++
++namespace emscripten::glfw3 {
++
++EventQueue &EventQueue::instance()
++{
++  static EventQueue sInstance;
++  return sInstance;
++}
++
++bool EventQueue::push(EventInvoker iInvoker,
++                      void *iUserData,
++                      int32_t iEventType,
++                      void const *iPayload,
++                      int32_t iPayloadSize)
++{
++  if(iPayloadSize < 0 || static_cast<size_t>(iPayloadSize) > kEventMaxPayloadBytes)
++    return false;
++
++  uint32_t tail = fTail.load(std::memory_order_relaxed);
++  uint32_t head = fHead.load(std::memory_order_acquire);
++  uint32_t next = (tail + 1) % kEventQueueCapacity;
++  if(next == head)
++    return false;
++
++  EventSlot &slot = fSlots[tail];
++  slot.invoker = iInvoker;
++  slot.userData = iUserData;
++  slot.eventType = iEventType;
++  slot.payloadSize = iPayloadSize;
++  if(iPayloadSize > 0 && iPayload)
++    std::memcpy(slot.payload, iPayload, static_cast<size_t>(iPayloadSize));
++
++  fTail.store(next, std::memory_order_release);
++  return true;
++}
++
++void EventQueue::drain()
++{
++  uint32_t head = fHead.load(std::memory_order_relaxed);
++  uint32_t tail = fTail.load(std::memory_order_acquire);
++  while(head != tail)
++  {
++    EventSlot &slot = fSlots[head];
++    void const *payload = slot.payloadSize > 0 ? static_cast<void const *>(slot.payload) : nullptr;
++    slot.invoker(slot.userData, slot.eventType, payload);
++    head = (head + 1) % kEventQueueCapacity;
++    fHead.store(head, std::memory_order_release);
++    tail = fTail.load(std::memory_order_acquire);
++  }
++}
++
++}
+diff --git a/src/cpp/emscripten/glfw3/EventQueue.h b/src/cpp/emscripten/glfw3/EventQueue.h
+new file mode 100644
+index 0000000..093b88d
+--- /dev/null
++++ b/src/cpp/emscripten/glfw3/EventQueue.h
+@@ -0,0 +1,63 @@
++/*
++ * SPSC event ring used to move DOM events off the pthread proxy mailbox.
++ * Producer = main browser thread (HTML5 callbacks installed with
++ * EM_CALLBACK_THREAD_CONTEXT_MAIN_BROWSER_THREAD, plus JS-side handlers).
++ * Consumer = render worker, draining inside Context::pollEvents().
++ *
++ * All listener lambdas continue to run on the worker — we only short-circuit
++ * the dispatch path so main never enqueues into the worker's blocked mailbox.
++ */
++
++#ifndef EMSCRIPTEN_GLFW_EVENT_QUEUE_H
++#define EMSCRIPTEN_GLFW_EVENT_QUEUE_H
++
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++
++namespace emscripten::glfw3 {
++
++using EventInvoker = bool (*)(void *iUserData, int32_t iEventType, void const *iPayload);
++
++constexpr size_t kEventQueueCapacity = 64;
++constexpr size_t kEventMaxPayloadBytes = 2032;
++
++struct EventSlot
++{
++  EventInvoker invoker;
++  void *userData;
++  int32_t eventType;
++  int32_t payloadSize;
++  alignas(8) uint8_t payload[kEventMaxPayloadBytes];
++};
++
++class EventQueue
++{
++public:
++  static EventQueue &instance();
++
++  // main thread: enqueue a record. Returns false if the queue is full (event dropped).
++  bool push(EventInvoker iInvoker,
++            void *iUserData,
++            int32_t iEventType,
++            void const *iPayload,
++            int32_t iPayloadSize);
++
++  // worker thread: drain everything currently pending.
++  void drain();
++
++private:
++  EventQueue() = default;
++
++  std::atomic<uint32_t> fHead{0};
++  std::atomic<uint32_t> fTail{0};
++  EventSlot fSlots[kEventQueueCapacity]{};
++};
++
++template<typename E>
++bool EventListenerInvoke(void *iUserData, int32_t iEventType, void const *iPayload);
++
++}
++
++#endif // EMSCRIPTEN_GLFW_EVENT_QUEUE_H
+diff --git a/src/cpp/emscripten/glfw3/Events.h b/src/cpp/emscripten/glfw3/Events.h
+index bc13166..840f681 100644
+--- a/src/cpp/emscripten/glfw3/Events.h
++++ b/src/cpp/emscripten/glfw3/Events.h
+@@ -20,8 +20,12 @@
+ #define EMSCRIPTEN_GLFW_EVENTS_H
+ 
+ #include <emscripten/html5.h>
++#include <cstdint>
++#include <cstring>
+ #include <functional>
++#include <type_traits>
+ #include "ErrorHandler.h"
++#include "EventQueue.h"
+ 
+ namespace emscripten::glfw3 {
+ 
+@@ -66,7 +70,10 @@ private:
+   std::string fTarget{};
+   event_listener_t fEventListener{};
+   bool fUseCapture{false};
+-  pthread_t fThread{EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD};
++  // Install on the main browser thread so events never enter the worker's pthread proxy mailbox.
++  // The trampoline only enqueues a record; the actual listener body runs on the worker via
++  // EventQueue::drain() called from Context::pollEvents().
++  pthread_t fThread{EM_CALLBACK_THREAD_CONTEXT_MAIN_BROWSER_THREAD};
+   remove_listener_function_t fRemoveListenerFunction{};
+ };
+ 
+@@ -96,15 +103,47 @@ EventListener<E> &EventListener<E>::target(char const *iTarget)
+   return *this;
+ }
+ 
++//------------------------------------------------------------------------
++// EventListenerInvoke
++// - executor called by EventQueue::drain on the worker; reconstructs the
++//   typed pointer and runs the original lambda.
++//------------------------------------------------------------------------
++template<typename E>
++bool EventListenerInvoke(void *iUserData, int32_t iEventType, void const *iPayload)
++{
++  auto cb = reinterpret_cast<EventListener<E> *>(iUserData);
++  if constexpr(std::is_void_v<E>)
++    return cb->invoke(iEventType, nullptr);
++  else
++    return cb->invoke(iEventType, reinterpret_cast<E const *>(iPayload));
++}
++
+ //------------------------------------------------------------------------
+ // EventListenerCallback
+-// - generic callback which extracts EventListener<E> from iUserData and invoke it
++// - HTML5 trampoline. Runs on the MAIN browser thread (see fThread default).
++//   Copies the event payload into the SAB ring and returns. The lambda is
++//   invoked later on the worker via EventListenerInvoke<E>.
+ //------------------------------------------------------------------------
+ template<typename E>
+ EM_BOOL EventListenerCallback(int iEventType, E const *iEvent, void *iUserData)
+ {
+-  auto cb = reinterpret_cast<EventListener<E> *>(iUserData);
+-  return (*cb).invoke(iEventType, iEvent) ? EM_TRUE : EM_FALSE;
++  int32_t payloadSize = 0;
++  void const *payload = nullptr;
++  if constexpr(!std::is_void_v<E>)
++  {
++    payloadSize = static_cast<int32_t>(sizeof(E));
++    payload = iEvent;
++  }
++  EventQueue::instance().push(&EventListenerInvoke<E>,
++                              iUserData,
++                              iEventType,
++                              payload,
++                              payloadSize);
++  // We can't know the lambda's return value (preventDefault) without invoking
++  // it, and we can't safely invoke it on main. Always claim "handled" for the
++  // input-event types we route through here; the lambdas already returned true
++  // in the steady-state cases.
++  return EM_TRUE;
+ }
+ 
+ //------------------------------------------------------------------------
 diff --git a/src/cpp/emscripten/glfw3/Monitor.h b/src/cpp/emscripten/glfw3/Monitor.h
 index 3b88ced..b4826a5 100644
 --- a/src/cpp/emscripten/glfw3/Monitor.h
@@ -253,7 +716,7 @@ index cfa866b..daeffa9 100644
 \ No newline at end of file
 +}
 diff --git a/src/cpp/glfw3.cpp b/src/cpp/glfw3.cpp
-index 8475a25..14ffa20 100644
+index 8475a25..e66c4ca 100644
 --- a/src/cpp/glfw3.cpp
 +++ b/src/cpp/glfw3.cpp
 @@ -19,7 +19,10 @@
@@ -364,44 +827,17 @@ index 8475a25..14ffa20 100644
  GLFWAPI void glfwIconifyWindow(GLFWwindow* window) { logNotImplemented("glfwIconifyWindow"); }
  GLFWAPI void glfwRestoreWindow(GLFWwindow* window) { logNotImplemented("glfwRestoreWindow"); }
  GLFWAPI void glfwMaximizeWindow(GLFWwindow* window) { logNotImplemented("glfwMaximizeWindow"); }
-@@ -1336,7 +1406,46 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
+@@ -1336,7 +1406,19 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
  GLFWAPI GLFWwindowiconifyfun glfwSetWindowIconifyCallback(GLFWwindow* window, GLFWwindowiconifyfun callback) { logNotImplemented("glfwSetWindowIconifyCallback"); return callback; }
  GLFWAPI GLFWwindowmaximizefun glfwSetWindowMaximizeCallback(GLFWwindow* window, GLFWwindowmaximizefun callback) { logNotImplemented("glfwSetWindowMaximizeCallback"); return callback; }
  GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* window, GLFWdropfun callback) { logNotImplemented("glfwSetDropCallback"); return callback; }
 -GLFWAPI void glfwSwapBuffers(GLFWwindow* window) { logNotImplemented("glfwSwapBuffers"); }
 +GLFWAPI void glfwSwapBuffers(GLFWwindow* window)
 +{
-+  auto w = getWindow(window);
-+  if(!w)
-+    return;
-+
-+  if(!w->hasGLContext())
-+  {
-+    ErrorHandler::instance().logError(GLFW_NO_WINDOW_CONTEXT,
-+                                      "Cannot swap buffers for a window without an OpenGL or OpenGL ES context");
-+    return;
-+  }
-+
 +  auto context = getContext();
 +  if(!context)
 +    return;
-+
-+  if(context->getCurrentContext() != window)
-+  {
-+    ErrorHandler::instance().logError(GLFW_NO_CURRENT_CONTEXT,
-+                                      "Cannot swap buffers without a current OpenGL or OpenGL ES context");
-+    return;
-+  }
-+
-+  glFlush();
-+  EM_ASM({ GL.newRenderingFrameStarted() });
-+  auto const result = emscripten_webgl_commit_frame();
-+  if(result != EMSCRIPTEN_RESULT_SUCCESS &&
-+     result != EMSCRIPTEN_RESULT_DEFERRED &&
-+     result != EMSCRIPTEN_RESULT_INVALID_TARGET)
-+  {
-+    ErrorHandler::instance().logError(GLFW_PLATFORM_ERROR, "Failed to commit WebGL frame [%d]", result);
-+  }
++  context->swapBuffers();
 +}
 +
 +GLFWAPI GLFWglproc emscripten_glfw3_get_proc_address(const char* procname)
@@ -412,10 +848,30 @@ index 8475a25..14ffa20 100644
  // GLFWAPI GLFWglproc glfwGetProcAddress(const char* procname) { logNotImplemented("glfwGetProcAddress"); } implemented by emscripten GL
  GLFWAPI int glfwVulkanSupported(void) { return GLFW_FALSE; }
  GLFWAPI const char** glfwGetRequiredInstanceExtensions(uint32_t* count) { logNotImplemented("glfwGetRequiredInstanceExtensions"); *count = 0; return nullptr; }
-@@ -1509,4 +1618,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
+@@ -1509,4 +1591,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
    };
  }
  
 -}
 \ No newline at end of file
 +}
+diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
+index 0cfd23c..26be397 100644
+--- a/src/js/lib_emscripten_glfw3.js
++++ b/src/js/lib_emscripten_glfw3.js
+@@ -814,6 +814,15 @@ let emscripten_glfw3_impl = {
+     return navigator.platform.indexOf("Mac") === 0 || navigator.platform === "iPhone";
+   },
+ 
++  emscripten_glfw3_context_jspi_settimeout: function() {
++    return new Promise(r => setTimeout(r, 0));
++  },
++  emscripten_glfw3_context_jspi_settimeout__postset: '_emscripten_glfw3_context_jspi_settimeout = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_settimeout);',
++
++  emscripten_glfw3_context_jspi_raf: function() {
++    return new Promise(r => requestAnimationFrame(r));
++  },
++  emscripten_glfw3_context_jspi_raf__postset: '_emscripten_glfw3_context_jspi_raf = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_raf);',
+ }
+ 
+ autoAddDeps(emscripten_glfw3_impl, '$GLFW3')
