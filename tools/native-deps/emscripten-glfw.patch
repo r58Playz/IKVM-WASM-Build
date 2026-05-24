@@ -652,14 +652,33 @@ index 3b88ced..b4826a5 100644
  };
  
  }
+diff --git a/src/cpp/emscripten/glfw3/Mouse.h b/src/cpp/emscripten/glfw3/Mouse.h
+index 20b2e04..20fd438 100644
+--- a/src/cpp/emscripten/glfw3/Mouse.h
++++ b/src/cpp/emscripten/glfw3/Mouse.h
+@@ -60,6 +60,10 @@ public:
+   std::array<glfw_mouse_button_state_t, GLFW_MOUSE_BUTTON_LAST + 1> fButtonStates{GLFW_RELEASE};
+ 
+   glfw_cursor_mode_t fCursorMode{GLFW_CURSOR_NORMAL};
++  // What the application last asked for via glfwSetInputMode. Diverges from
++  // fCursorMode when the browser silently exits pointer lock (e.g. user Esc);
++  // used to auto-recapture on the next user click.
++  glfw_cursor_mode_t fIntendedCursorMode{GLFW_CURSOR_NORMAL};
+   glfw_bool_t fStickyMouseButtons{GLFW_FALSE};
+ 
+   Vec2<double> fCursorPos{};
 diff --git a/src/cpp/emscripten/glfw3/Window.cpp b/src/cpp/emscripten/glfw3/Window.cpp
-index cfa866b..daeffa9 100644
+index cfa866b..358087f 100644
 --- a/src/cpp/emscripten/glfw3/Window.cpp
 +++ b/src/cpp/emscripten/glfw3/Window.cpp
-@@ -41,6 +41,24 @@ int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
+@@ -39,6 +39,26 @@ void emscripten_glfw3_window_set_visibility(GLFWwindow *iWindow, bool iVisible);
+ int emscripten_glfw3_context_make_canvas_resizable(GLFWwindow *window, char const *canvasResizeSelector, char const *handleSelector);
+ int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
  double emscripten_glfw3_context_get_now();
- }
- 
++void emscripten_glfw3_context_keyboard_lock(bool enable);
++void emscripten_glfw3_window_resize_offscreen_local(int width, int height);
++}
++
 +// GL backend WebGL context hooks. Compile-time symbol prefix selects which
 +// translation layer is linked: krypton_* for Krypton Wrapper / NG-GL4ES,
 +// mobileglues_* for MobileGlues. Pick via -DGL_BACKEND_KRYPTON.
@@ -676,12 +695,10 @@ index cfa866b..daeffa9 100644
 +EMSCRIPTEN_WEBGL_CONTEXT_HANDLE GL_BACKEND_WEBGL_CREATE_CONTEXT(const char *target, const EmscriptenWebGLContextAttributes *attributes);
 +EMSCRIPTEN_RESULT GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
 +EMSCRIPTEN_RESULT GL_BACKEND_WEBGL_DESTROY_CONTEXT(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+}
-+
- namespace emscripten::glfw3 {
+ }
  
- static ErrorHandler &kErrorHandler = ErrorHandler::instance();
-@@ -134,7 +152,7 @@ void Window::destroy()
+ namespace emscripten::glfw3 {
+@@ -134,7 +154,7 @@ void Window::destroy()
    {
      addOrRemoveEventListeners(false);
      if(hasGLContext())
@@ -690,7 +707,49 @@ index cfa866b..daeffa9 100644
      emscripten_glfw3_window_destroy(asOpaquePtr());
      fDestroyed = true;
    }
-@@ -488,7 +506,7 @@ bool Window::createGLContext()
+@@ -320,6 +340,14 @@ void Window::setCanvasSize(Vec2<int> const &iSize)
+ 
+   fFramebufferSize = fbSize;
+ 
++  // Resize the OffscreenCanvas backing on THIS pthread before the proxied
++  // CSS/size sync. In OFFSCREENCANVAS_SUPPORT builds the canvas is owned by
++  // whichever pthread runs this code (PROXY_TO_PTHREAD), so a direct
++  // Module.canvas.width assignment is the only path that actually updates
++  // the WebGL drawing buffer — the main-thread proxy chain only touches
++  // shared mem.
++  emscripten_glfw3_window_resize_offscreen_local(fFramebufferSize.width, fFramebufferSize.height);
++
+   emscripten_glfw3_window_set_size(asOpaquePtr(), fSize.width, fSize.height, fFramebufferSize.width, fFramebufferSize.height);
+ 
+   if(sizeChanged)
+@@ -361,13 +389,21 @@ void Window::onGlobalMouseMove(EmscriptenMouseEvent const *iEvent)
+ {
+   if(isPointerLock())
+   {
++    // GLFW_CURSOR_DISABLED: cursor position is a virtual coordinate that
++    // accumulates pointer-lock movement (browsers feed deltas via
++    // movementX/Y). The previous code zeroed the residual every event and
++    // passed the per-event delta directly to setCursorPos, which assigns
++    // rather than adds — so the callback fired with the LATEST delta each
++    // time instead of the accumulated virtual position. Minecraft's
++    // MouseHandler interprets that as (deltaN - deltaN-1) which produces
++    // chaotic look behaviour (snaps to looking up after every pause).
+     fMouse.fCursorLockResidual.x += iEvent->movementX;
+     fMouse.fCursorLockResidual.y += iEvent->movementY;
+-    auto cursorPos = fMouse.fCursorLockResidual;
+-    // following SDL implementation to not lose sub-pixel motion
+-    fMouse.fCursorLockResidual.x -= cursorPos.x;
+-    fMouse.fCursorLockResidual.y -= cursorPos.y;
+-    setCursorPos(cursorPos);
++    auto deltaX = std::trunc(fMouse.fCursorLockResidual.x);
++    auto deltaY = std::trunc(fMouse.fCursorLockResidual.y);
++    fMouse.fCursorLockResidual.x -= deltaX;
++    fMouse.fCursorLockResidual.y -= deltaY;
++    setCursorPos({fMouse.fCursorPos.x + deltaX, fMouse.fCursorPos.y + deltaY});
+   }
+   else
+   {
+@@ -488,7 +524,7 @@ bool Window::createGLContext()
      attributes.stencil = fConfig.fStencilBits > 0;
      attributes.alpha = fConfig.fAlphaBits > 0;
  
@@ -699,7 +758,7 @@ index cfa866b..daeffa9 100644
      if(fWebGLContextHandle == 0)
      {
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot create GL context for [%s]", getCanvasSelector());
-@@ -506,7 +524,7 @@ void Window::makeGLContextCurrent() const
+@@ -506,7 +542,7 @@ void Window::makeGLContextCurrent() const
  {
    if(hasGLContext())
    {
@@ -708,7 +767,63 @@ index cfa866b..daeffa9 100644
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot make GL context current for [%s]", getCanvasSelector());
    }
  }
-@@ -988,4 +1006,4 @@ int Window::unmakeCanvasResizable()
+@@ -642,6 +678,11 @@ void Window::setInputMode(int iMode, int iValue)
+ //------------------------------------------------------------------------
+ void Window::setCursorMode(glfw_cursor_mode_t iCursorMode)
+ {
++  // Always record what the app most recently asked for so that auto-recapture
++  // is cleared even when fCursorMode already happens to match (e.g. browser
++  // exited pointer lock to NORMAL and then the app explicitly sets NORMAL).
++  fMouse.fIntendedCursorMode = iCursorMode;
++
+   if(fMouse.fCursorMode == iCursorMode)
+     return;
+ 
+@@ -683,7 +724,14 @@ void Window::onPointerLock()
+   fMouse.fCursorLockResidual = {};
+   fMouse.fCursorPosBeforePointerLock = fMouse.fCursorPos;
+   fMouse.fCursorMode = GLFW_CURSOR_DISABLED;
++  fMouse.fIntendedCursorMode = GLFW_CURSOR_DISABLED;
+   setCursorPos(Vec2<double>{});
++
++  // Route Esc (and other system shortcuts) to the page so games like
++  // Minecraft can handle them instead of having the browser exit pointer
++  // lock. No-op if the Keyboard Lock API is unavailable or fullscreen
++  // isn't active.
++  emscripten_glfw3_context_keyboard_lock(true);
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -695,9 +743,15 @@ bool Window::onPointerUnlock(std::optional<glfw_cursor_mode_t> iCursorMode)
+   {
+     auto cursorMode = iCursorMode ? *iCursorMode : GLFW_CURSOR_NORMAL;
+     fMouse.fCursorMode = cursorMode;
++    // If the unlock came from a real app request, the intended mode should
++    // follow. If it was browser-initiated (iCursorMode is nullopt), leave
++    // fIntendedCursorMode alone so onMouseButtonDown can recapture.
++    if(iCursorMode)
++      fMouse.fIntendedCursorMode = *iCursorMode;
+     auto const cursor = iCursorMode == GLFW_CURSOR_HIDDEN ? fMouse.hideCursor() : fMouse.showCursor();
+     cursor->set(asOpaquePtr());
+     setCursorPos(fMouse.fCursorPosBeforePointerLock);
++    emscripten_glfw3_context_keyboard_lock(false);
+     return true;
+   }
+   return false;
+@@ -754,6 +808,12 @@ bool Window::onMouseButtonDown(int iGLFWButton)
+     if(fFocusOnMouse && !isFocused())
+       focus();
+ 
++    // The browser silently exits pointer lock on Esc (or tab switch, etc.).
++    // If the app still wants the cursor disabled, use this user-initiated
++    // click to re-request the lock — request must come from a user gesture.
++    if(fMouse.fIntendedCursorMode == GLFW_CURSOR_DISABLED && !isPointerLock())
++      fContext->requestPointerLock(asOpaquePtr());
++
+     if(fMouse.fButtonCallback)
+       fMouse.fButtonCallback(asOpaquePtr(), fMouse.fLastButton, fMouse.fLastButtonState, fKeyboard.computeModifierBits());
+   }
+@@ -988,4 +1048,4 @@ int Window::unmakeCanvasResizable()
  }
  
  
@@ -856,13 +971,59 @@ index 8475a25..e66c4ca 100644
 \ No newline at end of file
 +}
 diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
-index 0cfd23c..26be397 100644
+index 0cfd23c..ff4ee92 100644
 --- a/src/js/lib_emscripten_glfw3.js
 +++ b/src/js/lib_emscripten_glfw3.js
-@@ -814,6 +814,15 @@ let emscripten_glfw3_impl = {
+@@ -814,6 +814,61 @@ let emscripten_glfw3_impl = {
      return navigator.platform.indexOf("Mac") === 0 || navigator.platform === "iPhone";
    },
  
++  // emscripten_glfw3_window_resize_offscreen_local
++  // Runs on the CALLING pthread (no proxy). In PROXY_TO_PTHREAD/
++  // OffscreenCanvas setups, the canvas was transferControlToOffscreen'd into
++  // this pthread; emscripten parks it on this thread as
++  // `GL.offscreenCanvases[id].offscreenCanvas`. Assigning .width/.height on
++  // that OffscreenCanvas is what actually resizes the WebGL drawing buffer
++  // — the proxied `_emscripten_set_canvas_element_size` runs on main, which
++  // only updates shared-mem and never gets applied to the OffscreenCanvas
++  // (no worker-side handler exists in this build), so the drawing buffer
++  // stays stuck at its transfer-time size (HTML default 300×150) and renders
++  // get cropped to the bottom-left of Minecraft's viewport.
++  emscripten_glfw3_window_resize_offscreen_local__deps: ['$GL'],
++  emscripten_glfw3_window_resize_offscreen_local__sig: 'vii',
++  emscripten_glfw3_window_resize_offscreen_local: (width, height) => {
++    if (typeof GL === 'undefined' || !GL.offscreenCanvases) return;
++    for (const key in GL.offscreenCanvases) {
++      const info = GL.offscreenCanvases[key];
++      const oc = info && info.offscreenCanvas;
++      if (!oc) continue;
++      try {
++        if (oc.width !== width) oc.width = width;
++        if (oc.height !== height) oc.height = height;
++      } catch (e) {}
++    }
++  },
++
++  // emscripten_glfw3_context_keyboard_lock
++  // Locks Escape (and a few other game-relevant keys) so the browser routes
++  // them to the page instead of using them as a way out of pointer lock /
++  // fullscreen. Requires fullscreen on most browsers; silent no-op otherwise.
++  emscripten_glfw3_context_keyboard_lock__proxy: 'sync',
++  emscripten_glfw3_context_keyboard_lock__sig: 'vi',
++  emscripten_glfw3_context_keyboard_lock: (enable) => {
++    if (!navigator.keyboard || !navigator.keyboard.lock)
++      return;
++    if (enable) {
++      try {
++        const p = navigator.keyboard.lock(['Escape']);
++        if (p && typeof p.catch === 'function')
++          p.catch(() => {});
++      } catch (e) {}
++    } else {
++      try { navigator.keyboard.unlock(); } catch (e) {}
++    }
++  },
++
 +  emscripten_glfw3_context_jspi_settimeout: function() {
 +    return new Promise(r => setTimeout(r, 0));
 +  },
