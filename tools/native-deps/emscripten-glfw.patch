@@ -971,7 +971,7 @@ index 8475a25..e66c4ca 100644
 \ No newline at end of file
 +}
 diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
-index 0cfd23c..ff4ee92 100644
+index 0cfd23c..33f1ade 100644
 --- a/src/js/lib_emscripten_glfw3.js
 +++ b/src/js/lib_emscripten_glfw3.js
 @@ -814,6 +814,61 @@ let emscripten_glfw3_impl = {
@@ -1025,7 +1025,7 @@ index 0cfd23c..ff4ee92 100644
 +  },
 +
 +  emscripten_glfw3_context_jspi_settimeout: function() {
-+    return new Promise(r => setTimeout(r, 0));
++    return scheduler.yield();
 +  },
 +  emscripten_glfw3_context_jspi_settimeout__postset: '_emscripten_glfw3_context_jspi_settimeout = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_settimeout);',
 +
