@@ -3399,7 +3399,7 @@ index 50a0078d2..d62eabff7 100644
 \ No newline at end of file
 +}
 diff --git a/src/IKVM.Runtime/LambdaMetafactory.cs b/src/IKVM.Runtime/LambdaMetafactory.cs
-index 22e86df4c..1cdf2bf8b 100644
+index 22e86df4c..b524ddd86 100644
 --- a/src/IKVM.Runtime/LambdaMetafactory.cs
 +++ b/src/IKVM.Runtime/LambdaMetafactory.cs
 @@ -233,15 +233,30 @@ bool EmitImpl(RuntimeByteCodeJavaType.FinishContext context, ClassFile classFile
@@ -3438,10 +3438,28 @@ index 22e86df4c..1cdf2bf8b 100644
  
              getInstance = CreateConstructorAndDispatch(context, cpi, tb, methods, implParameters, samMethodType, implMethod, instantiatedMethodType, serializable);
              AddDefaultInterfaceMethods(context, methodList, tb);
-@@ -254,6 +269,24 @@ static void Fail(string msg)
+@@ -254,6 +269,42 @@ static void Fail(string msg)
              Console.WriteLine("Fail: " + msg);
          }
  
++        [Conditional("TRACE_LAMBDA_METAFACTORY")]
++        static void Trace(string msg)
++        {
++            Console.WriteLine("[LMF] " + msg);
++        }
++
++        // Synthetic bridge methods get the "<bridge>" prefix on their CLR-level name in IKVM
++        // (see RuntimeByteCodeJavaType.JavaTypeImpl.cs and FinishContext.cs). When walking
++        // an interface hierarchy here we need to treat "<bridge>foo" and "foo" as the same
++        // override, since the bridge is the concrete override of the abstract parent method
++        // it bridges to.
++        static string StripBridgePrefix(string name)
++        {
++            return name != null && name.StartsWith(NamePrefix.Bridge, StringComparison.Ordinal)
++                ? name.Substring(NamePrefix.Bridge.Length)
++                : name;
++        }
++
 +        /// <summary>
 +        /// Add an interface to the TypeBuilder and recursively register all of its
 +        /// parent interfaces too. Skips interfaces that aren't accessible from the
@@ -3463,6 +3481,95 @@ index 22e86df4c..1cdf2bf8b 100644
          /// <summary>
          /// Returns <c>true</c> if the various signatures are compatible or adaptable to each other.
          /// </summary>
+@@ -915,9 +966,11 @@ static bool IsSupportedInterface(RuntimeJavaType tw, RuntimeJavaType caller)
+ 
+         static bool CheckSupportedInterfaces(RuntimeJavaType caller, RuntimeJavaType tw, RuntimeJavaType[] markers, ClassFile.ConstantPoolItemMethodType[] bridges, out RuntimeJavaMethod[] methodList)
+         {
++            Trace($"CheckSupportedInterfaces: caller={caller.Name} tw={tw.Name} markers={markers.Length} bridges={(bridges == null ? "<null>" : bridges.Length.ToString())}");
+             // we don't need to check for unloadable, because we already did that while validating the invoke signature
+             if (!IsSupportedInterface(tw, caller))
+             {
++                Trace($"  IsSupportedInterface({tw.Name}) failed: isInterface={tw.IsInterface} isGhost={tw.IsGhost} accessible={tw.IsAccessibleFrom(caller)} isISerializable={tw.Context.Serialization.IsISerializable(tw)}");
+                 methodList = null;
+                 return false;
+             }
+@@ -925,7 +978,9 @@ static bool CheckSupportedInterfaces(RuntimeJavaType caller, RuntimeJavaType tw,
+             Dictionary<MethodKey, RuntimeJavaMethod> methods = new Dictionary<MethodKey, RuntimeJavaMethod>();
+             int abstractMethodCount = 0;
+             int bridgeMethodCount = 0;
+-            if (GatherAllInterfaceMethods(tw, bridges, methods, ref abstractMethodCount, ref bridgeMethodCount) && abstractMethodCount == 1)
++            var gatherOk = GatherAllInterfaceMethods(tw, bridges, methods, ref abstractMethodCount, ref bridgeMethodCount);
++            Trace($"  after primary gather: ok={gatherOk} abstractMethodCount={abstractMethodCount} bridgeMethodCount={bridgeMethodCount} dictSize={methods.Count}");
++            if (gatherOk && abstractMethodCount == 1)
+             {
+                 foreach (var marker in markers)
+                 {
+@@ -959,6 +1014,7 @@ static bool CheckSupportedInterfaces(RuntimeJavaType caller, RuntimeJavaType tw,
+ 
+         static bool GatherAllInterfaceMethods(RuntimeJavaType tw, ClassFile.ConstantPoolItemMethodType[] bridges, Dictionary<MethodKey, RuntimeJavaMethod> methods, ref int abstractMethodCount, ref int bridgeMethodCount)
+         {
++            Trace($"  Gather walk: {tw.Name}");
+             foreach (var mw in tw.GetMethods())
+             {
+                 if (mw.IsVirtual)
+@@ -966,7 +1022,10 @@ static bool GatherAllInterfaceMethods(RuntimeJavaType tw, ClassFile.ConstantPool
+                     if (mw is RuntimeMirandaJavaMethod mmw)
+                     {
+                         if (mmw.Error != null)
++                        {
++                            Trace($"    bail: miranda method '{mw.Name}{mw.Signature}' has error '{mmw.Error}'");
+                             return false;
++                        }
+ 
+                         continue;
+                     }
+@@ -977,8 +1036,10 @@ static bool GatherAllInterfaceMethods(RuntimeJavaType tw, ClassFile.ConstantPool
+                         if (!MatchSignatures(mw, current))
+                         {
+                             // linkage error (or unloadable type)
++                            Trace($"    bail: MatchSignatures false for '{mw.Name}{mw.Signature}' (existing from {current.DeclaringType.Name}, new from {mw.DeclaringType.Name})");
+                             return false;
+                         }
++                        Trace($"    dup key '{mw.Name}{mw.Signature}' from {mw.DeclaringType.Name}; existing from {current.DeclaringType.Name} (existingAbstract={current.IsAbstract} newAbstract={mw.IsAbstract})");
+                     }
+                     else
+                     {
+@@ -987,18 +1048,34 @@ static bool GatherAllInterfaceMethods(RuntimeJavaType tw, ClassFile.ConstantPool
+                         if (mw.IsAbstract && !IsObjectMethod(mw))
+                         {
+                             if (bridges != null && IsBridge(mw, bridges))
++                            {
+                                 bridgeMethodCount++;
++                                Trace($"    add+bridge '{mw.Name}{mw.Signature}' (from {tw.Name}) bridgeCount={bridgeMethodCount}");
++                            }
+                             else
++                            {
+                                 abstractMethodCount++;
++                                Trace($"    add+abstract '{mw.Name}{mw.Signature}' (from {tw.Name}) abstractCount={abstractMethodCount}");
++                            }
++                        }
++                        else
++                        {
++                            Trace($"    add '{mw.Name}{mw.Signature}' (from {tw.Name}) abstract={mw.IsAbstract} isObjectMethod={IsObjectMethod(mw)}");
+                         }
+                     }
+ 
+                     mw.Link();
+                     if (mw.GetMethod() == null)
++                    {
++                        Trace($"    bail: GetMethod() null for '{mw.Name}{mw.Signature}' after Link");
+                         return false;
++                    }
+ 
+-                    if (current != null && mw.RealName != current.RealName)
++                    if (current != null && StripBridgePrefix(mw.RealName) != StripBridgePrefix(current.RealName))
++                    {
++                        Trace($"    bail: RealName mismatch '{mw.Name}{mw.Signature}': existing.RealName='{current.RealName}' new.RealName='{mw.RealName}'");
+                         return false;
++                    }
+                 }
+             }
+ 
 diff --git a/src/IKVM.Runtime/LibJVM.cs b/src/IKVM.Runtime/LibJVM.cs
 index 2fa4d5bcd..db0a84758 100644
 --- a/src/IKVM.Runtime/LibJVM.cs
