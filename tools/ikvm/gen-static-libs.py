@@ -40,8 +40,8 @@ Usage
         --add-symbol "libjava.so:another_func" "libjava.so:/path/to/libjava.a"
 
     # Bulk-add symbols from a file (one symbol per line, # comments allowed):
-    python3 gen-static-libs.py --symbol-list "openal:/path/to/openal-symbols.txt" \\
-        "openal:/path/to/openal-stubs.a"
+    python3 gen-static-libs.py --symbol-list "libfoo.so:/path/to/extra-symbols.txt" \\
+        "libfoo.so:/path/to/libfoo.a"
 
     # Add alternate library names that resolve to the same archive:
     python3 gen-static-libs.py --add-alias "libjava.so:libjava" \\

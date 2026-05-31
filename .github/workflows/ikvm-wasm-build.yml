@@ -275,12 +275,9 @@ jobs:
           cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
           cp java-native-deps/mt/liblwjgl3.a release/liblwjgl3-mt.a
           cp java-native-deps/mt/liblwjgl_stb.a release/liblwjgl_stb-mt.a
-          cp java-native-deps/mt/liblwjgl_openal_stubs.a release/liblwjgl_openal_stubs-mt.a
           cp java-native-deps/st/lwjgl3.jar release/lwjgl3-st.jar
           cp java-native-deps/st/liblwjgl3.a release/liblwjgl3-st.a
           cp java-native-deps/st/liblwjgl_stb.a release/liblwjgl_stb-st.a
-          cp java-native-deps/st/liblwjgl_openal_stubs.a release/liblwjgl_openal_stubs-st.a
-          cp java-native-deps/mt/openal-symbols.txt release/openal-symbols.txt
 
           cp java-native-deps/mt/libffi.a release/libffi-mt.a
           cp java-native-deps/st/libffi.a release/libffi-st.a

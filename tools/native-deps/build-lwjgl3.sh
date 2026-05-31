@@ -449,23 +449,5 @@ rm -f "$OUTPUT_DIR/liblwjgl3.a" "$OUTPUT_DIR/liblwjgl_stb.a"
 emar rcs "$OUTPUT_DIR/liblwjgl3.a" "${NATIVE_OBJECTS[@]}"
 emar rcs "$OUTPUT_DIR/liblwjgl_stb.a" "${STB_NATIVE_OBJECTS[@]}"
 
-# openal stubs: emscripten's library_openal.js does not implement
-# alcGetProcAddress / alGetProcAddress. LWJGL's ALC throws if alcGetProcAddress
-# is NULL, so we ship a stub archive that satisfies those two symbols. The
-# remaining openal surface (alcOpenDevice, alSourcePlay, ...) is enumerated in
-# openal-symbols.txt and gets wired up at the final wasm link via -lopenal.
-OPENAL_STUBS_SRC="$WORKSPACE/openal-stubs.c"
-OPENAL_STUBS_OBJ="$NATIVE_BUILD_DIR/obj/openal-stubs.o"
-if [ ! -f "$OPENAL_STUBS_SRC" ]; then
-    echo "ERROR: expected openal stubs source not found: $OPENAL_STUBS_SRC" >&2
-    exit 1
-fi
-emcc -c "$OPENAL_STUBS_SRC" -o "$OPENAL_STUBS_OBJ" \
-    -O2 -fPIC -Wno-error "$PTHREAD_DEFINE" "${PTHREAD_FLAGS[@]}"
-rm -f "$OUTPUT_DIR/liblwjgl_openal_stubs.a"
-emar rcs "$OUTPUT_DIR/liblwjgl_openal_stubs.a" "$OPENAL_STUBS_OBJ"
-
-cp "$WORKSPACE/openal-symbols.txt" "$OUTPUT_DIR/openal-symbols.txt"
-
 log "Artifacts written to: $OUTPUT_DIR"
 ls -lh "$OUTPUT_DIR"
