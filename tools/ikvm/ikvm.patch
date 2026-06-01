@@ -2317,6 +2317,25 @@ index 79a7c736c..468b86512 100644
          internal static jint AttachCurrentThreadAsDaemon(JavaVM* pJVM, void** penv, void* args)
          {
              return AttachCurrentThreadImpl(pJVM, penv, (JavaVMAttachArgs*)args, true);
+diff --git a/src/IKVM.Runtime/JVM.Properties.cs b/src/IKVM.Runtime/JVM.Properties.cs
+index 589833449..a9198569d 100644
+--- a/src/IKVM.Runtime/JVM.Properties.cs
++++ b/src/IKVM.Runtime/JVM.Properties.cs
+@@ -279,6 +279,14 @@ static void InitSystemProperties(Dictionary<string, string> p)
+         // unlimited direct memory
+         p["sun.nio.MaxDirectMemorySize"] = "-1";
+ 
++        // single-threaded WASM build: tell java.lang.ref.Finalizer not to start the
++        // finalizer thread (the runtime cannot start threads; Thread.start traps).
++        // Read from the env var here because OpenJDK's System.getenv does not see
++        // mono's withEnvironmentVariable values on wasm, whereas this becomes a real
++        // system property consulted in Finalizer's static initializer.
++        if (SafeGetEnvironmentVariable("IKVM_DISABLE_FINALIZER") != null)
++            p["ikvm.finalizer.disabled"] = "true";
++
+         // default to FORK on OSX, instead of posix_spawn with jspawnhelper
+         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+             p["jdk.lang.Process.launchMechanism"] = "FORK";
 diff --git a/src/IKVM.Runtime/JVM.cs b/src/IKVM.Runtime/JVM.cs
 index b3c9d17bc..69d1626b8 100644
 --- a/src/IKVM.Runtime/JVM.cs

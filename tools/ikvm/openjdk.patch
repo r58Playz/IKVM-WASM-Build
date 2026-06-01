@@ -1,3 +1,37 @@
+diff --git a/jdk/src/share/classes/java/lang/ref/Finalizer.java b/jdk/src/share/classes/java/lang/ref/Finalizer.java
+index 87d95fba96..68e891935f 100644
+--- a/jdk/src/share/classes/java/lang/ref/Finalizer.java
++++ b/jdk/src/share/classes/java/lang/ref/Finalizer.java
+@@ -195,14 +195,21 @@ final class Finalizer extends FinalReference<Object> { /* Package-private; must
+     }
+ 
+     static {
+-        ThreadGroup tg = Thread.currentThread().getThreadGroup();
+-        for (ThreadGroup tgn = tg;
+-             tgn != null;
+-             tg = tgn, tgn = tg.getParent());
+-        Thread finalizer = new FinalizerThread(tg);
+-        finalizer.setPriority(Thread.MAX_PRIORITY - 2);
+-        finalizer.setDaemon(true);
+-        finalizer.start();
++        // IKVM single-threaded WASM build: the runtime cannot start threads, so the
++        // ikvm.finalizer.disabled system property (set by IKVM.Runtime when the
++        // IKVM_DISABLE_FINALIZER env var is present) suppresses the finalizer thread.
++        // The field initializers above (queue/lock/unfinalized) still run, so
++        // Finalizer.register keeps working; finalizers just aren't drained on a thread.
++        if (!"true".equals(System.getProperty("ikvm.finalizer.disabled"))) {
++            ThreadGroup tg = Thread.currentThread().getThreadGroup();
++            for (ThreadGroup tgn = tg;
++                 tgn != null;
++                 tg = tgn, tgn = tg.getParent());
++            Thread finalizer = new FinalizerThread(tg);
++            finalizer.setPriority(Thread.MAX_PRIORITY - 2);
++            finalizer.setDaemon(true);
++            finalizer.start();
++        }
+     }
+ 
+ }
 diff --git a/jdk/src/share/native/java/net/net_util.c b/jdk/src/share/native/java/net/net_util.c
 index b1b8223a63..b5db51eeef 100644
 --- a/jdk/src/share/native/java/net/net_util.c
