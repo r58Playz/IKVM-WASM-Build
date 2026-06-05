@@ -2348,6 +2348,56 @@ index b3c9d17bc..69d1626b8 100644
              pendingException = e != null ? ikvm.runtime.Util.mapException(e) : null;
          }
  
+diff --git a/src/IKVM.Runtime/Java/Externs/ikvm/runtime/Util.cs b/src/IKVM.Runtime/Java/Externs/ikvm/runtime/Util.cs
+index 1fbc79ad5..1f7c73a4d 100644
+--- a/src/IKVM.Runtime/Java/Externs/ikvm/runtime/Util.cs
++++ b/src/IKVM.Runtime/Java/Externs/ikvm/runtime/Util.cs
+@@ -22,6 +22,7 @@ Jeroen Frijters
+   
+ */
+ using System;
++using System.Collections.Concurrent;
+ 
+ using IKVM.Attributes;
+ using IKVM.Runtime;
+@@ -32,6 +33,14 @@ namespace IKVM.Java.Externs.ikvm.runtime
+     static class Util
+     {
+ 
++        // concrete .NET Type -> resolved RuntimeJavaType (the result of the ghost-less resolution below).
++        // The mapping is invariant per concrete runtime type, so caching it removes the per-call
++        // IsRemappedType (Dictionary<Type,string>) lookup + the abstract-helper BaseType walk on this
++        // very hot path (getClass / instanceof / reflection bridging). Keyed by Type only, which is
++        // correct for a single RuntimeContext (the runtime case); hang it off the factory if multiple
++        // contexts are ever used concurrently.
++        static readonly ConcurrentDictionary<Type, RuntimeJavaType> wrapperByConcreteType = new ConcurrentDictionary<Type, RuntimeJavaType>();
++
+         public static global::java.lang.Class getClassFromObject(object o)
+         {
+ #if FIRST_PASS
+@@ -43,11 +52,22 @@ static class Util
+ 
+         internal static RuntimeJavaType GetTypeWrapperFromObject(RuntimeContext context, object o)
+         {
++            // ghost tags are attached per-object (side table), so this must stay uncached and first
+             var ghostType = GhostTag.GetTag(o);
+             if (ghostType != null)
+                 return ghostType;
+ 
+             var t = o.GetType();
++            if (wrapperByConcreteType.TryGetValue(t, out var cached))
++                return cached;
++
++            var resolved = ResolveTypeWrapperFromType(context, t);
++            wrapperByConcreteType[t] = resolved;
++            return resolved;
++        }
++
++        static RuntimeJavaType ResolveTypeWrapperFromType(RuntimeContext context, Type t)
++        {
+             if (t.IsPrimitive || context.ClassLoaderFactory.IsRemappedType(t) && !t.IsSealed)
+                 return context.ManagedJavaTypeFactory.GetJavaTypeFromManagedType(t);
+ 
 diff --git a/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs b/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs
 index 61d1566a4..e93c68c32 100644
 --- a/src/IKVM.Runtime/Java/Externs/java/io/FileInputStream.cs
@@ -2423,7 +2473,7 @@ index 0322f2275..c9db1de29 100644
  		{
  #if !FIRST_PASS
 diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
-index 50a0078d2..d62eabff7 100644
+index 50a0078d2..064ef0797 100644
 --- a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
 +++ b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
 @@ -1,4 +1,7 @@
@@ -2435,7 +2485,7 @@ index 50a0078d2..d62eabff7 100644
  using System.Linq;
  using System.Linq.Expressions;
  using System.Reflection;
-@@ -68,6 +71,429 @@ public ArrayDelegateRef(RuntimeJavaType type)
+@@ -68,6 +71,432 @@ public ArrayDelegateRef(RuntimeJavaType type)
              .Where(i => i.Name == nameof(CompareAndSwapArray) && i.IsGenericMethodDefinition && i.GetGenericArguments().Length == 1)
              .FirstOrDefault();
  
@@ -2568,7 +2618,14 @@ index 50a0078d2..d62eabff7 100644
 +        static int nextObjectFieldTypeId;
 +        static readonly object objectFieldOffsetSync = new object();
 +        static readonly ConditionalWeakTable<RuntimeJavaType, ObjectFieldOffsetInfo> objectFieldOffsetsByType = new ConditionalWeakTable<RuntimeJavaType, ObjectFieldOffsetInfo>();
-+        static readonly ConcurrentDictionary<int, WeakReference<ObjectFieldOffsetInfo>> objectFieldOffsetsByTypeId = new ConcurrentDictionary<int, WeakReference<ObjectFieldOffsetInfo>>();
++        // typeId -> info, indexed directly. typeIds are dense and monotonic (Interlocked.Increment) and
++        // capped at ObjectFieldOffsetMaxTypeId (0x3FFF), so one fixed array (<=16K refs, ~128KB) covers
++        // every possible id. A plain array load replaces the per-field-access ConcurrentDictionary<int,_>
++        // probe, which the trace showed was ~10% of CPU under the wasm interpreter (the probe machinery
++        // dominated, not the stored value). Written once per type under objectFieldOffsetSync (whose
++        // release, plus the safe publication of the encoded offset through Java fields, makes the slot
++        // visible to lock-free readers); read as a bare bounds-checked index on the hot path.
++        static readonly ObjectFieldOffsetInfo[] objectFieldOffsetsByTypeId = new ObjectFieldOffsetInfo[ObjectFieldOffsetMaxTypeId + 1];
 +
 +        [MethodImpl(MethodImplOptions.AggressiveInlining)]
 +        static bool IsEncodedObjectFieldOffset(long offset)
@@ -2597,7 +2654,7 @@ index 50a0078d2..d62eabff7 100644
 +                info = new ObjectFieldOffsetInfo(typeId, fields);
 +
 +                objectFieldOffsetsByType.Add(type, info);
-+                objectFieldOffsetsByTypeId[typeId] = new WeakReference<ObjectFieldOffsetInfo>(info);
++                objectFieldOffsetsByTypeId[typeId] = info;
 +
 +                return info;
 +            }
@@ -2641,11 +2698,9 @@ index 50a0078d2..d62eabff7 100644
 +                var typeId = (value >> ObjectFieldOffsetTypeIdShift) & ObjectFieldOffsetTypeIdMask;
 +                var fieldOffset = value & ObjectFieldOffsetValueMask;
 +
-+                if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out var infoRef) && infoRef.TryGetTarget(out var info) && info.TryGetField(fieldOffset, out var field))
++                var info = objectFieldOffsetsByTypeId[typeId];
++                if (info != null && info.TryGetField(fieldOffset, out var field))
 +                    return field;
-+
-+                if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out infoRef) && infoRef.TryGetTarget(out _) == false)
-+                    objectFieldOffsetsByTypeId.TryRemove(typeId, out _);
 +
 +                throw new global::java.lang.IllegalArgumentException();
 +            }
@@ -2666,11 +2721,9 @@ index 50a0078d2..d62eabff7 100644
 +            var typeId = (value >> ObjectFieldOffsetTypeIdShift) & ObjectFieldOffsetTypeIdMask;
 +            fieldOffset = value & ObjectFieldOffsetValueMask;
 +
-+            if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out var infoRef) && infoRef.TryGetTarget(out info))
++            info = objectFieldOffsetsByTypeId[typeId];
++            if (info != null)
 +                return true;
-+
-+            if (objectFieldOffsetsByTypeId.TryGetValue(typeId, out infoRef) && infoRef.TryGetTarget(out _) == false)
-+                objectFieldOffsetsByTypeId.TryRemove(typeId, out _);
 +
 +            throw new global::java.lang.IllegalArgumentException();
 +        }
@@ -2865,7 +2918,7 @@ index 50a0078d2..d62eabff7 100644
          /// <summary>
          /// Emits the appropriate ldind opcode for the given type.
          /// </summary>
-@@ -132,6 +558,24 @@ public static void registerNatives()
+@@ -132,6 +561,24 @@ public static void registerNatives()
  
          }
  
@@ -2890,7 +2943,7 @@ index 50a0078d2..d62eabff7 100644
          /// <summary>
          /// Implements the logic to get a field by offset.
          /// </summary>
-@@ -145,7 +589,7 @@ static T GetField<T>(object o, long offset)
+@@ -145,7 +592,7 @@ static T GetField<T>(object o, long offset)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -2899,7 +2952,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -171,7 +615,7 @@ static void PutField<T>(object o, long offset, T value)
+@@ -171,7 +618,7 @@ static void PutField<T>(object o, long offset, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -2908,7 +2961,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -265,7 +709,7 @@ public static bool getBoolean(object self, object o, long offset)
+@@ -265,7 +712,7 @@ public static bool getBoolean(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2917,7 +2970,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<bool>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset) != 0,
                      _ => GetField<bool>(o, offset)
-@@ -295,7 +739,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
+@@ -295,7 +742,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
                  switch (o)
                  {
                      case null:
@@ -2926,7 +2979,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -331,7 +775,7 @@ public static byte getByte(object self, object o, long offset)
+@@ -331,7 +778,7 @@ public static byte getByte(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -2935,7 +2988,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<byte>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset),
                      _ => GetField<byte>(o, offset)
-@@ -361,7 +805,7 @@ public static void putByte(object self, object o, long offset, byte x)
+@@ -361,7 +808,7 @@ public static void putByte(object self, object o, long offset, byte x)
                  switch (o)
                  {
                      case null:
@@ -2944,7 +2997,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -395,9 +839,16 @@ public static short getShort(object self, object o, long offset)
+@@ -395,9 +842,16 @@ public static short getShort(object self, object o, long offset)
  #else
              try
              {
@@ -2962,7 +3015,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<short>(null, offset),
                      Array array => ReadInt16(array, offset),
                      _ => GetField<short>(o, offset)
-@@ -424,10 +875,22 @@ public static void putShort(object self, object o, long offset, short x)
+@@ -424,10 +878,22 @@ public static void putShort(object self, object o, long offset, short x)
  #else
              try
              {
@@ -2986,7 +3039,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -461,9 +924,19 @@ public static char getChar(object self, object o, long offset)
+@@ -461,9 +927,19 @@ public static char getChar(object self, object o, long offset)
  #else
              try
              {
@@ -3007,7 +3060,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<char>(null, offset),
                      Array array => (char)ReadInt16(array, offset),
                      _ => GetField<char>(o, offset)
-@@ -490,10 +963,22 @@ public static void putChar(object self, object o, long offset, char x)
+@@ -490,10 +966,22 @@ public static void putChar(object self, object o, long offset, char x)
  #else
              try
              {
@@ -3031,7 +3084,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -527,9 +1012,16 @@ public static int getInt(object self, object o, long offset)
+@@ -527,9 +1015,16 @@ public static int getInt(object self, object o, long offset)
  #else
              try
              {
@@ -3049,7 +3102,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<int>(null, offset),
                      Array array => ReadInt32(array, offset),
                      _ => GetField<int>(o, offset)
-@@ -556,10 +1048,22 @@ public static void putInt(object self, object o, long offset, int x)
+@@ -556,10 +1051,22 @@ public static void putInt(object self, object o, long offset, int x)
  #else
              try
              {
@@ -3073,7 +3126,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -593,9 +1097,16 @@ public static long getLong(object self, object o, long offset)
+@@ -593,9 +1100,16 @@ public static long getLong(object self, object o, long offset)
  #else
              try
              {
@@ -3091,7 +3144,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<long>(null, offset),
                      Array array => ReadInt64(array, offset),
                      _ => GetField<long>(o, offset)
-@@ -622,10 +1133,22 @@ public static void putLong(object self, object o, long offset, long x)
+@@ -622,10 +1136,22 @@ public static void putLong(object self, object o, long offset, long x)
  #else
              try
              {
@@ -3115,7 +3168,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -659,9 +1182,19 @@ public static float getFloat(object self, object o, long offset)
+@@ -659,9 +1185,19 @@ public static float getFloat(object self, object o, long offset)
  #else
              try
              {
@@ -3136,7 +3189,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<float>(null, offset),
                      Array array => global::java.lang.Float.intBitsToFloat(ReadInt32(array, offset)),
                      _ => GetField<float>(o, offset)
-@@ -688,10 +1221,23 @@ public static void putFloat(object self, object o, long offset, float x)
+@@ -688,10 +1224,23 @@ public static void putFloat(object self, object o, long offset, float x)
  #else
              try
              {
@@ -3161,7 +3214,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -725,9 +1271,19 @@ public static double getDouble(object self, object o, long offset)
+@@ -725,9 +1274,19 @@ public static double getDouble(object self, object o, long offset)
  #else
              try
              {
@@ -3182,7 +3235,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetField<double>(null, offset),
                      Array array => global::java.lang.Double.longBitsToDouble(ReadInt64(array, offset)),
                      _ => GetField<double>(o, offset)
-@@ -754,10 +1310,23 @@ public static void putDouble(object self, object o, long offset, double x)
+@@ -754,10 +1313,23 @@ public static void putDouble(object self, object o, long offset, double x)
  #else
              try
              {
@@ -3207,7 +3260,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -790,7 +1359,7 @@ public static byte getByte(object self, long address)
+@@ -790,7 +1362,7 @@ public static byte getByte(object self, long address)
  #else
              try
              {
@@ -3216,7 +3269,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -812,7 +1381,7 @@ public static void putByte(object self, long address, byte x)
+@@ -812,7 +1384,7 @@ public static void putByte(object self, long address, byte x)
  #else
              try
              {
@@ -3225,7 +3278,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -834,7 +1403,7 @@ public static short getShort(object self, long address)
+@@ -834,7 +1406,7 @@ public static short getShort(object self, long address)
  #else
              try
              {
@@ -3234,7 +3287,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -856,7 +1425,7 @@ public static void putShort(object self, long address, short x)
+@@ -856,7 +1428,7 @@ public static void putShort(object self, long address, short x)
  #else
              try
              {
@@ -3243,7 +3296,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -878,7 +1447,7 @@ public static char getChar(object self, long address)
+@@ -878,7 +1450,7 @@ public static char getChar(object self, long address)
  #else
              try
              {
@@ -3252,7 +3305,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -900,7 +1469,7 @@ public static void putChar(object self, long address, char x)
+@@ -900,7 +1472,7 @@ public static void putChar(object self, long address, char x)
  #else
              try
              {
@@ -3261,7 +3314,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -922,7 +1491,7 @@ public static int getInt(object self, long address)
+@@ -922,7 +1494,7 @@ public static int getInt(object self, long address)
  #else
              try
              {
@@ -3270,7 +3323,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -944,7 +1513,7 @@ public static void putInt(object self, long address, int x)
+@@ -944,7 +1516,7 @@ public static void putInt(object self, long address, int x)
  #else
              try
              {
@@ -3279,7 +3332,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -966,7 +1535,7 @@ public static long getLong(object self, long address)
+@@ -966,7 +1538,7 @@ public static long getLong(object self, long address)
  #else
              try
              {
@@ -3288,7 +3341,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -988,7 +1557,7 @@ public static void putLong(object self, long address, long x)
+@@ -988,7 +1560,7 @@ public static void putLong(object self, long address, long x)
  #else
              try
              {
@@ -3297,7 +3350,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1084,7 +1653,7 @@ public static long getAddress(object self, long address)
+@@ -1084,7 +1656,7 @@ public static long getAddress(object self, long address)
  #else
              try
              {
@@ -3306,7 +3359,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1106,7 +1675,7 @@ public static void putAddress(object self, long address, long x)
+@@ -1106,7 +1678,7 @@ public static void putAddress(object self, long address, long x)
  #else
              try
              {
@@ -3315,7 +3368,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1136,7 +1705,7 @@ public static unsafe long allocateMemory(object self, long bytes)
+@@ -1136,7 +1708,7 @@ public static unsafe long allocateMemory(object self, long bytes)
                  var ptr = Marshal.AllocHGlobal(len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -3324,7 +3377,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1171,7 +1740,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1171,7 +1743,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  }
  
                  // remove memory pressure
@@ -3333,7 +3386,7 @@ index 50a0078d2..d62eabff7 100644
                  var len = Marshal.ReadIntPtr(ptr);
                  System.GC.RemoveMemoryPressure((long)len);
  
-@@ -1180,7 +1749,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1180,7 +1752,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  ptr = Marshal.ReAllocHGlobal(ptr, len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -3342,7 +3395,7 @@ index 50a0078d2..d62eabff7 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1210,7 +1779,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
+@@ -1210,7 +1782,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
              try
              {
                  if (o == null)
@@ -3351,7 +3404,7 @@ index 50a0078d2..d62eabff7 100644
                  else if (o is byte[] array)
                      ((Span<byte>)array).Slice((int)offset, (int)bytes).Fill(value);
                  else if (o is Array array2)
-@@ -1259,7 +1828,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1259,7 +1831,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (destBase is byte[] byteArray)
                      {
@@ -3360,7 +3413,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else if (destBase is bool[])
                      {
-@@ -1269,31 +1838,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1269,31 +1841,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (destBase is short[] shortArray)
                      {
@@ -3399,7 +3452,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else
                      {
-@@ -1308,7 +1877,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1308,7 +1880,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (srcBase is byte[] byteArray)
                      {
@@ -3408,7 +3461,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else if (srcBase is bool[])
                      {
-@@ -1318,27 +1887,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1318,27 +1890,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (srcBase is short[] shortArray)
                      {
@@ -3442,7 +3495,7 @@ index 50a0078d2..d62eabff7 100644
                      }
                      else
                      {
-@@ -1360,11 +1929,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1360,11 +1932,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
          /// <param name="address"></param>
          public static unsafe void freeMemory(object self, long address)
          {
@@ -3457,7 +3510,7 @@ index 50a0078d2..d62eabff7 100644
              var len = Marshal.ReadIntPtr(ptr);
              Marshal.FreeHGlobal(ptr);
              System.GC.RemoveMemoryPressure((long)len);
-@@ -1412,7 +1981,7 @@ public static long objectFieldOffset(object self, global::java.lang.reflect.Fiel
+@@ -1412,7 +1984,7 @@ public static long objectFieldOffset(object self, global::java.lang.reflect.Fiel
              if (w.IsStatic)
                  throw new global::java.lang.IllegalArgumentException();
  
@@ -3466,7 +3519,7 @@ index 50a0078d2..d62eabff7 100644
          }
  
          /// <summary>
-@@ -1675,7 +2244,7 @@ static T GetFieldVolatile<T>(object o, long offset)
+@@ -1675,7 +2247,7 @@ static T GetFieldVolatile<T>(object o, long offset)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3475,7 +3528,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -1701,7 +2270,7 @@ static void PutFieldVolatile<T>(object o, long offset, T value)
+@@ -1701,7 +2273,7 @@ static void PutFieldVolatile<T>(object o, long offset, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3484,7 +3537,7 @@ index 50a0078d2..d62eabff7 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -1904,7 +2473,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
+@@ -1904,7 +2476,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3493,7 +3546,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetFieldVolatile<int>(null, offset),
                      Array array => ReadInt32Volatile(array, offset),
                      _ => GetFieldVolatile<int>(o, offset)
-@@ -1934,7 +2503,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
+@@ -1934,7 +2506,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
                  switch (o)
                  {
                      case null:
@@ -3502,7 +3555,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -1970,7 +2539,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
+@@ -1970,7 +2542,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3511,7 +3564,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetFieldVolatile<bool>(null, offset),
                      Array array => ReadByteVolatile(array, offset) != 0,
                      _ => GetFieldVolatile<bool>(o, offset)
-@@ -2000,7 +2569,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
+@@ -2000,7 +2572,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -3520,7 +3573,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2036,7 +2605,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
+@@ -2036,7 +2608,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3529,7 +3582,7 @@ index 50a0078d2..d62eabff7 100644
                      RuntimeJavaType w => GetFieldVolatile<byte>(null, offset),
                      Array array => ReadByteVolatile(array, offset),
                      _ => GetFieldVolatile<byte>(o, offset)
-@@ -2066,7 +2635,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
+@@ -2066,7 +2638,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
                  switch (o)
                  {
                      case null:
@@ -3538,7 +3591,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2130,7 +2699,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
+@@ -2130,7 +2702,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
                  switch (o)
                  {
                      case null:
@@ -3547,7 +3600,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2194,7 +2763,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
+@@ -2194,7 +2766,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
                  switch (o)
                  {
                      case null:
@@ -3556,7 +3609,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2258,7 +2827,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
+@@ -2258,7 +2830,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
                  switch (o)
                  {
                      case null:
@@ -3565,7 +3618,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2323,7 +2892,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
+@@ -2323,7 +2895,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
                  switch (o)
                  {
                      case null:
@@ -3574,7 +3627,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2388,7 +2957,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
+@@ -2388,7 +2960,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -3583,7 +3636,7 @@ index 50a0078d2..d62eabff7 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2438,7 +3007,7 @@ static bool CompareAndSwapField<T>(object o, long offset, T expected, T value)
+@@ -2438,7 +3010,7 @@ static bool CompareAndSwapField<T>(object o, long offset, T expected, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3592,7 +3645,7 @@ index 50a0078d2..d62eabff7 100644
  #endif
          }
  
-@@ -3351,4 +3920,4 @@ static void InterlockedWrite(ref double location, double value)
+@@ -3351,4 +3923,4 @@ static void InterlockedWrite(ref double location, double value)
  
      }
  
@@ -4585,6 +4638,105 @@ index 74dfda7c8..ff31a7fb1 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Runtime/RuntimeClassLoader.cs b/src/IKVM.Runtime/RuntimeClassLoader.cs
+index 2131a95a0..51f210658 100644
+--- a/src/IKVM.Runtime/RuntimeClassLoader.cs
++++ b/src/IKVM.Runtime/RuntimeClassLoader.cs
+@@ -106,8 +106,7 @@ internal void SetRemappedType(Type type, RuntimeJavaType tw)
+             lock (types)
+                 types.Add(tw.Name, tw);
+ 
+-            lock (Context.ClassLoaderFactory.globalTypeToTypeWrapper)
+-                context.ClassLoaderFactory.globalTypeToTypeWrapper.Add(type, tw);
++			context.ClassLoaderFactory.globalTypeToTypeWrapper.TryAdd(type, tw);
+ 
+             context.ClassLoaderFactory.remappedTypes.Add(type, tw.Name);
+         }
+diff --git a/src/IKVM.Runtime/RuntimeClassLoaderFactory.cs b/src/IKVM.Runtime/RuntimeClassLoaderFactory.cs
+index 1a0eb7c92..6bbaccb4a 100644
+--- a/src/IKVM.Runtime/RuntimeClassLoaderFactory.cs
++++ b/src/IKVM.Runtime/RuntimeClassLoaderFactory.cs
+@@ -23,6 +23,7 @@ Jeroen Frijters
+ */
+ using System;
+ using System.Collections.Generic;
++using System.Collections.Concurrent;
+ using System.Diagnostics;
+ 
+ using IKVM.CoreLib.Diagnostics;
+@@ -54,7 +55,7 @@ class RuntimeClassLoaderFactory
+ 
+         readonly RuntimeContext context;
+         readonly object wrapperLock = new object();
+-        internal readonly Dictionary<Type, RuntimeJavaType> globalTypeToTypeWrapper = new Dictionary<Type, RuntimeJavaType>();
++        internal readonly ConcurrentDictionary<Type, RuntimeJavaType> globalTypeToTypeWrapper = new ConcurrentDictionary<Type, RuntimeJavaType>();
+         internal readonly Dictionary<Type, string> remappedTypes = new Dictionary<Type, string>();
+         readonly List<RuntimeGenericClassLoader> genericClassLoaders = new List<RuntimeGenericClassLoader>();
+ 
+@@ -187,8 +188,7 @@ internal RuntimeJavaType GetJavaTypeFromType(Type type)
+             Debug.Assert(!type.IsByRef);
+ 
+             RuntimeJavaType wrapper;
+-            lock (globalTypeToTypeWrapper)
+-                globalTypeToTypeWrapper.TryGetValue(type, out wrapper);
++			globalTypeToTypeWrapper.TryGetValue(type, out wrapper);
+ 
+             if (wrapper != null)
+                 return wrapper;
+@@ -197,7 +197,7 @@ internal RuntimeJavaType GetJavaTypeFromType(Type type)
+             if (type.__IsMissing || type.__ContainsMissingType)
+             {
+                 wrapper = new RuntimeUnloadableJavaType(context, type);
+-                globalTypeToTypeWrapper.Add(type, wrapper);
++                globalTypeToTypeWrapper.TryAdd(type, wrapper);
+                 return wrapper;
+             }
+ #endif
+@@ -230,7 +230,7 @@ internal RuntimeJavaType GetJavaTypeFromType(Type type)
+                     var tw = new RuntimeAnonymousJavaType(context, type);
+                     lock (typeToTypeWrapper)
+                         if (!typeToTypeWrapper.TryGetValue(type, out wrapper))
+-                            typeToTypeWrapper.Add(type, wrapper = tw);
++                            typeToTypeWrapper.TryAdd(type, wrapper = tw);
+ 
+                     return wrapper;
+                 }
+@@ -247,8 +247,6 @@ internal RuntimeJavaType GetJavaTypeFromType(Type type)
+                 wrapper = context.AssemblyClassLoaderFactory.FromAssembly(asm).GetJavaTypeFromAssemblyType(type);
+             }
+ 
+-            lock (globalTypeToTypeWrapper)
+-            {
+                 try
+                 {
+                     // critical code in the finally block to avoid Thread.Abort interrupting the thread
+@@ -257,7 +255,6 @@ internal RuntimeJavaType GetJavaTypeFromType(Type type)
+                 {
+                     globalTypeToTypeWrapper[type] = wrapper;
+                 }
+-            }
+ 
+             return wrapper;
+         }
+@@ -416,17 +413,14 @@ internal void SetWrapperForType(Type type, RuntimeJavaType wrapper)
+             RuntimeJavaType.AssertFinished(type);
+ #endif
+ 
+-            lock (globalTypeToTypeWrapper)
+-            {
+                 try
+                 {
+                     // critical code in the finally block to avoid Thread.Abort interrupting the thread
+                 }
+                 finally
+                 {
+-                    globalTypeToTypeWrapper.Add(type, wrapper);
++                    globalTypeToTypeWrapper.TryAdd(type, wrapper);
+                 }
+-            }
+         }
+ 
+     }
 diff --git a/src/IKVM.Runtime/RuntimeJavaType.cs b/src/IKVM.Runtime/RuntimeJavaType.cs
 index 113078629..d1892c25e 100644
 --- a/src/IKVM.Runtime/RuntimeJavaType.cs
