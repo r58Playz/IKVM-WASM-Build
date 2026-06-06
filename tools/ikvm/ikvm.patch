@@ -4842,6 +4842,148 @@ index b98d8eb5a..bc67a9ebe 100644
                      case NormalizedByteCode.__fconst_2:
                          ilGenerator.EmitLdc_R4(2.0f);
                          break;
+diff --git a/src/IKVM.Runtime/intrinsics.cs b/src/IKVM.Runtime/intrinsics.cs
+index 81b2bfc69..0b5cd04ab 100644
+--- a/src/IKVM.Runtime/intrinsics.cs
++++ b/src/IKVM.Runtime/intrinsics.cs
+@@ -120,6 +120,28 @@ static Dictionary<IntrinsicKey, Emitter> Register()
+             intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "compareAndSwapInt", "(Ljava.lang.Object;JII)Z"), Unsafe_compareAndSwapInt);
+             intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getAndAddInt", "(Ljava.lang.Object;JI)I"), Unsafe_getAndAddInt);
+             intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "compareAndSwapLong", "(Ljava.lang.Object;JJJ)Z"), Unsafe_compareAndSwapLong);
++            // Off-heap scalar accessors. Unsafe.get/put<T>(null, address) and the single-arg
++            // get/put<T>(address) forms read/write raw native memory at `address`. Lowering them
++            // to a direct ldind/stind (instead of the virtual method + Externs call) lets the wasm
++            // jiterpreter trace native-memory loops -- notably LWJGL MemoryUtil.memGetInt ->
++            // Unsafe.getInt(null, ptr), the NativeImage per-pixel hot path. The object+offset
++            // (managed) form is left to the normal call (the emitters fall through for it).
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getByte", "(Ljava.lang.Object;J)B"), Unsafe_getByteOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getShort", "(Ljava.lang.Object;J)S"), Unsafe_getShortOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getInt", "(Ljava.lang.Object;J)I"), Unsafe_getIntOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getLong", "(Ljava.lang.Object;J)J"), Unsafe_getLongOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putByte", "(Ljava.lang.Object;JB)V"), Unsafe_putByteOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putShort", "(Ljava.lang.Object;JS)V"), Unsafe_putShortOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putInt", "(Ljava.lang.Object;JI)V"), Unsafe_putIntOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putLong", "(Ljava.lang.Object;JJ)V"), Unsafe_putLongOffHeap);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getByte", "(J)B"), Unsafe_getByteAbs);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getShort", "(J)S"), Unsafe_getShortAbs);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getInt", "(J)I"), Unsafe_getIntAbs);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "getLong", "(J)J"), Unsafe_getLongAbs);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putByte", "(JB)V"), Unsafe_putByteAbs);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putShort", "(JS)V"), Unsafe_putShortAbs);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putInt", "(JI)V"), Unsafe_putIntAbs);
++            intrinsics.Add(new IntrinsicKey("sun.misc.Unsafe", "putLong", "(JJ)V"), Unsafe_putLongAbs);
+             return intrinsics;
+         }
+ 
+@@ -628,6 +650,108 @@ static bool Unsafe_getObjectVolatile(EmitIntrinsicContext eic)
+             return false;
+         }
+ 
++        // === off-heap (absolute-address) Unsafe scalar accessors ===
++        // The raw address is a native pointer (a wasm linear-memory offset); off-heap memory is
++        // never GC-managed, so the ldind/stind is GC-safe. The managed object+offset form is not
++        // intrinsified here (we fall through so the regular call handles it correctly).
++
++        // get<T>(Object o, long address): stack [Unsafe this(2)][Object o(1)][long address(0)].
++        // Only fires when o is provably null (the off-heap form); else falls through.
++        static bool EmitUnsafeOffHeapGet(EmitIntrinsicContext eic, OpCode ldind)
++        {
++            if (eic.GetStackTypeWrapper(0, 2) == eic.Context.Context.VerifierJavaTypeFactory.Null)
++                return false; // unknown receiver
++            if (eic.GetStackTypeWrapper(0, 1) != eic.Context.Context.VerifierJavaTypeFactory.Null)
++                return false; // managed object+offset form -> let the normal call handle it
++            var addr = eic.Emitter.AllocTempLocal(eic.Method.DeclaringType.Context.Types.Int64);
++            eic.Emitter.Emit(OpCodes.Stloc, addr);  // pop address
++            eic.Emitter.Emit(OpCodes.Pop);          // pop null object
++            EmitConsumeUnsafe(eic);                 // pop receiver
++            eic.Emitter.Emit(OpCodes.Ldloc, addr);
++            eic.Emitter.Emit(OpCodes.Conv_I);       // long -> native pointer
++            eic.Emitter.Emit(ldind);
++            eic.Emitter.ReleaseTempLocal(addr);
++            eic.NonLeaf = false;
++            return true;
++        }
++
++        // get<T>(long address): stack [Unsafe this(1)][long address(0)] -- always off-heap.
++        static bool EmitUnsafeAbsGet(EmitIntrinsicContext eic, OpCode ldind)
++        {
++            if (eic.GetStackTypeWrapper(0, 1) == eic.Context.Context.VerifierJavaTypeFactory.Null)
++                return false; // unknown receiver
++            var addr = eic.Emitter.AllocTempLocal(eic.Method.DeclaringType.Context.Types.Int64);
++            eic.Emitter.Emit(OpCodes.Stloc, addr);
++            EmitConsumeUnsafe(eic);
++            eic.Emitter.Emit(OpCodes.Ldloc, addr);
++            eic.Emitter.Emit(OpCodes.Conv_I);
++            eic.Emitter.Emit(ldind);
++            eic.Emitter.ReleaseTempLocal(addr);
++            eic.NonLeaf = false;
++            return true;
++        }
++
++        // put<T>(Object o, long address, T value): stack [this(3)][o(2)][address(1)][value(0)].
++        static bool EmitUnsafeOffHeapPut(EmitIntrinsicContext eic, bool longValue, OpCode stind)
++        {
++            if (eic.GetStackTypeWrapper(0, 3) == eic.Context.Context.VerifierJavaTypeFactory.Null)
++                return false;
++            if (eic.GetStackTypeWrapper(0, 2) != eic.Context.Context.VerifierJavaTypeFactory.Null)
++                return false;
++            var val = eic.Emitter.AllocTempLocal(longValue ? eic.Method.DeclaringType.Context.Types.Int64 : eic.Method.DeclaringType.Context.Types.Int32);
++            var addr = eic.Emitter.AllocTempLocal(eic.Method.DeclaringType.Context.Types.Int64);
++            eic.Emitter.Emit(OpCodes.Stloc, val);   // pop value
++            eic.Emitter.Emit(OpCodes.Stloc, addr);  // pop address
++            eic.Emitter.Emit(OpCodes.Pop);          // pop null object
++            EmitConsumeUnsafe(eic);                 // pop receiver
++            eic.Emitter.Emit(OpCodes.Ldloc, addr);
++            eic.Emitter.Emit(OpCodes.Conv_I);
++            eic.Emitter.Emit(OpCodes.Ldloc, val);
++            eic.Emitter.Emit(stind);
++            eic.Emitter.ReleaseTempLocal(addr);
++            eic.Emitter.ReleaseTempLocal(val);
++            eic.NonLeaf = false;
++            return true;
++        }
++
++        // put<T>(long address, T value): stack [this(2)][address(1)][value(0)] -- always off-heap.
++        static bool EmitUnsafeAbsPut(EmitIntrinsicContext eic, bool longValue, OpCode stind)
++        {
++            if (eic.GetStackTypeWrapper(0, 2) == eic.Context.Context.VerifierJavaTypeFactory.Null)
++                return false;
++            var val = eic.Emitter.AllocTempLocal(longValue ? eic.Method.DeclaringType.Context.Types.Int64 : eic.Method.DeclaringType.Context.Types.Int32);
++            var addr = eic.Emitter.AllocTempLocal(eic.Method.DeclaringType.Context.Types.Int64);
++            eic.Emitter.Emit(OpCodes.Stloc, val);
++            eic.Emitter.Emit(OpCodes.Stloc, addr);
++            EmitConsumeUnsafe(eic);
++            eic.Emitter.Emit(OpCodes.Ldloc, addr);
++            eic.Emitter.Emit(OpCodes.Conv_I);
++            eic.Emitter.Emit(OpCodes.Ldloc, val);
++            eic.Emitter.Emit(stind);
++            eic.Emitter.ReleaseTempLocal(addr);
++            eic.Emitter.ReleaseTempLocal(val);
++            eic.NonLeaf = false;
++            return true;
++        }
++
++        static bool Unsafe_getByteOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapGet(eic, OpCodes.Ldind_I1);
++        static bool Unsafe_getShortOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapGet(eic, OpCodes.Ldind_I2);
++        static bool Unsafe_getIntOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapGet(eic, OpCodes.Ldind_I4);
++        static bool Unsafe_getLongOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapGet(eic, OpCodes.Ldind_I8);
++        static bool Unsafe_putByteOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapPut(eic, false, OpCodes.Stind_I1);
++        static bool Unsafe_putShortOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapPut(eic, false, OpCodes.Stind_I2);
++        static bool Unsafe_putIntOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapPut(eic, false, OpCodes.Stind_I4);
++        static bool Unsafe_putLongOffHeap(EmitIntrinsicContext eic) => EmitUnsafeOffHeapPut(eic, true, OpCodes.Stind_I8);
++
++        static bool Unsafe_getByteAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsGet(eic, OpCodes.Ldind_I1);
++        static bool Unsafe_getShortAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsGet(eic, OpCodes.Ldind_I2);
++        static bool Unsafe_getIntAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsGet(eic, OpCodes.Ldind_I4);
++        static bool Unsafe_getLongAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsGet(eic, OpCodes.Ldind_I8);
++        static bool Unsafe_putByteAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsPut(eic, false, OpCodes.Stind_I1);
++        static bool Unsafe_putShortAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsPut(eic, false, OpCodes.Stind_I2);
++        static bool Unsafe_putIntAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsPut(eic, false, OpCodes.Stind_I4);
++        static bool Unsafe_putLongAbs(EmitIntrinsicContext eic) => EmitUnsafeAbsPut(eic, true, OpCodes.Stind_I8);
++
+         /// <summary>
+         /// Replaces a call to Unsafe.compareAndSwapObject with IL that directly conducts the operation.
+         /// </summary>
 diff --git a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs b/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
 index 6714bea45..1fb144dc5 100644
 --- a/src/IKVM.Tests/Java/sun/misc/UnsafeTests.cs
