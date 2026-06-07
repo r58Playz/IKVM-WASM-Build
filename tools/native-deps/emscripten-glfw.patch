@@ -64,18 +64,36 @@ index c539cdc..7e04f64 100644
    // GL Context
    int fClientAPI{GLFW_OPENGL_API}; // GLFW_CLIENT_API
 diff --git a/src/cpp/emscripten/glfw3/Context.cpp b/src/cpp/emscripten/glfw3/Context.cpp
-index afb6ea7..742907e 100644
+index afb6ea7..f9f9594 100644
 --- a/src/cpp/emscripten/glfw3/Context.cpp
 +++ b/src/cpp/emscripten/glfw3/Context.cpp
-@@ -21,6 +21,7 @@
+@@ -19,13 +19,25 @@
+ #include "Context.h"
+ #include <emscripten.h>
  #include <emscripten/html5.h>
++#include <atomic>
++#include <cstdint>
  
  #include "ErrorHandler.h"
 +#include "EventQueue.h"
  
  #ifndef EMSCRIPTEN_GLFW3_DISABLE_JOYSTICK
  #include "Joystick.h"
-@@ -52,6 +53,8 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
+ #endif
+ 
++// --- benchmark frame counter --------------------------------------------------------------------
++// Context::swapBuffers() runs once per presented frame (on the render thread). Bump a global atomic
++// in shared linear memory so a benchmark harness on the UI thread can sample frames-per-window with
++// no per-frame JS callback. Read from JS as Module._emscripten_glfw3_get_frame_count().
++static std::atomic<uint64_t> sFrameCount{0};
++extern "C" EMSCRIPTEN_KEEPALIVE double emscripten_glfw3_get_frame_count(void) {
++  return (double) sFrameCount.load(std::memory_order_relaxed);
++}
++
+ extern "C" {
+ using ScaleChangeCallback = void (*)(emscripten::glfw3::Context *);
+ using WindowResizeCallback = void (*)(emscripten::glfw3::Context *, GLFWwindow *, int, int);
+@@ -52,6 +64,8 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
  bool emscripten_glfw3_context_is_runtime_platform_apple();
  void emscripten_glfw3_create_custom_cursor(GLFWcursor *iCursor, int iWidth, int iHeight, unsigned char *iPixels);
  void emscripten_glfw3_destroy_custom_cursor(GLFWcursor *iCursor);
@@ -84,7 +102,7 @@ index afb6ea7..742907e 100644
  }
  
  namespace emscripten::glfw3 {
-@@ -66,12 +69,88 @@ std::unique_ptr<Context> Context::init()
+@@ -66,12 +80,88 @@ std::unique_ptr<Context> Context::init()
    return std::unique_ptr<Context>(new Context{});
  }
  
@@ -174,7 +192,7 @@ index afb6ea7..742907e 100644
  }
  
  //------------------------------------------------------------------------
-@@ -79,7 +158,8 @@ void ContextScaleChangeCallback(Context *iContext)
+@@ -79,7 +169,8 @@ void ContextScaleChangeCallback(Context *iContext)
  //------------------------------------------------------------------------
  void ContextWindowResizeCallback(Context *iContext, GLFWwindow *iWindow, int iWidth, int iHeight)
  {
@@ -184,7 +202,7 @@ index afb6ea7..742907e 100644
  }
  
  //------------------------------------------------------------------------
-@@ -93,11 +173,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -93,11 +184,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
                               int iCodepoint,
                               int iModifierBits)
  {
@@ -217,7 +235,7 @@ index afb6ea7..742907e 100644
  }
  
  //------------------------------------------------------------------------
-@@ -105,7 +201,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -105,7 +212,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
  //------------------------------------------------------------------------
  void ContextClipboardStringCallback(Context *iContext, char const *iText, char const *iError)
  {
@@ -235,7 +253,7 @@ index afb6ea7..742907e 100644
  }
  
  //------------------------------------------------------------------------
-@@ -130,6 +235,10 @@ Context::Context()
+@@ -130,6 +246,10 @@ Context::Context()
                                  ContextClipboardStringCallback,
                                  emscripten_glfw_request_fullscreen,
                                  ContextErrorHandler);
@@ -246,7 +264,7 @@ index afb6ea7..742907e 100644
    addOrRemoveEventListeners(true);
  }
  
-@@ -1043,7 +1152,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
+@@ -1043,7 +1163,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
  }
  
  //------------------------------------------------------------------------
@@ -255,7 +273,7 @@ index afb6ea7..742907e 100644
  //------------------------------------------------------------------------
  GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
  {
-@@ -1054,6 +1163,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
+@@ -1054,6 +1174,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
      return nullptr;
  }
  
@@ -314,7 +332,7 @@ index afb6ea7..742907e 100644
  //------------------------------------------------------------------------
  // Context::createStandardCursor
  //------------------------------------------------------------------------
-@@ -1178,6 +1339,13 @@ uint64_t Context::getTimerValue()
+@@ -1178,6 +1350,13 @@ uint64_t Context::getTimerValue()
  //------------------------------------------------------------------------
  void Context::pollEvents()
  {
@@ -328,7 +346,7 @@ index afb6ea7..742907e 100644
    computeWindowPos();
  
  #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
-@@ -1199,16 +1367,26 @@ void Context::pollEvents()
+@@ -1199,16 +1378,27 @@ void Context::pollEvents()
  //------------------------------------------------------------------------
  // Context::swapInterval
  //------------------------------------------------------------------------
@@ -347,6 +365,7 @@ index afb6ea7..742907e 100644
 +}
 +void Context::swapBuffers() const
 +{
++	sFrameCount.fetch_add(1, std::memory_order_relaxed);
 +	glFlush();
 +	EM_ASM({ try { GL.newRenderingFrameStarted(); } catch {} });
 +	if (fInterval == 0)
@@ -360,7 +379,7 @@ index afb6ea7..742907e 100644
  }
  
  
-@@ -1256,4 +1434,4 @@ bool Context::isRuntimePlatformApple() const
+@@ -1256,4 +1446,4 @@ bool Context::isRuntimePlatformApple() const
    return emscripten_glfw3_context_is_runtime_platform_apple();
  }
  
