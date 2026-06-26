@@ -20,6 +20,60 @@ index b826bb4fb..60450f1d4 100644
      </ItemGroup>
  
      <Target Name="Publish">
+diff --git a/src/IKVM.CoreLib/Reflection/SingleConverter.cs b/src/IKVM.CoreLib/Reflection/SingleConverter.cs
+index d496fd386..658f672b7 100644
+--- a/src/IKVM.CoreLib/Reflection/SingleConverter.cs
++++ b/src/IKVM.CoreLib/Reflection/SingleConverter.cs
+@@ -21,31 +21,29 @@ Jeroen Frijters
+   jeroen@frijters.net
+   
+ */
++using System.Runtime.CompilerServices;
++
+ namespace IKVM.Reflection
+ {
+ 
+-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+-    struct SingleConverter
++    static class SingleConverter
+     {
+ 
+-        [System.Runtime.InteropServices.FieldOffset(0)]
+-        int i;
+-        [System.Runtime.InteropServices.FieldOffset(0)]
+-        float f;
+-
+-        internal static int SingleToInt32Bits(float v)
+-        {
+-            var c = new SingleConverter();
+-            c.f = v;
+-            return c.i;
+-        }
+-
+-        internal static float Int32BitsToSingle(int v)
+-        {
+-            var c = new SingleConverter();
+-            c.i = v;
+-            return c.f;
+-        }
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static int SingleToInt32Bits(float v) =>
++#if NET8_0_OR_GREATER
++            Unsafe.BitCast<float, int>(v);
++#else
++            Unsafe.As<float, int>(ref v);
++#endif
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static float Int32BitsToSingle(int v) =>
++#if NET8_0_OR_GREATER
++            Unsafe.BitCast<int, float>(v);
++#else
++            Unsafe.As<int, float>(ref v);
++#endif
+ 
+     }
+ 
 diff --git a/src/IKVM.Image/ikvm/any/bin/ikvm.properties b/src/IKVM.Image/ikvm/any/bin/ikvm.properties
 deleted file mode 100644
 index 8473a67ad..000000000
@@ -364,11 +418,110 @@ index 000000000..50d9e5cdf
 +#endif
 +
 +}
+diff --git a/src/IKVM.Runtime/ByteCodeHelper.cs b/src/IKVM.Runtime/ByteCodeHelper.cs
+index 463e8da14..ffd7b69f2 100644
+--- a/src/IKVM.Runtime/ByteCodeHelper.cs
++++ b/src/IKVM.Runtime/ByteCodeHelper.cs
+@@ -1574,51 +1574,45 @@ internal bool TrySetType(global::java.lang.invoke.MethodType newType)
+ 
+ #endif
+ 
+-    [StructLayout(LayoutKind.Explicit)]
+-    public struct DoubleConverter
++    public static class DoubleConverter
+     {
+ 
+-        [FieldOffset(0)]
+-        double d;
+-
+-        [FieldOffset(0)]
+-        long l;
+-
+-        public static long ToLong(double value, ref DoubleConverter converter)
+-        {
+-            converter.d = value;
+-            return converter.l;
+-        }
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static long ToLong(double value) =>
++#if NET8_0_OR_GREATER
++            Unsafe.BitCast<double, long>(value);
++#else
++            Unsafe.As<double, long>(ref value);
++#endif
+ 
+-        public static double ToDouble(long value, ref DoubleConverter converter)
+-        {
+-            converter.l = value;
+-            return converter.d;
+-        }
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static double ToDouble(long value) =>
++#if NET8_0_OR_GREATER
++            Unsafe.BitCast<long, double>(value);
++#else
++            Unsafe.As<long, double>(ref value);
++#endif
+ 
+     }
+ 
+-    [StructLayout(LayoutKind.Explicit)]
+-    public struct FloatConverter
++    public static class FloatConverter
+     {
+ 
+-        [FieldOffset(0)]
+-        float f;
+-
+-        [FieldOffset(0)]
+-        int i;
+-
+-        public static int ToInt(float value, ref FloatConverter converter)
+-        {
+-            converter.f = value;
+-            return converter.i;
+-        }
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static int ToInt(float value) =>
++#if NET8_0_OR_GREATER
++            Unsafe.BitCast<float, int>(value);
++#else
++            Unsafe.As<float, int>(ref value);
++#endif
+ 
+-        public static float ToFloat(int value, ref FloatConverter converter)
+-        {
+-            converter.i = value;
+-            return converter.f;
+-        }
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static float ToFloat(int value) =>
++#if NET8_0_OR_GREATER
++            Unsafe.BitCast<int, float>(value);
++#else
++            Unsafe.As<int, float>(ref value);
++#endif
+ 
+     }
+ 
 diff --git a/src/IKVM.Runtime/ExceptionHelper.cs b/src/IKVM.Runtime/ExceptionHelper.cs
-index f54199cef..e2b532371 100644
+index f54199cef..0f19f9b4c 100644
 --- a/src/IKVM.Runtime/ExceptionHelper.cs
 +++ b/src/IKVM.Runtime/ExceptionHelper.cs
-@@ -870,11 +870,7 @@ Exception MapTypeInitializeException(TypeInitializationException t, Type handler
+@@ -246,6 +246,12 @@ internal static void Append(ExceptionHelper exceptionHelper, List<StackTraceElem
+                         (type == null
+                         || typeof(MethodBase).IsAssignableFrom(type)
+                         || type == typeof(RuntimeMethodHandle)
++                        // the DynamicMethods we generate for java.lang.invoke adapters (InvokeExact, VoidAdapter,
++                        // DirectMethodHandle.*, MemberName:*, ...) are owned by this type when their natural owner
++                        // can't host a DynamicMethod; like OpenJDK's @Hidden LambdaForm frames they shouldn't appear
++                        // in Java stack traces, and their .NET FullName ("IKVM.Runtime.MethodHandleUtil+DynamicMethodBuilder")
++                        // is not a loadable Java class name
++                        || type == typeof(MethodHandleUtil.DynamicMethodBuilder)
+                         || (type == typeof(Throwable) && m.Name == "instancehelper_fillInStackTrace")
+                         || (m.Name == "ToJava" && typeof(RetargetableJavaException).IsAssignableFrom(type))
+                         || IsHideFromJava(m)
+@@ -870,11 +876,7 @@ Exception MapTypeInitializeException(TypeInitializationException t, Type handler
              var r = MapException<Exception>(t.InnerException, true, false);
              if (r is not java.lang.Error)
              {
@@ -2431,6 +2584,119 @@ index 29cb30a01..2f5edb9a6 100644
          static __jniDelegate__close0 __jniPtr__close0;
  
  #endif
+diff --git a/src/IKVM.Runtime/Java/Externs/java/io/ObjectInputStream.cs b/src/IKVM.Runtime/Java/Externs/java/io/ObjectInputStream.cs
+index c2df1ca76..4760435c1 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/io/ObjectInputStream.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/io/ObjectInputStream.cs
+@@ -30,20 +30,18 @@ static class ObjectInputStream
+ 
+         public static void bytesToFloats(byte[] src, int srcpos, float[] dst, int dstpos, int nfloats)
+         {
+-            IKVM.Runtime.FloatConverter converter = new IKVM.Runtime.FloatConverter();
+             for (int i = 0; i < nfloats; i++)
+             {
+                 int v = src[srcpos++];
+                 v = (v << 8) | src[srcpos++];
+                 v = (v << 8) | src[srcpos++];
+                 v = (v << 8) | src[srcpos++];
+-                dst[dstpos++] = IKVM.Runtime.FloatConverter.ToFloat(v, ref converter);
++                dst[dstpos++] = IKVM.Runtime.FloatConverter.ToFloat(v);
+             }
+         }
+ 
+         public static void bytesToDoubles(byte[] src, int srcpos, double[] dst, int dstpos, int ndoubles)
+         {
+-            IKVM.Runtime.DoubleConverter converter = new IKVM.Runtime.DoubleConverter();
+             for (int i = 0; i < ndoubles; i++)
+             {
+                 long v = src[srcpos++];
+@@ -54,7 +52,7 @@ public static void bytesToDoubles(byte[] src, int srcpos, double[] dst, int dstp
+                 v = (v << 8) | src[srcpos++];
+                 v = (v << 8) | src[srcpos++];
+                 v = (v << 8) | src[srcpos++];
+-                dst[dstpos++] = IKVM.Runtime.DoubleConverter.ToDouble(v, ref converter);
++                dst[dstpos++] = IKVM.Runtime.DoubleConverter.ToDouble(v);
+             }
+         }
+ 
+diff --git a/src/IKVM.Runtime/Java/Externs/java/io/ObjectOutputStream.cs b/src/IKVM.Runtime/Java/Externs/java/io/ObjectOutputStream.cs
+index 20d1cbcef..1113c5897 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/io/ObjectOutputStream.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/io/ObjectOutputStream.cs
+@@ -28,10 +28,9 @@ static class ObjectOutputStream
+     {
+         public static void floatsToBytes(float[] src, int srcpos, byte[] dst, int dstpos, int nfloats)
+         {
+-            IKVM.Runtime.FloatConverter converter = new IKVM.Runtime.FloatConverter();
+             for (int i = 0; i < nfloats; i++)
+             {
+-                int v = IKVM.Runtime.FloatConverter.ToInt(src[srcpos++], ref converter);
++                int v = IKVM.Runtime.FloatConverter.ToInt(src[srcpos++]);
+                 dst[dstpos++] = (byte)(v >> 24);
+                 dst[dstpos++] = (byte)(v >> 16);
+                 dst[dstpos++] = (byte)(v >> 8);
+@@ -41,10 +40,9 @@ public static void floatsToBytes(float[] src, int srcpos, byte[] dst, int dstpos
+ 
+         public static void doublesToBytes(double[] src, int srcpos, byte[] dst, int dstpos, int ndoubles)
+         {
+-            IKVM.Runtime.DoubleConverter converter = new IKVM.Runtime.DoubleConverter();
+             for (int i = 0; i < ndoubles; i++)
+             {
+-                long v = IKVM.Runtime.DoubleConverter.ToLong(src[srcpos++], ref converter);
++                long v = IKVM.Runtime.DoubleConverter.ToLong(src[srcpos++]);
+                 dst[dstpos++] = (byte)(v >> 56);
+                 dst[dstpos++] = (byte)(v >> 48);
+                 dst[dstpos++] = (byte)(v >> 40);
+diff --git a/src/IKVM.Runtime/Java/Externs/java/lang/Double.cs b/src/IKVM.Runtime/Java/Externs/java/lang/Double.cs
+index 218c67da0..3f6221b0e 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/lang/Double.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/lang/Double.cs
+@@ -28,17 +28,9 @@ namespace IKVM.Java.Externs.java.lang
+     static class Double
+     {
+ 
+-        public static long doubleToRawLongBits(double value)
+-        {
+-            IKVM.Runtime.DoubleConverter converter = new IKVM.Runtime.DoubleConverter();
+-            return IKVM.Runtime.DoubleConverter.ToLong(value, ref converter);
+-        }
+-
+-        public static double longBitsToDouble(long bits)
+-        {
+-            IKVM.Runtime.DoubleConverter converter = new IKVM.Runtime.DoubleConverter();
+-            return IKVM.Runtime.DoubleConverter.ToDouble(bits, ref converter);
+-        }
++        public static long doubleToRawLongBits(double value) => IKVM.Runtime.DoubleConverter.ToLong(value);
++
++        public static double longBitsToDouble(long bits) => IKVM.Runtime.DoubleConverter.ToDouble(bits);
+ 
+     }
+ 
+diff --git a/src/IKVM.Runtime/Java/Externs/java/lang/Float.cs b/src/IKVM.Runtime/Java/Externs/java/lang/Float.cs
+index f5afd4c8c..6a1e08583 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/lang/Float.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/lang/Float.cs
+@@ -28,17 +28,9 @@ namespace IKVM.Java.Externs.java.lang
+     static class Float
+     {
+ 
+-        public static int floatToRawIntBits(float value)
+-        {
+-            IKVM.Runtime.FloatConverter converter = new IKVM.Runtime.FloatConverter();
+-            return IKVM.Runtime.FloatConverter.ToInt(value, ref converter);
+-        }
+-
+-        public static float intBitsToFloat(int bits)
+-        {
+-            IKVM.Runtime.FloatConverter converter = new IKVM.Runtime.FloatConverter();
+-            return IKVM.Runtime.FloatConverter.ToFloat(bits, ref converter);
+-        }
++        public static int floatToRawIntBits(float value) => IKVM.Runtime.FloatConverter.ToInt(value);
++
++        public static float intBitsToFloat(int bits) => IKVM.Runtime.FloatConverter.ToFloat(bits);
+ 
+     }
+ 
 diff --git a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs b/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
 index e9f3aa23d..e46bd67d5 100644
 --- a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
@@ -4406,9 +4672,18 @@ index 000000000..bf21a7868
 +
 +}
 diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
-index 44ffeeaf4..e45ea151c 100644
+index 44ffeeaf4..0304b2dd6 100644
 --- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
 +++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
+@@ -1791,7 +1791,7 @@ internal void Generate(RuntimeByteCodeJavaType.FinishContext context, CodeEmitte
+                         realRetType = retTypeWrapper.TypeAsSignatureType;
+                     else
+                         realRetType = context.Context.Types.IntPtr;
+-                    ilGenerator.EmitCalli(OpCodes.Calli, System.Runtime.InteropServices.CallingConvention.StdCall, realRetType, modargs);
++                    ilGenerator.EmitCalli(OpCodes.Calli, System.Runtime.InteropServices.CallingConvention.Cdecl, realRetType, modargs);
+ 
+                     CodeEmitterLocal retValue = null;
+                     if (retTypeWrapper != context.Context.PrimitiveJavaTypeFactory.VOID)
 @@ -2346,4 +2346,4 @@ internal void EmitLiveObjectLoad(CodeEmitter ilgen, object value)
          }
      }
@@ -4945,7 +5220,7 @@ index b98d8eb5a..bc67a9ebe 100644
                          ilGenerator.EmitLdc_R4(2.0f);
                          break;
 diff --git a/src/IKVM.Runtime/intrinsics.cs b/src/IKVM.Runtime/intrinsics.cs
-index 81b2bfc69..0b5cd04ab 100644
+index 81b2bfc69..828842733 100644
 --- a/src/IKVM.Runtime/intrinsics.cs
 +++ b/src/IKVM.Runtime/intrinsics.cs
 @@ -120,6 +120,28 @@ static Dictionary<IntrinsicKey, Emitter> Register()
@@ -4977,7 +5252,16 @@ index 81b2bfc69..0b5cd04ab 100644
              return intrinsics;
          }
  
-@@ -628,6 +650,108 @@ static bool Unsafe_getObjectVolatile(EmitIntrinsicContext eic)
+@@ -252,8 +274,6 @@ static bool Double_longBitsToDouble(EmitIntrinsicContext eic)
+ 
+         static void EmitConversion(CodeEmitter ilgen, Type converterType, string method)
+         {
+-            var converter = ilgen.UnsafeAllocTempLocal(converterType);
+-            ilgen.Emit(OpCodes.Ldloca, converter);
+             ilgen.Emit(OpCodes.Call, converterType.GetMethod(method));
+         }
+ 
+@@ -628,6 +648,108 @@ static bool Unsafe_getObjectVolatile(EmitIntrinsicContext eic)
              return false;
          }
  
