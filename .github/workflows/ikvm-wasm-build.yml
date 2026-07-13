@@ -107,7 +107,7 @@ jobs:
       fail-fast: false
       matrix:
         variant: [mt, st]
-        gl-backend: [ng-gl4es, mobileglues]
+        gl-backend: [ng-gl4es, mobilegl]
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -117,6 +117,15 @@ jobs:
         with:
           version: ${{ env.EMSDK_VERSION }}
 
+      # The mobilegl backend builds Dawn's tint (SPIR-V -> WGSL); it's slow and only depends on
+      # the pinned Dawn rev + emsdk + variant (mt needs a -pthread tint), so cache it per-variant.
+      - name: Cache tint (mobilegl)
+        if: matrix.gl-backend == 'mobilegl'
+        uses: actions/cache@v4
+        with:
+          path: tools/native-deps/tint-out-${{ matrix.variant }}
+          key: tint-${{ matrix.variant }}-emsdk${{ env.EMSDK_VERSION }}-dawn-b465e23
+
       - name: build glfw
         shell: bash
         run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}" --gl-backend="${{ matrix.gl-backend }}"
@@ -125,9 +134,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: glfw-${{ matrix.gl-backend }}-${{ matrix.variant }}
+          # The mobilegl backend also emits the emdawnwebgpu + JSPI JS libraries the final app
+          # link needs (absent for ng-gl4es; the globs simply match nothing there).
           path: |
             tools/native-deps/out/${{ matrix.variant }}/libglfw3.a
             tools/native-deps/out/${{ matrix.variant }}/lib_emscripten_glfw3.js
+            tools/native-deps/out/${{ matrix.variant }}/library_webgpu*.js
+            tools/native-deps/out/${{ matrix.variant }}/lib_mobilegl_webgpu.js
           if-no-files-found: error
 
   build-java-native-deps:
@@ -257,13 +270,24 @@ jobs:
             native/libfontmanager.a
           zip -r "release/ikvm-wasm-bundle.zip" image
 
-           for backend in ng-gl4es mobileglues; do
+           for backend in ng-gl4es mobilegl; do
              for variant in mt st; do
                cp "glfw/glfw-${backend}-${variant}/libglfw3.a" \
                  "release/libglfw3-${backend}-${variant}.a"
                cp "glfw/glfw-${backend}-${variant}/lib_emscripten_glfw3.js" \
                  "release/lib_emscripten_glfw3-${backend}-${variant}.js"
              done
+           done
+
+           # mobilegl also ships the emdawnwebgpu bindings + JSPI shim the final app link needs;
+           # bundle them per variant so the client can fetch+unzip one asset into statics/.
+           for variant in mt st; do
+             zip -q -j "release/mobilegl-webgpu-js-${variant}.zip" \
+               "glfw/glfw-mobilegl-${variant}/library_webgpu_enum_tables.js" \
+               "glfw/glfw-mobilegl-${variant}/library_webgpu_generated_struct_info.js" \
+               "glfw/glfw-mobilegl-${variant}/library_webgpu_generated_sig_info.js" \
+               "glfw/glfw-mobilegl-${variant}/library_webgpu.js" \
+               "glfw/glfw-mobilegl-${variant}/lib_mobilegl_webgpu.js"
            done
 
           cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
