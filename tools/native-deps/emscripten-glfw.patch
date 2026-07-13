@@ -1051,10 +1051,10 @@ index 8475a25..9b314a5 100644
 \ No newline at end of file
 +}
 diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
-index 0cfd23c..33f1ade 100644
+index 0cfd23c..37b41ec 100644
 --- a/src/js/lib_emscripten_glfw3.js
 +++ b/src/js/lib_emscripten_glfw3.js
-@@ -814,6 +814,61 @@ let emscripten_glfw3_impl = {
+@@ -814,6 +814,83 @@ let emscripten_glfw3_impl = {
      return navigator.platform.indexOf("Mac") === 0 || navigator.platform === "iPhone";
    },
  
@@ -1105,12 +1105,34 @@ index 0cfd23c..33f1ade 100644
 +  },
 +
 +  emscripten_glfw3_context_jspi_settimeout: function() {
-+    return scheduler.yield();
++    // Yield the (deputy/render) wasm stack to the event loop, then resume. Prefer scheduler.yield() for
++    // priority, but the promise MUST always settle: scheduler.yield() can be missing on a worker or
++    // starved in a backgrounded/throttled tab, and if its continuation never runs the JSPI-suspended
++    // wasm stack parks FOREVER (empty event loop -> thread unpausable, no error, no onerror) and the GC
++    // then stalls 20s trying to suspend it. Arm a setTimeout fallback that can't be deferred forever.
++    return new Promise(function(r) {
++      var settled = false;
++      var done = function() { if (!settled) { settled = true; r(); } };
++      try {
++        if (typeof scheduler !== 'undefined' && scheduler.yield) scheduler.yield().then(done, done);
++        else setTimeout(done, 0);
++      } catch (e) { setTimeout(done, 0); }
++      setTimeout(done, 1000); // safety: resume even if the primary yield never fires (hidden/frozen tab)
++    });
 +  },
 +  emscripten_glfw3_context_jspi_settimeout__postset: '_emscripten_glfw3_context_jspi_settimeout = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_settimeout);',
 +
 +  emscripten_glfw3_context_jspi_raf: function() {
-+    return new Promise(r => requestAnimationFrame(r));
++    // vsync swap: resume on the next animation frame. requestAnimationFrame NEVER fires in a hidden/
++    // occluded/throttled tab (and isn't a worker global everywhere), which would park the JSPI-suspended
++    // wasm stack forever (see settimeout note). rAF stays the fast path when visible (fires in ~16ms and
++    // wins the race); the setTimeout fallback guarantees the suspend resumes when rAF is dead.
++    return new Promise(function(r) {
++      var settled = false;
++      var done = function() { if (!settled) { settled = true; r(); } };
++      try { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(done); } catch (e) {}
++      setTimeout(done, 1000); // safety: resume even if rAF never fires (hidden/frozen tab)
++    });
 +  },
 +  emscripten_glfw3_context_jspi_raf__postset: '_emscripten_glfw3_context_jspi_raf = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_raf);',
  }

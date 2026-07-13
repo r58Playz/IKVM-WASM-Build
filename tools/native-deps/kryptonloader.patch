@@ -102,6 +102,61 @@ index 3d34153..18e1936 100644
  
  // ARBCONV_DBG - general ArbConverter debug logs
  #define ARBCONV_DBG(a) a
+diff --git a/src/gl/buffers.c b/src/gl/buffers.c
+index 11df966..f70ee25 100644
+--- a/src/gl/buffers.c
++++ b/src/gl/buffers.c
+@@ -1064,6 +1064,13 @@ AliasExport(void, glGetNamedBufferPointerv, EXT, (GLuint buffer, GLenum pname, G
+ // VAO ****************
+ static GLuint lastvao = 1;
+ 
++static void free_vao(glvao_t* vao) {
++    if (!vao) return;
++
++    VaoSharedClear(vao);
++    free(vao);
++}
++
+ void APIENTRY_GL4ES gl4es_glGenVertexArrays(GLsizei n, GLuint* arrays) {
+     DBG(SHUT_LOGD("glGenVertexArrays(%i, %p)\n", n, arrays);)
+     noerrorShim();
+@@ -1132,9 +1139,11 @@ void APIENTRY_GL4ES gl4es_glDeleteVertexArrays(GLsizei n, const GLuint* arrays)
+                 k = kh_get(glvao, list, t);
+                 if (k != kh_end(list)) {
+                     glvao = kh_value(list, k);
+-                    VaoSharedClear(glvao);
++                    if (glstate->vao == glvao) {
++                        glstate->vao = glstate->defaultvao;
++                    }
+                     kh_del(glvao, list, k);
+-                    // free(glvao);  //let the use delete those
++                    free_vao(glvao);
+                 }
+             }
+         }
+@@ -1163,6 +1172,7 @@ void VaoSharedClear(glvao_t* vao) {
+         free(vao->vert.ptr);
+         free(vao->color.ptr);
+         free(vao->secondary.ptr);
++        free(vao->fog.ptr);
+         free(vao->normal.ptr);
+         for (int i = 0; i < hardext.maxtex; i++)
+             free(vao->tex[i].ptr);
+@@ -1171,6 +1181,7 @@ void VaoSharedClear(glvao_t* vao) {
+     vao->vert.ptr = NULL;
+     vao->color.ptr = NULL;
+     vao->secondary.ptr = NULL;
++    vao->fog.ptr = NULL;
+     vao->normal.ptr = NULL;
+     for (int i = 0; i < hardext.maxtex; i++)
+         vao->tex[i].ptr = NULL;
+@@ -1189,4 +1200,4 @@ void VaoInit(glvao_t* vao) {
+ AliasExport(void, glGenVertexArrays, , (GLsizei n, GLuint* arrays));
+ AliasExport(void, glBindVertexArray, , (GLuint array));
+ AliasExport(void, glDeleteVertexArrays, , (GLsizei n, const GLuint* arrays));
+-AliasExport(GLboolean, glIsVertexArray, , (GLuint array));
+\ No newline at end of file
++AliasExport(GLboolean, glIsVertexArray, , (GLuint array));
 diff --git a/src/gl/emscripten_aliases.c b/src/gl/emscripten_aliases.c
 new file mode 100644
 index 0000000..7bbf664

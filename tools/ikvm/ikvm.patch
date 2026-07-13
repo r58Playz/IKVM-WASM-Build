@@ -236,6 +236,46 @@ index 5f3686a7f..9557640f9 100644
      }
      public int getAvailableProcessors() {
          return cli.System.Environment.get_ProcessorCount();
+diff --git a/src/IKVM.Java/map.xml b/src/IKVM.Java/map.xml
+index ad35e91cf..2b16b60e2 100644
+--- a/src/IKVM.Java/map.xml
++++ b/src/IKVM.Java/map.xml
+@@ -2815,6 +2815,35 @@
+                 </prologue>
+             </method>
+         </class>
++        <class name="sun.security.provider.NativeSeedGenerator">
++            <!-- IKVM compiles the *Windows* NativeSeedGenerator (jdk/src/windows/classes), whose
++                 nativeGenerateSeed() is a Win32 CryptoAPI native with no wasm/managed impl. Left
++                 unimplemented it throws, the ctor throws IOException, and SeedGenerator falls back
++                 to the ThreadedSeedGenerator busy-spin (pegs a worker gathering entropy by timing
++                 jitter). Implement it the same way getSystemEntropy above is: fill from the .NET
++                 crypto RNG (browser crypto.getRandomValues on wasm) and return true. -->
++            <method name="nativeGenerateSeed" sig="([B)Z">
++                <body>
++                    <exceptionBlock>
++                        <try>
++                            <newobj class="cli.System.Security.Cryptography.RNGCryptoServiceProvider" name="&lt;init&gt;" sig="()V" />
++                            <ldarg_0 />
++                            <callvirt type="System.Security.Cryptography.RandomNumberGenerator" name="GetBytes" sig="([B)V" />
++                            <leave name="ok" />
++                        </try>
++                        <catch type="System.Security.Cryptography.CryptographicException">
++                            <leave name="fail" />
++                        </catch>
++                    </exceptionBlock>
++                    <label name="ok" />
++                    <ldc_i4_1 />
++                    <ret />
++                    <label name="fail" />
++                    <ldc_i4_0 />
++                    <ret />
++                </body>
++            </method>
++        </class>
+         <class name="javax.swing.SwingUtilities">
+             <method name="layoutCompoundLabelImpl" sig="(Ljavax.swing.JComponent;Ljava.awt.FontMetrics;Ljava.lang.String;Ljavax.swing.Icon;IIIILjava.awt.Rectangle;Ljava.awt.Rectangle;Ljava.awt.Rectangle;I)Ljava.lang.String;">
+                 <!-- Only needed for OpenJDK 6, can removed in OpenJDK 7, prevent "..." on some buttons and labels -->
 diff --git a/src/IKVM.Runtime/Accessors/Sun/Nio/Fs/UnixConstantsAccessor.cs b/src/IKVM.Runtime/Accessors/Sun/Nio/Fs/UnixConstantsAccessor.cs
 new file mode 100644
 index 000000000..0bd7a617d

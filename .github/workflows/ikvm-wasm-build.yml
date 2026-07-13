@@ -3,7 +3,6 @@ name: IKVM WASM Build
 env:
   EMSDK_VERSION: 3.1.56
   IKVM_REF: 8.14.0
-  NATIVE_SDK_VERSION: "20251124.1"
   BUILD_RUNTIME: linux-x64
 
 on:
@@ -210,8 +209,6 @@ jobs:
       - name: Download all GLFW artifacts
         uses: actions/download-artifact@v4
         with:
-          # Each build-glfw matrix cell produced a glfw-<backend>-<variant>
-          # artifact; pull them all in under glfw/<backend>-<variant>/.
           pattern: glfw-*
           path: glfw/
 
@@ -260,9 +257,6 @@ jobs:
             native/libfontmanager.a
           zip -r "release/ikvm-wasm-bundle.zip" image
 
-           # GLFW artifacts, one per (backend, variant) matrix cell. Identify
-           # which backend is linked in a built wasm via:
-           #   llvm-nm wasm | grep -E 'krypton_|mobileglues_'
            for backend in ng-gl4es mobileglues; do
              for variant in mt st; do
                cp "glfw/glfw-${backend}-${variant}/libglfw3.a" \
