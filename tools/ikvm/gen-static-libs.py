@@ -514,6 +514,7 @@ def generate(
     libraries: list[tuple[str, list[tuple[str, str]]]],  # [(fake_path, [(sym, type), ...]), ...]
     library_aliases: dict[str, list[str]],
     rename_symbols: dict[str, dict[str, str]],
+    prefer_prefixes: dict[str, list[str]],
     signatures: dict[str, str],
     args_repr: str,
     nm_exe: str,
@@ -586,6 +587,20 @@ def generate(
 
         if syms:
             renames = rename_symbols.get(fake_path, {})
+            # Build base -> prefixed-symbol redirects: when both X and <PREFIX>X are
+            # defined, the KEY "X" should resolve to <PREFIX>X (the wrapping front
+            # layer) instead of X (the backend's own definition). Only redirect when
+            # the stripped base also exists as a real symbol in this library, so
+            # front-layer-only symbols (e.g. sfpew_emscripten_init) don't manufacture
+            # bogus keys.
+            sym_names = {s for s, _ in syms}
+            prefer_target: dict[str, str] = {}  # base name -> prefixed symbol
+            for prefix in prefer_prefixes.get(fake_path, []):
+                for s in sym_names:
+                    if s.startswith(prefix):
+                        base = s[len(prefix):]
+                        if base and base in sym_names:
+                            prefer_target[base] = s
             out.append(
                 f'/* Symbol table for "{_c_str(fake_path)}" '
                 f"({len(syms)} symbol{'s' if len(syms) != 1 else ''}) */\n"
@@ -604,10 +619,12 @@ def generate(
                     key = "JNI_OnUnload"
                 else:
                     key = sym
+                # Redirect the by-name lookup to the preferred prefixed symbol.
+                target = prefer_target.get(key, sym)
                 if sym_type == "T":
-                    out.append(f'    {{ "{_c_str(key)}", (void*){sym} }},\n')
+                    out.append(f'    {{ "{_c_str(key)}", (void*){target} }},\n')
                 else:
-                    out.append(f'    {{ "{_c_str(key)}", (void*)&{sym} }},\n')
+                    out.append(f'    {{ "{_c_str(key)}", (void*)&{target} }},\n')
             out.append("    { NULL, NULL }  /* sentinel */\n")
             out.append("};\n\n")
         else:
@@ -766,6 +783,21 @@ def main() -> int:
             "Can be specified multiple times. Renames apply after extraction and before emission."
         ),
     )
+    parser.add_argument(
+        "--prefer-prefix",
+        action="append",
+        dest="prefer_prefixes",
+        metavar="FAKE_PATH:PREFIX",
+        default=[],
+        help=(
+            "For a library, when both a symbol X and a prefixed symbol <PREFIX>X are "
+            "defined, make the lookup KEY \"X\" resolve to <PREFIX>X instead of X. "
+            "Used to let a wrapping front layer (e.g. SimpleFPEWrapper's sfpew_* symbols, "
+            "which are renamed to avoid link collisions with the backend) win by-name "
+            "resolution over the backend's own definition. Format: FAKE_PATH:PREFIX. "
+            "Only symbols whose stripped base also exists in the library are redirected."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -904,6 +936,22 @@ def main() -> int:
             return 1
         rename_symbols.setdefault(fake_path, {})[old_symbol] = new_symbol
 
+    # Parse prefer-prefix mappings (FAKE_PATH:PREFIX)
+    prefer_prefixes: dict[str, list[str]] = {}
+    for spec in args.prefer_prefixes:
+        try:
+            fake_path, prefix = _parse_pair(spec)
+        except ValueError as exc:
+            print(f"error: --prefer-prefix {spec!r}: {exc}", file=sys.stderr)
+            return 1
+        if not prefix:
+            print(
+                f"error: --prefer-prefix {spec!r}: prefix must be non-empty",
+                file=sys.stderr,
+            )
+            return 1
+        prefer_prefixes.setdefault(fake_path, []).append(prefix)
+
     # Locate nm
     try:
         nm_exe = _find_nm(args.nm)
@@ -1020,6 +1068,7 @@ def main() -> int:
     repr_parts.extend(f"--symbol-list {spec}" for spec in args.symbol_lists)
     repr_parts.extend(f"--add-alias {spec}" for spec in args.library_aliases)
     repr_parts.extend(f"--rename-symbol {spec}" for spec in args.rename_symbols)
+    repr_parts.extend(f"--prefer-prefix {spec}" for spec in args.prefer_prefixes)
     repr_parts.extend(args.pairs)
     args_repr = " ".join(repr_parts) if repr_parts else "(no arguments)"
 
@@ -1036,7 +1085,13 @@ def main() -> int:
                 signatures[sym] = sig
 
     source = generate(
-        libraries, library_aliases, rename_symbols, signatures, args_repr, nm_exe
+        libraries,
+        library_aliases,
+        rename_symbols,
+        prefer_prefixes,
+        signatures,
+        args_repr,
+        nm_exe,
     )
 
     if args.output == "-":

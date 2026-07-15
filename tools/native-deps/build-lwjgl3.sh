@@ -7,8 +7,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
 
 LWJGL_REPO="https://github.com/LWJGL/lwjgl3.git"
-# 3.2.2 is the LWJGL release used by Minecraft 1.16.1.
-LWJGL_REF="${LWJGL_REF:-3.2.2}"
+# 3.4.2 is the latest LWJGL release. A single 3.4.2 jar + natives is built to
+# serve as a drop-in replacement under every Minecraft version that uses LWJGL3
+# (MC 1.13 through the 2026 line). See docs: the public binding surface is a
+# superset of the 3.1.6/3.2.x/3.3.x versions MC ships, the >=3.3.0 "cookie"
+# MemoryUtil offset resolution is IKVM-safe, and removed struct *Stack helpers
+# are re-added via a generator shim in lwjgl3.patch.
+LWJGL_REF="${LWJGL_REF:-3.4.2}"
 LWJGL_PATCH="${LWJGL_PATCH:-$SCRIPT_DIR/lwjgl3.patch}"
 EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-3.1.56}"
 ANT_VERSION="${ANT_VERSION:-1.10.15}"
@@ -27,7 +32,7 @@ Usage: build-lwjgl3.sh [options]
 Options:
   --variant=<mt|st>            Build variant (default: mt).
   --output-dir=<path>          Output directory (default: tools/native-deps/out/<variant>).
-  --lwjgl-ref=<ref>            LWJGL git ref/tag (default: 3.2.2).
+  --lwjgl-ref=<ref>            LWJGL git ref/tag (default: 3.4.2).
   --lwjgl-patch=<path>         Optional patch to apply to lwjgl clone.
   --ant-cache-root=<path>      Persistent Apache Ant cache root.
   --tmp-dir=<path>             Temporary build directory (default: mktemp).
@@ -134,10 +139,15 @@ build_binding_args() {
     local enabled=",$enabled_csv,"
     local binding
 
+    # 3.4.2 binding module set. Unlisted modules default to enabled in
+    # config/build-bindings.xml, so every module must appear here to be
+    # explicitly toggled. (core11/core25/core27 are multi-release overlays,
+    # not bindings, and are intentionally absent.)
     local all_bindings=(
-        assimp bgfx bullet cuda egl glfw jawt jemalloc libdivide llvm lmdb lz4 meow
-        nanovg nfd nuklear odbc openal opencl opengl opengles openvr opus par remotery
-        rpmalloc sse stb tinyexr tinyfd tootle vma vulkan xxhash yoga zstd
+        assimp bgfx egl fmod freetype glfw harfbuzz hwloc jawt jemalloc ktx llvm lmdb
+        lz4 meshoptimizer mimalloc msdfgen nanovg nfd nuklear odbc openal opencl opengl
+        opengles openxr opus par remotery renderdoc rpmalloc sdl shaderc spng spvc sse
+        stb tinyexr tinyfd vma vulkan xxhash yoga zstd
     )
 
     out_args=()
@@ -315,6 +325,17 @@ if [ ! -d "$LWJGL_SRC_DIR/.git" ]; then
 else
     log "lwjgl3 source already present, skipping clone."
 fi
+
+# Guard against a stale checkout at a different ref (the skip-clone path above
+# only checks for a .git dir). A mismatched tree would silently build the wrong
+# LWJGL and fail to apply the (ref-specific) patch.
+CHECKOUT_REF="$(git -C "$LWJGL_SRC_DIR" describe --tags --always 2>/dev/null || true)"
+if [ "$CHECKOUT_REF" != "$LWJGL_REF" ]; then
+    echo "ERROR: lwjgl3 checkout is at '$CHECKOUT_REF' but expected '$LWJGL_REF'." >&2
+    echo "Remove '$LWJGL_SRC_DIR' so it is re-cloned at the correct ref." >&2
+    exit 1
+fi
+
 apply_patch_once "$LWJGL_SRC_DIR" "$LWJGL_PATCH" "$(basename "$LWJGL_PATCH")"
 
 # LWJGL's GeneratorKt rewrites modules/lwjgl/*/src/generated/ with only the
@@ -327,6 +348,20 @@ log "Restoring lwjgl3 generated/ trees from git"
     git ls-tree -d --name-only HEAD -r \
     | grep -E '^modules/lwjgl/[^/]+/src/generated$' \
     | xargs -r git checkout HEAD --)
+
+# Force the generator to re-emit every generated file. Two independent caches would
+# otherwise ship the upstream (unpatched) sources we just restored — losing
+# generator-emitted patches such as the re-added struct mallocStack/callocStack
+# compatibility methods:
+#   1. Ant's `generate` target caches on bin/classes/generator/generated-touch.txt.
+#   2. GeneratorKt itself skips a file when its output is newer than the generator
+#      sources (`max(moduleLM, GENERATOR_LAST_MODIFIED) < output.lastModified`). The
+#      `git checkout` above stamps restored files with the current time, which flips
+#      regeneration on/off depending on the previous build's state.
+# Backdate the restored generated files and drop the ant touch file so both checks
+# always regenerate. Regeneration is deterministic and only adds a few seconds.
+rm -f "$LWJGL_SRC_DIR/bin/classes/generator/generated-touch.txt"
+find "$LWJGL_SRC_DIR"/modules/lwjgl/*/src/generated -type f -exec touch -t 200001010000 {} + 2>/dev/null || true
 
 ANT_CMD="$(setup_ant)"
 
@@ -370,8 +405,12 @@ NATIVE_SOURCES=(
     modules/lwjgl/core/src/main/c/common_tools.c
     modules/lwjgl/core/src/main/c/org_lwjgl_system_MemoryUtil.c
     modules/lwjgl/core/src/main/c/org_lwjgl_system_ThreadLocalUtil.c
-    modules/lwjgl/core/src/main/c/org_lwjgl_system_Callback.c
-    modules/lwjgl/core/src/main/c/dyncall_libffi_bridge.c
+    # 3.4.x moved the upcall/callback machinery out of Callback.c into Upcalls.c
+    # (libffi-based). SharedLibraryUtil.c is required by the patched LinuxLibrary.getPath.
+    modules/lwjgl/core/src/main/c/org_lwjgl_system_Upcalls.c
+    modules/lwjgl/core/src/main/c/org_lwjgl_system_SharedLibraryUtil.c
+    # Combined wasm libffi closure allocator (patch-added), replaces the old dyncall bridge.
+    modules/lwjgl/core/src/main/c/lwjgl_wasm_ffi_closure.c
     modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
     modules/lwjgl/tinyfd/src/main/c/tinyfd_js_proxy.c
 )
@@ -379,19 +418,31 @@ NATIVE_SOURCES=(
 STB_NATIVE_SOURCES=()
 
 for src in "$LWJGL_SRC_DIR"/modules/lwjgl/core/src/generated/c/org_lwjgl_system_*.c; do
-    base="$(basename "$src")"
-    # dyncall bindings rely on libdyncall/dyncallback/dynload static libs which we do not ship.
-    case "$base" in
-        org_lwjgl_system_dyncall_*.c) continue ;;
-    esac
     NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
 done
 
-for src in "$LWJGL_SRC_DIR"/modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_*.c; do
-    NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
-done
+# Of the org.lwjgl.system.linux.* bindings, only DynamicLinkLoader (dlopen/dlsym)
+# is reachable from our shipped modules (via LinuxLibrary's dynamic fallback). The
+# rest are POSIX syscall wrappers added in 3.3.x/3.4.x (FCNTL, MMAN, PThread,
+# Socket, Stat, UIO, UNISTD, liburing) that Minecraft/GL never call and that
+# reference symbols unavailable under Emscripten (process_vm_readv, io_uring, ...).
+# Compile only the one we need rather than glob-and-skip.
+DL_LOADER_REL="modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_DynamicLinkLoader.c"
+if [ -f "$LWJGL_SRC_DIR/$DL_LOADER_REL" ]; then
+    NATIVE_SOURCES+=("$DL_LOADER_REL")
+else
+    echo "ERROR: expected generated source not found: $DL_LOADER_REL" >&2
+    exit 1
+fi
 
 for src in "$LWJGL_SRC_DIR"/modules/lwjgl/opengl/src/generated/c/org_lwjgl_opengl_*.c; do
+    base="$(basename "$src")"
+    # WGL (Windows) / GLX (X11) / CGL (macOS) are platform GL-context bindings that
+    # include platform-only headers (e.g. WindowsLWJGL.h). The GL context is created
+    # via GLFW/emscripten here and Minecraft calls none of these, so skip them.
+    case "$base" in
+        org_lwjgl_opengl_WGL*.c|org_lwjgl_opengl_GLX*.c|org_lwjgl_opengl_CGL*.c) continue ;;
+    esac
     NATIVE_SOURCES+=("${src#"$LWJGL_SRC_DIR"/}")
 done
 
@@ -410,7 +461,6 @@ COMMON_NATIVE_FLAGS=(
     -I"$JAVA_HOME_DETECTED/include/linux"
     -I"$LIBFFI_INCLUDE_DIR"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c"
-    -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/dyncall"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/opengl/src/main/c"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/core/src/main/c/linux"
     -I"$LWJGL_SRC_DIR/modules/lwjgl/stb/src/main/c"

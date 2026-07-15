@@ -15,10 +15,10 @@ index dcfc7b2..5ed7079 100644
      AC_DEFINE(SYMBOL_UNDERSCORE, 1, [Define if symbols are underscored.])
  fi
 diff --git a/include/ffi.h.in b/include/ffi.h.in
-index 6ce7ac5..771c476 100644
+index 6ce7ac5..846eba5 100644
 --- a/include/ffi.h.in
 +++ b/include/ffi.h.in
-@@ -370,6 +370,13 @@ typedef struct {
+@@ -370,6 +370,28 @@ typedef struct {
  FFI_API void *ffi_closure_alloc (size_t size, void **code);
  FFI_API void ffi_closure_free (void *);
  
@@ -29,14 +29,39 @@ index 6ce7ac5..771c476 100644
 +                        void *user_data,
 +                        void **code);
 +
++/* Reusable call plans (libffi 3.7+ downcall API). This 3.5.2-based build keeps
++   its Emscripten-pthread-safe closure implementation (a pool of pre-emitted
++   signature trampolines shared across all threads), so it does not track 3.7.x.
++   LWJGL 3.4.x's generated LibFFI binding references ffi_call_plan_*, so provide
++   it here: there is no wasm fast path, the plan just wraps the cif and
++   ffi_call_plan_invoke falls back to ffi_call (as the portable API guarantees). */
++typedef struct ffi_call_plan ffi_call_plan;
++
++FFI_API ffi_call_plan *ffi_call_plan_alloc (ffi_cif *cif);
++FFI_API void ffi_call_plan_invoke (ffi_call_plan *plan,
++                                   void (*fn)(void),
++                                   void *rvalue,
++                                   void **avalue);
++FFI_API void ffi_call_plan_free (ffi_call_plan *plan);
++
  FFI_API ffi_status
  ffi_prep_closure (ffi_closure*,
  		  ffi_cif *,
 diff --git a/libffi.map.in b/libffi.map.in
-index cc135ba..f33453c 100644
+index cc135ba..e366515 100644
 --- a/libffi.map.in
 +++ b/libffi.map.in
-@@ -73,6 +73,7 @@ LIBFFI_CLOSURE_8.0 {
+@@ -56,6 +56,9 @@ LIBFFI_BASE_8.1 {
+     ffi_get_version_number;
+     ffi_get_default_abi;
+     ffi_get_closure_size;
++    ffi_call_plan_alloc;
++    ffi_call_plan_invoke;
++    ffi_call_plan_free;
+ } LIBFFI_BASE_8.0;
+ 
+ #ifdef FFI_TARGET_HAS_COMPLEX_TYPE
+@@ -73,6 +76,7 @@ LIBFFI_CLOSURE_8.0 {
    global:
  	ffi_closure_alloc;
  	ffi_closure_free;
@@ -45,7 +70,7 @@ index cc135ba..f33453c 100644
  	ffi_prep_closure_loc;
  	ffi_prep_raw_closure;
 diff --git a/src/wasm/ffi.c b/src/wasm/ffi.c
-index 486ffa7..da0ed6a 100644
+index 486ffa7..e534ace 100644
 --- a/src/wasm/ffi.c
 +++ b/src/wasm/ffi.c
 @@ -41,7 +41,7 @@
@@ -38929,12 +38954,40 @@ index 486ffa7..da0ed6a 100644
 +  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
- 
--#elif __SIZEOF_POINTER__ == 8
++
 +static void ffi_wasm_wrapper_V_PPFFFFFFP_28(void * a0, void * a1, float a2, float a3, float a4, float a5, float a6, float a7, void * a8)
 +{
 +  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPFFFFFFP[28];
 +  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
++  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
++}
++
++static void ffi_wasm_wrapper_V_PPFFFFFFP_29(void * a0, void * a1, float a2, float a3, float a4, float a5, float a6, float a7, void * a8)
++{
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPFFFFFFP[29];
++  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
++  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
++}
++
++static void ffi_wasm_wrapper_V_PPFFFFFFP_30(void * a0, void * a1, float a2, float a3, float a4, float a5, float a6, float a7, void * a8)
++{
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPFFFFFFP[30];
++  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
++  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
++}
++
++static void ffi_wasm_wrapper_V_PPFFFFFFP_31(void * a0, void * a1, float a2, float a3, float a4, float a5, float a6, float a7, void * a8)
++{
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPFFFFFFP[31];
++  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
++  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
++}
+ 
+-#elif __SIZEOF_POINTER__ == 8
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_0(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
++{
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[0];
++  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
  
@@ -38942,10 +38995,10 @@ index 486ffa7..da0ed6a 100644
 -CHECK_FIELD_OFFSET(ffi_closure, cif, 8);
 -CHECK_FIELD_OFFSET(ffi_closure, fun, 16);
 -CHECK_FIELD_OFFSET(ffi_closure, user_data, 24);
-+static void ffi_wasm_wrapper_V_PPFFFFFFP_29(void * a0, void * a1, float a2, float a3, float a4, float a5, float a6, float a7, void * a8)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_1(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPFFFFFFP[29];
-+  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[1];
++  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
  
@@ -38953,20 +39006,20 @@ index 486ffa7..da0ed6a 100644
 -#define CLOSURE__cif(addr) DEREF_U64(addr, 1)
 -#define CLOSURE__fun(addr) DEREF_U64(addr, 2)
 -#define CLOSURE__user_data(addr) DEREF_U64(addr, 3)
-+static void ffi_wasm_wrapper_V_PPFFFFFFP_30(void * a0, void * a1, float a2, float a3, float a4, float a5, float a6, float a7, void * a8)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_2(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPFFFFFFP[30];
-+  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[2];
++  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
  
 -#else
 -#error "Unknown pointer size"
 -#endif
-+static void ffi_wasm_wrapper_V_PPFFFFFFP_31(void * a0, void * a1, float a2, float a3, float a4, float a5, float a6, float a7, void * a8)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_3(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPFFFFFFP[31];
-+  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8};
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[3];
++  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
  
@@ -38979,9 +39032,9 @@ index 486ffa7..da0ed6a 100644
 -  CLOSURE__wrapper(closure) = ENC_PTR(index);
 -  return ENC_PTR(closure);
 -})
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_0(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_4(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[0];
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[4];
 +  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
@@ -38989,9 +39042,9 @@ index 486ffa7..da0ed6a 100644
 -void * __attribute__ ((visibility ("default")))
 -ffi_closure_alloc(size_t size, void **code) {
 -  return ffi_closure_alloc_js(size, code);
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_1(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_5(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[1];
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[5];
 +  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
  }
@@ -39002,9 +39055,9 @@ index 486ffa7..da0ed6a 100644
 -  freeTableIndexes.push(index);
 -  _free(closure);
 -})
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_2(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_6(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[2];
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[6];
 +  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
@@ -39012,9 +39065,9 @@ index 486ffa7..da0ed6a 100644
 -void __attribute__ ((visibility ("default")))
 -ffi_closure_free(void *closure) {
 -  return ffi_closure_free_js(closure);
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_3(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_7(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[3];
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[7];
 +  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
  }
@@ -39023,7 +39076,7 @@ index 486ffa7..da0ed6a 100644
 -ffi_status,
 -ffi_prep_closure_loc_js,
 -(ffi_closure *closure, ffi_cif *cif, void *fun, void *user_data, void *codeloc),
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_4(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
++static void ffi_wasm_wrapper_V_PPPFFFFFFP_8(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
  {
 -  closure = DEC_PTR(closure);
 -  cif = DEC_PTR(cif);
@@ -39037,7 +39090,7 @@ index 486ffa7..da0ed6a 100644
 -  var rtype_unboxed = unbox_small_structs(CIF__RTYPE(cif));
 -  var rtype_ptr = rtype_unboxed[0];
 -  var rtype_id = rtype_unboxed[1];
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[4];
++  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[8];
 +  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
 +  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
 +}
@@ -39047,34 +39100,6 @@ index 486ffa7..da0ed6a 100644
 -  var sig;
 -  var ret_by_arg = false;
 -  switch (rtype_id) {
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_5(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
-+{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[5];
-+  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
-+  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
-+}
-+
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_6(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
-+{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[6];
-+  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
-+  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
-+}
-+
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_7(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
-+{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[7];
-+  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
-+  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
-+}
-+
-+static void ffi_wasm_wrapper_V_PPPFFFFFFP_8(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
-+{
-+  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[8];
-+  void *args[] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9};
-+  slot->closure.fun(slot->closure.cif, NULL, args, slot->closure.user_data);
-+}
-+
 +static void ffi_wasm_wrapper_V_PPPFFFFFFP_9(void * a0, void * a1, void * a2, float a3, float a4, float a5, float a6, float a7, float a8, void * a9)
 +{
 +  ffi_wasm_closure_slot *slot = &ffi_wasm_slots_V_PPPFFFFFFP[9];
@@ -40451,7 +40476,7 @@ index 486ffa7..da0ed6a 100644
    case FFI_TYPE_INT:
    case FFI_TYPE_UINT8:
    case FFI_TYPE_SINT8:
-@@ -566,233 +40796,155 @@ ffi_prep_closure_loc_js,
+@@ -566,233 +40796,182 @@ ffi_prep_closure_loc_js,
    case FFI_TYPE_SINT16:
    case FFI_TYPE_UINT32:
    case FFI_TYPE_SINT32:
@@ -40785,6 +40810,33 @@ index 486ffa7..da0ed6a 100644
 +
 +  *pclosure = closure;
 +  return FFI_OK;
++}
++
++/* Reusable call plans (libffi 3.7+ downcall API). There is no wasm fast path,
++   so a plan simply captures the cif and ffi_call_plan_invoke falls back to
++   ffi_call. Provided so LWJGL 3.4.x's generated LibFFI binding links against
++   this (3.5.2-based, pthread-safe-closure) libffi. */
++struct ffi_call_plan { ffi_cif *cif; };
++
++ffi_call_plan * __attribute__ ((visibility ("default")))
++ffi_call_plan_alloc(ffi_cif *cif)
++{
++  ffi_call_plan *plan = (ffi_call_plan *)malloc(sizeof(ffi_call_plan));
++  if (plan != NULL)
++    plan->cif = cif;
++  return plan;
++}
++
++void __attribute__ ((visibility ("default")))
++ffi_call_plan_invoke(ffi_call_plan *plan, void (*fn)(void), void *rvalue, void **avalue)
++{
++  ffi_call(plan->cif, fn, rvalue, avalue);
++}
++
++void __attribute__ ((visibility ("default")))
++ffi_call_plan_free(ffi_call_plan *plan)
++{
++  free(plan);
 +}
 +
 +void * __attribute__ ((visibility ("default")))
