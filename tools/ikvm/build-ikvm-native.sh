@@ -38,7 +38,48 @@ esac
 
 log() { echo "[build-ikvm-native/$VARIANT] $*"; }
 
+# ── Parallel compile job pool ──────────────────────────────────────────────────
+# Object-file compiles are independent; only the emar archive step depends on
+# them. run_compile launches each compile in the background, throttled to
+# NATIVE_JOBS concurrent jobs; barrier() drains all outstanding compiles (and is
+# invoked by create_archive before every emar), so archive contents are unchanged.
+NATIVE_JOBS="${NATIVE_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+if ! [[ "$NATIVE_JOBS" =~ ^[0-9]+$ ]] || [ "$NATIVE_JOBS" -lt 1 ]; then
+    NATIVE_JOBS=1
+fi
+log "Compile parallelism: NATIVE_JOBS=$NATIVE_JOBS"
+
+_jobs_running=0
+_job_failed=0
+
+# Reap exactly one finished background compile, recording any non-zero exit.
+_reap_one() {
+    if wait -n 2>/dev/null; then :; else _job_failed=1; fi
+    _jobs_running=$((_jobs_running - 1))
+}
+
+# Launch a compile in the background, throttled to NATIVE_JOBS concurrent jobs.
+run_compile() {
+    while [ "$_jobs_running" -ge "$NATIVE_JOBS" ]; do
+        _reap_one
+    done
+    "$@" &
+    _jobs_running=$((_jobs_running + 1))
+}
+
+# Wait for all outstanding compiles; abort the build if any failed.
+barrier() {
+    while [ "$_jobs_running" -gt 0 ]; do
+        _reap_one
+    done
+    if [ "$_job_failed" -ne 0 ]; then
+        echo "ERROR: a native compile job failed (variant $VARIANT)" >&2
+        exit 1
+    fi
+}
+
 create_archive() {
+	barrier
 	local archive="$1"
 	shift
 	rm -f "$archive"
@@ -78,17 +119,17 @@ mkdir -p "$TMP_DIR/libnet"
 # ── libjvm ────────────────────────────────────────────────────────────────────
 
 log "Building ${PREFIX}libjvm ..."
-emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni.c"      -o "$TMP_DIR/jni.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm_emscripten_dynlib.c"      -o "$TMP_DIR/jvm_emscripten_dynlib.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni_vargs.c" -o "$TMP_DIR/jni_vargs.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-em++  -O2 -fPIC -std=c++11 -Wno-error -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm.cpp" -o "$TMP_DIR/jvm.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+run_compile emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni.c"      -o "$TMP_DIR/jni.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+run_compile emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm_emscripten_dynlib.c"      -o "$TMP_DIR/jvm_emscripten_dynlib.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+run_compile emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni_vargs.c" -o "$TMP_DIR/jni_vargs.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
+run_compile em++  -O2 -fPIC -std=c++11 -Wno-error -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm.cpp" -o "$TMP_DIR/jvm.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
 create_archive "$OUT_DIR/native/${PREFIX}libjvm.a" "$TMP_DIR/jni.o" "$TMP_DIR/jni_vargs.o" "$TMP_DIR/jvm.o" "$TMP_DIR/jvm_emscripten_dynlib.o"
 
 # ── libikvm ───────────────────────────────────────────────────────────────────
 
 log "Building ${PREFIX}libikvm ..."
-emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c"  -o "$TMP_DIR/dl.o"
-emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o "$TMP_DIR/sig.o"
+run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c"  -o "$TMP_DIR/dl.o"
+run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o "$TMP_DIR/sig.o"
 create_archive "$OUT_DIR/native/${PREFIX}libikvm.a" "$TMP_DIR/dl.o" "$TMP_DIR/sig.o"
 
 # ── libiava ───────────────────────────────────────────────────────────────────
@@ -224,7 +265,7 @@ for dir in "${LIBIAVA_SRCDIRS[@]}"; do
             if [ "$dir" = "$FDLIBM_SRC_DIR" ] || [ "$fname" = "StrictMath.c" ]; then
                 EXTRA_DEFS=("${FDLIBM_PREFIX_DEFS[@]}")
             fi
-            emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+            run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
                 "${LIBIAVA_DEFS[@]}" "${LIBIAVA_INCLUDES[@]}" "${EXTRA_DEFS[@]}" \
                 -c "$src" -o "$obj"
             LIBIAVA_OBJS+=("$obj")
@@ -269,7 +310,7 @@ for src in "$JPEG_SRC"/*.c; do
     [ -f "$src" ] || continue
     fname="$(basename "$src")"
     obj="$TMP_DIR/libjpeg/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         -fwasm-exceptions \
         "${OPENJDK_LIB_DEFS[@]}" \
         -I"$JPEG_SRC" \
@@ -287,7 +328,7 @@ log "Building ${PREFIX}libsunec ..."
 LIBSUNEC_OBJS=()
 
 # ECC_JNI.cpp (C++11)
-em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
     "${OPENJDK_LIB_DEFS[@]}" \
     -DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B \
     -I"$SUNEC_SRC/impl" \
@@ -300,7 +341,7 @@ for src in "$SUNEC_SRC/impl"/*.c; do
     [ -f "$src" ] || continue
     fname="$(basename "$src")"
     obj="$TMP_DIR/libsunec/impl/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${OPENJDK_LIB_DEFS[@]}" \
         -DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B \
         -I"$SUNEC_SRC/impl" \
@@ -310,7 +351,7 @@ for src in "$SUNEC_SRC/impl"/*.c; do
 done
 
 # Local jni_onload.c (C99)
-emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     "${OPENJDK_LIB_DEFS[@]}" "${OPENJDK_LIB_INCLUDES[@]}" \
     -c "$IKVM_SRC/src/libsunec/jni_onload.c" -o "$TMP_DIR/libsunec/jni_onload.o"
 LIBSUNEC_OBJS+=("$TMP_DIR/libsunec/jni_onload.o")
@@ -330,7 +371,7 @@ for src in "$PACK_SRC"/*.cpp; do
     fname="$(basename "$src")"
     [[ "$fname" == "main.cpp" || "$fname" == "jni.cpp" ]] && continue
     obj="$TMP_DIR/libunpack/pack/${fname%.cpp}.o"
-    em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+    run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
         "${OPENJDK_LIB_DEFS[@]}" \
         -DNO_ZLIB -DUNPACK_JNI -DFULL \
         -I"$PACK_SRC" \
@@ -340,7 +381,7 @@ for src in "$PACK_SRC"/*.cpp; do
 done
 
 # Local jni.cpp (C++11, replaces upstream jni.cpp)
-em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
     "${OPENJDK_LIB_DEFS[@]}" \
     -DNO_ZLIB -DUNPACK_JNI -DFULL \
     -I"$PACK_SRC" \
@@ -349,7 +390,7 @@ em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
 LIBUNPACK_OBJS+=("$TMP_DIR/libunpack/jni.o")
 
 # Local jni_onload.c (C99)
-emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     "${OPENJDK_LIB_DEFS[@]}" "${OPENJDK_LIB_INCLUDES[@]}" \
     -c "$IKVM_SRC/src/libunpack/jni_onload.c" -o "$TMP_DIR/libunpack/jni_onload.o"
 LIBUNPACK_OBJS+=("$TMP_DIR/libunpack/jni_onload.o")
@@ -369,7 +410,7 @@ for src in "$ZIP_SRC"/*.c; do
     fname="$(basename "$src")"
     [ "$fname" = "ZipFile.c" ] && continue
     obj="$TMP_DIR/libzip/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${OPENJDK_LIB_DEFS[@]}" \
         -DUSE_MMAP \
         -I"$ZIP_SRC" \
@@ -386,7 +427,7 @@ for src in "$ZIP_SRC/zlib"/*.c; do
     [ -f "$src" ] || continue
     fname="$(basename "$src")"
     obj="$TMP_DIR/libzip/zlib/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${OPENJDK_LIB_DEFS[@]}" \
         -I"$ZIP_SRC/zlib" \
         "${OPENJDK_LIB_INCLUDES[@]}" \
@@ -420,7 +461,7 @@ for src in "$LIBMGMT_SRC"/*.c; do
     [ -f "$src" ] || continue
     fname="$(basename "$src")"
     obj="$TMP_DIR/libmanagement/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBMGMT_OBJS+=("$obj")
@@ -434,7 +475,7 @@ for src in \
     [ -f "$src" ] || continue
     fname="$(basename "$src")"
     obj="$TMP_DIR/libmanagement/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBMGMT_OBJS+=("$obj")
@@ -442,7 +483,7 @@ done
 
 # Emscripten does not provide sysinfo(); supply a local stub used by
 # OperatingSystemImpl.c.
-emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
     -c "$SCRIPT_DIR/emscripten-stubs/sysinfo_stub.c" -o "$TMP_DIR/libmanagement/sysinfo_stub.o"
 LIBMGMT_OBJS+=("$TMP_DIR/libmanagement/sysinfo_stub.o")
@@ -502,7 +543,7 @@ for dir in "${NIO_DIRS[@]}"; do
         obj="$TMP_DIR/libnio/${fname%.c}.o"
         # Guard against duplicate object names (first match wins)
         if [[ ! " ${LIBNIO_OBJS[*]} " =~ " $obj " ]]; then
-            emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+            run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
                 "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
                 -c "$src" -o "$obj"
             LIBNIO_OBJS+=("$obj")
@@ -511,7 +552,7 @@ for dir in "${NIO_DIRS[@]}"; do
 done
 
 # Local jni_onload.c
-emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
     -c "$LIBNIO_SRC/jni_onload.c" -o "$TMP_DIR/libnio/jni_onload.o"
 LIBNIO_OBJS+=("$TMP_DIR/libnio/jni_onload.o")
@@ -520,7 +561,7 @@ LIBNIO_OBJS+=("$TMP_DIR/libnio/jni_onload.o")
 # ST build there is no pthread runtime, so provide a stub that satisfies
 # the linker.
 if [ "$VARIANT" = "st" ]; then
-    emcc -O2 -fPIC -Wno-error -std=c99 \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 \
         "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
         -c "$SCRIPT_DIR/st-stubs/pthread_stubs.c" -o "$TMP_DIR/libnio/pthread_stubs.o"
     LIBNIO_OBJS+=("$TMP_DIR/libnio/pthread_stubs.o")
@@ -555,7 +596,7 @@ for fname in net_util.c InetAddress.c Inet4Address.c Inet6Address.c DatagramPack
     src="$NET_SHARE_SRC/$fname"
     [ -f "$src" ] || continue
     obj="$TMP_DIR/libnet/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBNET_OBJS+=("$obj")
@@ -568,7 +609,7 @@ for fname in net_util_md.c Inet4AddressImpl.c Inet6AddressImpl.c InetAddressImpl
     src="$NET_SOL_SRC/$fname"
     [ -f "$src" ] || continue
     obj="$TMP_DIR/libnet/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBNET_OBJS+=("$obj")
@@ -581,14 +622,14 @@ if [ "$VARIANT" = "mt" ]; then
     src="$NET_SOL_SRC/linux_close.c"
     if [ -f "$src" ]; then
         obj="$TMP_DIR/libnet/linux_close.o"
-        emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+        run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
             "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
             -c "$src" -o "$obj"
         LIBNET_OBJS+=("$obj")
     fi
 else
     obj="$TMP_DIR/libnet/linux_close_st.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 \
         "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
         -c "$SCRIPT_DIR/st-stubs/linux_close_st.c" -o "$obj"
     LIBNET_OBJS+=("$obj")
@@ -675,7 +716,7 @@ for relsrc in "${LIBFT_SRCS[@]}"; do
     [ -f "$src" ] || { log "WARN: missing freetype source $relsrc"; continue; }
     bname="$(basename "$src")"
     obj="$TMP_DIR/libfreetype/${bname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${LIBFT_EH_FLAGS[@]}" \
         "${LIBFT_DEFS[@]}" "${LIBFT_INCLUDES[@]}" \
         -c "$src" -o "$obj"
@@ -719,7 +760,7 @@ for src in "$MLIB_SRC"/*.c; do
         continue
     fi
     obj="$TMP_DIR/libmlib_image/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c89 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c89 "${PTHREAD_FLAGS[@]}" \
         "${LIBMLIB_DEFS[@]}" "${LIBMLIB_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBMLIB_OBJS+=("$obj")
@@ -749,7 +790,7 @@ for src in "$LCMS_SRC"/*.c; do
     [ -f "$src" ] || continue
     fname="$(basename "$src")"
     obj="$TMP_DIR/liblcms/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${OPENJDK_LIB_DEFS[@]}" "${LIBLCMS_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBLCMS_OBJS+=("$obj")
@@ -817,7 +858,7 @@ compile_awt() {
             return
         fi
     done
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${LIBAWT_DEFS[@]}" "${LIBAWT_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBAWT_OBJS+=("$obj")
@@ -880,7 +921,7 @@ compile_awt "$AWT_SOLARIS_AWT/initIDs.c"
 compile_awt "$OPENJDK_DIR/jdk/src/share/native/sun/font/AccelGlyphCache.c"
 
 # Custom JNI_OnLoad (replaces solaris/native/sun/awt/awt_LoadLibrary.c).
-emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
     "${LIBAWT_DEFS[@]}" "${LIBAWT_INCLUDES[@]}" \
     -c "$SCRIPT_DIR/emscripten-stubs/awt_LoadLibrary_wasm.c" \
     -o "$TMP_DIR/libawt/awt_LoadLibrary_wasm.o"
@@ -934,7 +975,7 @@ while IFS= read -r src; do
         continue
     fi
     obj="$TMP_DIR/libfontmanager/${fname%.c}.o"
-    emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
+    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
         "${LIBFM_DEFS[@]}" "${LIBFM_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBFM_OBJS+=("$obj")
@@ -947,7 +988,7 @@ while IFS= read -r src; do
         continue
     fi
     obj="$TMP_DIR/libfontmanager/${fname%.cpp}.o"
-    em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
+    run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
         "${LIBFM_DEFS[@]}" "${LIBFM_INCLUDES[@]}" \
         -c "$src" -o "$obj"
     LIBFM_OBJS+=("$obj")

@@ -355,6 +355,10 @@ RUNTIME_BUILD_PROPS=(
     "/p:EnabledImageBinRuntimes=$ENABLED_IMAGE_BIN_RUNTIMES"
     "/p:EnabledToolRuntimes=$ENABLED_TOOL_RUNTIMES"
     "/p:RuntimeIdentifier=$BUILD_RUNTIME"
+    # dist-jre builds the whole managed stack once per JRE-image TFM. Only the
+    # net8.0 image is consumed below, so skip the net6.0 image to avoid a full
+    # duplicate compile of IKVM.Runtime/Java/CoreLib (roughly halves managed time).
+    "/p:BuildNet6JreImages=false"
 )
 
 if [ -n "$CLANG_COMPAT_FLAGS" ]; then
@@ -450,6 +454,19 @@ else
     fi
 
     mkdir -p "$WORKSPACE/out/native"
+
+    # Compile parallelism for the native builds. In the "both" case two variant
+    # builds run concurrently, so split the cores between them to avoid 2x
+    # oversubscription; a single variant gets all cores. An explicit NATIVE_JOBS
+    # in the environment overrides the per-variant value.
+    _ncpu="$(nproc 2>/dev/null || echo 4)"
+    if [ "$NATIVE_VARIANT" = "both" ]; then
+        NATIVE_JOBS="${NATIVE_JOBS:-$(( (_ncpu + 1) / 2 ))}"
+    else
+        NATIVE_JOBS="${NATIVE_JOBS:-$_ncpu}"
+    fi
+    export NATIVE_JOBS
+    log "Native compile parallelism: $NATIVE_JOBS job(s) per variant ($_ncpu CPUs detected)"
 
     case "$NATIVE_VARIANT" in
         mt)

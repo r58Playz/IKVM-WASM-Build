@@ -74,6 +74,32 @@ index d496fd386..658f672b7 100644
  
      }
  
+diff --git a/src/IKVM.Image.JDK/IKVM.Image.JDK.runtime.targets b/src/IKVM.Image.JDK/IKVM.Image.JDK.runtime.targets
+index 8a3aeb881..d6e47f53c 100644
+--- a/src/IKVM.Image.JDK/IKVM.Image.JDK.runtime.targets
++++ b/src/IKVM.Image.JDK/IKVM.Image.JDK.runtime.targets
+@@ -50,7 +50,7 @@
+             <PublishItemGroup>PublishIkvmImageBinItem</PublishItemGroup>
+             <PublishItemMetadata>TargetFramework=net472;RuntimeIdentifier=$(ImageRuntimeIdentifier)</PublishItemMetadata>
+         </PublishProjectReference>
+-        <PublishProjectReference Include="@(BinProject)" Condition="$(SupportedImageTargetFrameworks.Contains(';net6.0;'))">
++        <PublishProjectReference Include="@(BinProject)" Condition="$(SupportedImageTargetFrameworks.Contains(';net6.0;')) And '$(BuildNet6JreImages)' != 'false'">
+             <SetTargetFramework>TargetFramework=net6.0</SetTargetFramework>
+             <SetRuntimeIdentifier>RuntimeIdentifier=$(ImageRuntimeIdentifier)</SetRuntimeIdentifier>
+             <PublishItemGroup>PublishIkvmImageBinItem</PublishItemGroup>
+diff --git a/src/IKVM.Image.JRE/IKVM.Image.JRE.runtime.targets b/src/IKVM.Image.JRE/IKVM.Image.JRE.runtime.targets
+index 3e1d0a457..39edb7d59 100644
+--- a/src/IKVM.Image.JRE/IKVM.Image.JRE.runtime.targets
++++ b/src/IKVM.Image.JRE/IKVM.Image.JRE.runtime.targets
+@@ -41,7 +41,7 @@
+             <PublishItemGroup>PublishIkvmImageBinItem</PublishItemGroup>
+             <PublishItemMetadata>TargetFramework=net472;RuntimeIdentifier=$(ImageRuntimeIdentifier)</PublishItemMetadata>
+         </PublishProjectReference>
+-        <PublishProjectReference Include="@(BinProject)" Condition="$(SupportedImageTargetFrameworks.Contains(';net6.0;'))">
++        <PublishProjectReference Include="@(BinProject)" Condition="$(SupportedImageTargetFrameworks.Contains(';net6.0;')) And '$(BuildNet6JreImages)' != 'false'">
+             <SetTargetFramework>TargetFramework=net6.0</SetTargetFramework>
+             <SetRuntimeIdentifier>RuntimeIdentifier=$(ImageRuntimeIdentifier)</SetRuntimeIdentifier>
+             <PublishItemGroup>PublishIkvmImageBinItem</PublishItemGroup>
 diff --git a/src/IKVM.Image/ikvm/any/bin/ikvm.properties b/src/IKVM.Image/ikvm/any/bin/ikvm.properties
 deleted file mode 100644
 index 8473a67ad..000000000
@@ -6401,6 +6427,39 @@ index 3f4f09d05..36f315ea1 100644
          }
  
          internal struct JarEnumerator
+diff --git a/src/dist-jre/dist-jre.csproj b/src/dist-jre/dist-jre.csproj
+index e39f7f31d..5801ecc73 100644
+--- a/src/dist-jre/dist-jre.csproj
++++ b/src/dist-jre/dist-jre.csproj
+@@ -10,17 +10,17 @@
+         <ImageTarget Include="net472|win-x64" TargetFramework="net472" RuntimeIdentifier="win-x64" Condition="$(_EnabledImageRuntimes.Contains(';win-x64;'))" />
+         <ImageTarget Include="net472|win-x86" TargetFramework="net472" RuntimeIdentifier="win-x86" Condition="$(_EnabledImageRuntimes.Contains(';win-x86;'))" />
+         <ImageTarget Include="net472|win-arm64" TargetFramework="net472" RuntimeIdentifier="win-arm64" Condition="$(_EnabledImageRuntimes.Contains(';win-arm64;'))" />
+-        <ImageTarget Include="net6.0|win-x64" TargetFramework="net6.0" RuntimeIdentifier="win-x64" Condition="$(_EnabledImageRuntimes.Contains(';win-x64;'))" />
+-        <ImageTarget Include="net6.0|win-x86" TargetFramework="net6.0" RuntimeIdentifier="win-x86" Condition="$(_EnabledImageRuntimes.Contains(';win-x86;'))" />
+-        <ImageTarget Include="net6.0|win-arm64" TargetFramework="net6.0" RuntimeIdentifier="win-arm64" Condition="$(_EnabledImageRuntimes.Contains(';win-arm64;'))" />
+-        <ImageTarget Include="net6.0|linux-x64" TargetFramework="net6.0" RuntimeIdentifier="linux-x64" Condition="$(_EnabledImageRuntimes.Contains(';linux-x64;'))" />
+-        <ImageTarget Include="net6.0|linux-arm" TargetFramework="net6.0" RuntimeIdentifier="linux-arm" Condition="$(_EnabledImageRuntimes.Contains(';linux-arm;'))" />
+-        <ImageTarget Include="net6.0|linux-arm64" TargetFramework="net6.0" RuntimeIdentifier="linux-arm64" Condition="$(_EnabledImageRuntimes.Contains(';linux-arm64;'))" />
+-        <ImageTarget Include="net6.0|linux-musl-x64" TargetFramework="net6.0" RuntimeIdentifier="linux-musl-x64" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-x64;'))" />
+-        <ImageTarget Include="net6.0|linux-musl-arm" TargetFramework="net6.0" RuntimeIdentifier="linux-musl-arm" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-arm;'))" />
+-        <ImageTarget Include="net6.0|linux-musl-arm64" TargetFramework="net6.0" RuntimeIdentifier="linux-musl-arm64" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-arm64;'))" />
+-        <ImageTarget Include="net6.0|osx-x64" TargetFramework="net6.0" RuntimeIdentifier="osx-x64" Condition="$(_EnabledImageRuntimes.Contains(';osx-x64;'))" />
+-        <ImageTarget Include="net6.0|osx-arm64" TargetFramework="net6.0" RuntimeIdentifier="osx-arm64" Condition="$(_EnabledImageRuntimes.Contains(';osx-arm64;'))" />
++        <ImageTarget Include="net6.0|win-x64" TargetFramework="net6.0" RuntimeIdentifier="win-x64" Condition="$(_EnabledImageRuntimes.Contains(';win-x64;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|win-x86" TargetFramework="net6.0" RuntimeIdentifier="win-x86" Condition="$(_EnabledImageRuntimes.Contains(';win-x86;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|win-arm64" TargetFramework="net6.0" RuntimeIdentifier="win-arm64" Condition="$(_EnabledImageRuntimes.Contains(';win-arm64;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|linux-x64" TargetFramework="net6.0" RuntimeIdentifier="linux-x64" Condition="$(_EnabledImageRuntimes.Contains(';linux-x64;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|linux-arm" TargetFramework="net6.0" RuntimeIdentifier="linux-arm" Condition="$(_EnabledImageRuntimes.Contains(';linux-arm;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|linux-arm64" TargetFramework="net6.0" RuntimeIdentifier="linux-arm64" Condition="$(_EnabledImageRuntimes.Contains(';linux-arm64;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|linux-musl-x64" TargetFramework="net6.0" RuntimeIdentifier="linux-musl-x64" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-x64;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|linux-musl-arm" TargetFramework="net6.0" RuntimeIdentifier="linux-musl-arm" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-arm;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|linux-musl-arm64" TargetFramework="net6.0" RuntimeIdentifier="linux-musl-arm64" Condition="$(_EnabledImageRuntimes.Contains(';linux-musl-arm64;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|osx-x64" TargetFramework="net6.0" RuntimeIdentifier="osx-x64" Condition="$(_EnabledImageRuntimes.Contains(';osx-x64;')) And '$(BuildNet6JreImages)' != 'false'" />
++        <ImageTarget Include="net6.0|osx-arm64" TargetFramework="net6.0" RuntimeIdentifier="osx-arm64" Condition="$(_EnabledImageRuntimes.Contains(';osx-arm64;')) And '$(BuildNet6JreImages)' != 'false'" />
+         <ImageTarget Include="net8.0|win-x64" TargetFramework="net8.0" RuntimeIdentifier="win-x64" Condition="$(_EnabledImageRuntimes.Contains(';win-x64;'))" />
+         <ImageTarget Include="net8.0|win-x86" TargetFramework="net8.0" RuntimeIdentifier="win-x86" Condition="$(_EnabledImageRuntimes.Contains(';win-x86;'))" />
+         <ImageTarget Include="net8.0|win-arm64" TargetFramework="net8.0" RuntimeIdentifier="win-arm64" Condition="$(_EnabledImageRuntimes.Contains(';win-arm64;'))" />
 diff --git a/src/libjsound/jni_onload.c b/src/libjsound/jni_onload.c
 index a66940e94..67ef4c4b9 100644
 --- a/src/libjsound/jni_onload.c
