@@ -136,19 +136,30 @@ setup_ant() {
 build_binding_args() {
     local enabled_csv="$1"
     local -n out_args="$2"
-    local enabled=",$enabled_csv,"
     local binding
 
     # 3.4.2 binding module set. Unlisted modules default to enabled in
     # config/build-bindings.xml, so every module must appear here to be
     # explicitly toggled. (core11/core25/core27 are multi-release overlays,
-    # not bindings, and are intentionally absent.)
+    # not bindings, and are intentionally absent.) Every entry must be a real
+    # module under modules/lwjgl/: with "all" each becomes -Dbinding.X=true,
+    # which BindingConfig turns into a modules/lwjgl/X/src/templates/kotlin path
+    # that kotlinc requires to exist (there is no "sse" module, so it is absent).
     local all_bindings=(
         assimp bgfx egl fmod freetype glfw harfbuzz hwloc jawt jemalloc ktx llvm lmdb
         lz4 meshoptimizer mimalloc msdfgen nanovg nfd nuklear odbc openal opencl opengl
-        opengles openxr opus par remotery renderdoc rpmalloc sdl shaderc spng spvc sse
+        opengles openxr opus par remotery renderdoc rpmalloc sdl shaderc spng spvc
         stb tinyexr tinyfd vma vulkan xxhash yoga zstd
     )
+
+    local enabled
+    if [ "$enabled_csv" = "all" ]; then
+        # Turn on every binding so the whole Java surface is generated/compiled.
+        local IFS=,
+        enabled=",${all_bindings[*]},"
+    else
+        enabled=",$enabled_csv,"
+    fi
 
     out_args=()
     for binding in "${all_bindings[@]}"; do
@@ -363,41 +374,71 @@ log "Restoring lwjgl3 generated/ trees from git"
 rm -f "$LWJGL_SRC_DIR/bin/classes/generator/generated-touch.txt"
 find "$LWJGL_SRC_DIR"/modules/lwjgl/*/src/generated -type f -exec touch -t 200001010000 {} + 2>/dev/null || true
 
+# Force a full javac recompile. The backdating above sets every generated .java
+# to the year 2000 to drive the generator's regeneration check, but that same
+# ancient mtime defeats javac's up-to-date check: if a prior build left stale
+# .class files (e.g. a narrower JNI.class from a smaller binding set), ant's
+# <javac> sees the "older" source and skips recompiling it, so the new bindings
+# would compile against the stale core. Deleting the compile output guarantees
+# every module is rebuilt from the current generated sources.
+rm -rf "$LWJGL_SRC_DIR/bin/classes/lwjgl"
+
+# Force compile-templates to recompile the Kotlin templates for the full binding
+# set. `module.templatepath` (BindingConfig.java) lists only the *enabled*
+# bindings' template dirs, but compile-templates caches on bin/classes/templates/
+# touch.txt vs. the .kt mtimes -- it never invalidates when the enabled binding
+# set changes. A prior narrower build therefore leaves bin/classes/templates
+# holding only that subset; the Generator then logs "No templates found in
+# <binding>.templates package" for the rest and emits a NARROWED core JNI.java
+# (missing invoke*/call* overloads), which makes every unbuilt binding's javac
+# fail. Wipe the compiled templates so kotlinc re-emits all of them this run.
+rm -rf "$LWJGL_SRC_DIR/bin/classes/templates"
+
 ANT_CMD="$(setup_ant)"
 
-declare -a TEMPLATE_BINDING_ARGS
-declare -a COMPILE_BINDING_ARGS
-build_binding_args "glfw,egl,opengl,opengles,opencl,openal,stb,tinyfd,vulkan" TEMPLATE_BINDING_ARGS
-# opengl ARBCLEvent and glfw GLFWVulkan are generated unconditionally and require opencl/vulkan
-# classes to be on the classpath. We compile those modules' Java but do not ship their classes.
-build_binding_args "glfw,egl,opengl,opencl,openal,stb,tinyfd,vulkan" COMPILE_BINDING_ARGS
+# Enable every LWJGL 3.4.2 binding on the Java side. The native archives built
+# further down only cover the handful of modules we ship native code for
+# (core/opengl/stb/tinyfd + friends), but the jar carries the *full* Java binding
+# surface so IKVM/Minecraft never fails to load a class just because a native
+# binding hasn't been wired up yet. A binding whose natives are absent only
+# breaks if one of its native methods is actually invoked at runtime.
+declare -a ALL_BINDING_ARGS
+build_binding_args "all" ALL_BINDING_ARGS
 
 log "Compiling lwjgl3 Java classes with Ant"
-(cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${TEMPLATE_BINDING_ARGS[@]}" compile-templates)
-(cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${COMPILE_BINDING_ARGS[@]}" compile)
+(cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${ALL_BINDING_ARGS[@]}" compile-templates)
+(cd "$LWJGL_SRC_DIR" && env JAVA8_HOME="$JAVA8_HOME_DETECTED" "$ANT_CMD" "${ALL_BINDING_ARGS[@]}" compile)
 
-CORE_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/core"
-GLFW_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/glfw"
-EGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/egl"
-OPENGL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/opengl"
-OPENAL_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/openal"
-STB_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/stb"
-TINYFD_CLASSES_DIR="$LWJGL_SRC_DIR/bin/classes/lwjgl/tinyfd"
-if [ ! -d "$CORE_CLASSES_DIR" ] || [ ! -d "$GLFW_CLASSES_DIR" ] || [ ! -d "$EGL_CLASSES_DIR" ] || [ ! -d "$OPENGL_CLASSES_DIR" ] || [ ! -d "$OPENAL_CLASSES_DIR" ] || [ ! -d "$STB_CLASSES_DIR" ] || [ ! -d "$TINYFD_CLASSES_DIR" ]; then
-    echo "ERROR: expected Ant compile outputs not found under $LWJGL_SRC_DIR/bin/classes/lwjgl" >&2
+LWJGL_CLASSES_ROOT="$LWJGL_SRC_DIR/bin/classes/lwjgl"
+CORE_CLASSES_DIR="$LWJGL_CLASSES_ROOT/core"
+# core must always be present and populated; without it nothing else links. The
+# per-binding dirs are validated implicitly: compileBinding fails the whole Ant
+# run (failonerror) if any enabled module does not compile, so a successful
+# compile above means every binding produced classes.
+if [ ! -d "$CORE_CLASSES_DIR" ] || [ -z "$(find "$CORE_CLASSES_DIR" -name '*.class' -print -quit)" ]; then
+    echo "ERROR: expected Ant compile output (core classes) not found under $LWJGL_CLASSES_ROOT" >&2
     exit 1
 fi
 
 JAR_STAGING_DIR="$TMP_DIR/jar-staging"
 rm -rf "$JAR_STAGING_DIR"
 mkdir -p "$JAR_STAGING_DIR"
-cp -a "$CORE_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
-cp -a "$GLFW_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
-cp -a "$EGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
-cp -a "$OPENGL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
-cp -a "$OPENAL_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
-cp -a "$STB_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
-cp -a "$TINYFD_CLASSES_DIR"/. "$JAR_STAGING_DIR"/
+
+# Fold every compiled binding module into the jar. compileBinding creates an
+# output dir for every module regardless of whether it was enabled, so only
+# copy dirs that actually contain classes (skips the empty placeholders and any
+# module that legitimately emitted nothing).
+SHIPPED_MODULES=()
+for module_dir in "$LWJGL_CLASSES_ROOT"/*/; do
+    [ -d "$module_dir" ] || continue
+    if [ -z "$(find "$module_dir" -name '*.class' -print -quit)" ]; then
+        continue
+    fi
+    cp -a "$module_dir". "$JAR_STAGING_DIR"/
+    SHIPPED_MODULES+=("$(basename "$module_dir")")
+done
+
+log "Shipping ${#SHIPPED_MODULES[@]} Java binding modules: ${SHIPPED_MODULES[*]}"
 jar cf "$OUTPUT_DIR/lwjgl3.jar" -C "$JAR_STAGING_DIR" .
 
 log "Compiling lwjgl3 native sources"

@@ -1,0 +1,23 @@
+diff --git a/java-api/src/java25/java/xyz/wagyourtail/jvmdg/j25/stub/java_base/J_L_ScopedValue.java b/java-api/src/java25/java/xyz/wagyourtail/jvmdg/j25/stub/java_base/J_L_ScopedValue.java
+index fdc37ab..2a369b1 100644
+--- a/java-api/src/java25/java/xyz/wagyourtail/jvmdg/j25/stub/java_base/J_L_ScopedValue.java
++++ b/java-api/src/java25/java/xyz/wagyourtail/jvmdg/j25/stub/java_base/J_L_ScopedValue.java
+@@ -5,13 +5,16 @@ import xyz.wagyourtail.jvmdg.version.JEP;
+ 
+ import java.util.*;
+ import java.util.function.Supplier;
+-import java.util.random.RandomGenerator;
+ 
+ @JEP(506)
+ @Adapter("java/lang/ScopedValue")
+ public class J_L_ScopedValue<T> {
+     // TODO: make this better
+-    private static final RandomGenerator KEY_GENERATOR = new Random();
++    // NOTE: typed as java.util.Random (not RandomGenerator): on a Java 8 runtime (e.g. IKVM)
++    // java.util.Random does NOT implement the downgraded RandomGenerator interface, so storing
++    // `new Random()` into a RandomGenerator-typed field throws IncompatibleClassChangeError.
++    // Random.nextInt() (all we use) exists since 1.0, so Random is sufficient and 8-safe.
++    private static final Random KEY_GENERATOR = new Random();
+     private final int hash = generateHash();
+ 
+     private static synchronized int generateHash() {

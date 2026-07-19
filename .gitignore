@@ -7,6 +7,7 @@
 /tools/native-deps/MobileGL
 /tools/native-deps/NG-GL4ES
 /tools/native-deps/jemalloc
+/tools/native-deps/jvmdowngrader
 /tools/native-deps/libffi
 /tools/native-deps/lwjgl3
 /tools/native-deps/out

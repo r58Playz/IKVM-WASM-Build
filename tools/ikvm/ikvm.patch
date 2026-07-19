@@ -147,6 +147,21 @@ index 8cfa61fe6..0bd71d2cf 100644
  
  
  
+diff --git a/src/IKVM.Java/IKVM.Java.runtime.jdk.props b/src/IKVM.Java/IKVM.Java.runtime.jdk.props
+index 12c3cfae4..3ef6e286f 100644
+--- a/src/IKVM.Java/IKVM.Java.runtime.jdk.props
++++ b/src/IKVM.Java/IKVM.Java.runtime.jdk.props
+@@ -36,6 +36,10 @@
+         <OpenJdkSource Remove="$(OpenJdkDir)jdk\src\share\classes\java\lang\System.java" />
+         <OpenJdkSource Remove="$(OpenJdkDir)jdk\src\share\classes\java\lang\Thread.java" />
+         <OpenJdkSource Include="$(OpenJdkDir)jdk\src\share\classes\java\lang\annotation\**\*.java" PackagePath="java\lang\annotation" />
++        <!-- java.lang.instrument API classes (IllegalClassFormatException, ClassFileTransformer, ...).
++             Pure-Java, self-contained; the native agent impl (sun.instrument.*) is intentionally left out.
++             JVMDowngrader's j15 MethodHandles.Lookup stub references IllegalClassFormatException. -->
++        <OpenJdkSource Include="$(OpenJdkDir)jdk\src\share\classes\java\lang\instrument\**\*.java" PackagePath="java\lang\instrument" />
+         <OpenJdkSource Include="$(OpenJdkDir)jdk\src\share\classes\java\lang\invoke\**\*.java" PackagePath="java\lang\invoke" />
+         <OpenJdkSource Remove="$(OpenJdkDir)jdk\src\share\classes\java\lang\invoke\DirectMethodHandle.java" />
+         <OpenJdkSource Include="$(OpenJdkDir)jdk\src\share\classes\java\lang\management\**\*.java" PackagePath="java\lang\management" />
 diff --git a/src/IKVM.Java/IKVM.Java.runtime.targets b/src/IKVM.Java/IKVM.Java.runtime.targets
 index bfef3bb82..21221ff72 100644
 --- a/src/IKVM.Java/IKVM.Java.runtime.targets
@@ -169,6 +184,20 @@ index bfef3bb82..21221ff72 100644
      </Target>
  
      <Target Name="ResolveJava" DependsOnTargets="FindJdk" Condition=" '$(JavaPath)' == '' ">
+diff --git a/src/IKVM.Java/local/ikvm/internal/AnnotationAttributeBase.java b/src/IKVM.Java/local/ikvm/internal/AnnotationAttributeBase.java
+index b13beac47..521baa20c 100644
+--- a/src/IKVM.Java/local/ikvm/internal/AnnotationAttributeBase.java
++++ b/src/IKVM.Java/local/ikvm/internal/AnnotationAttributeBase.java
+@@ -257,7 +257,8 @@ public abstract class AnnotationAttributeBase
+             catch (IllegalAccessException x)
+             {
+                 // TODO this probably isn't the right exception
+-                throw new IncompatibleClassChangeError();
++                throw new IncompatibleClassChangeError("[ikvm-diag] AnnotationAttributeBase.decodeValues: annotation "
++                    + (annotationClass == null ? "?" : annotationClass.getName()) + " element '" + name + "': " + x);
+             }
+             catch (NoSuchMethodException x)
+             {
 diff --git a/src/IKVM.Java/local/java/util/zip/ZipFile.java b/src/IKVM.Java/local/java/util/zip/ZipFile.java
 index 163ad9935..daa49808f 100644
 --- a/src/IKVM.Java/local/java/util/zip/ZipFile.java
@@ -544,6 +573,38 @@ index 463e8da14..ffd7b69f2 100644
  
      }
  
+diff --git a/src/IKVM.Runtime/CodeEmitter.cs b/src/IKVM.Runtime/CodeEmitter.cs
+index 76b153ac9..b99ca85af 100644
+--- a/src/IKVM.Runtime/CodeEmitter.cs
++++ b/src/IKVM.Runtime/CodeEmitter.cs
+@@ -2489,6 +2489,15 @@ internal void EmitCastclass(Type type)
+         // This is basically the same as Castclass, except that it
+         // throws an IncompatibleClassChangeError on failure.
+         internal void EmitAssertType(Type type)
++        {
++            EmitAssertType(type, null);
++        }
++
++        // As above, but attaches a diagnostic message to the thrown
++        // IncompatibleClassChangeError. The default (message-less) throw is
++        // useless for locating a failing interface downcast, so callers on the
++        // interface-downcast paths pass context (compiling method + target type).
++        internal void EmitAssertType(Type type, string message)
+         {
+             var isnull = DefineLabel();
+             Emit(OpCodes.Dup);
+@@ -2497,7 +2506,10 @@ internal void EmitAssertType(Type type)
+             Emit(OpCodes.Dup);
+             var ok = DefineLabel();
+             EmitBrtrue(ok);
+-            EmitThrow("java.lang.IncompatibleClassChangeError");
++            if (message != null)
++                EmitThrow("java.lang.IncompatibleClassChangeError", message);
++            else
++                EmitThrow("java.lang.IncompatibleClassChangeError");
+             MarkLabel(isnull);
+             Emit(OpCodes.Pop);
+             Emit(OpCodes.Ldnull);
 diff --git a/src/IKVM.Runtime/ExceptionHelper.cs b/src/IKVM.Runtime/ExceptionHelper.cs
 index f54199cef..0f19f9b4c 100644
 --- a/src/IKVM.Runtime/ExceptionHelper.cs
@@ -4666,6 +4727,22 @@ index 2fa4d5bcd..db0a84758 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Runtime/MemberFlags.cs b/src/IKVM.Runtime/MemberFlags.cs
+index 78c395b3c..b250b5f0a 100644
+--- a/src/IKVM.Runtime/MemberFlags.cs
++++ b/src/IKVM.Runtime/MemberFlags.cs
+@@ -79,6 +79,11 @@ enum MemberFlags : short
+         /// </summary>
+         ModuleInitializer = 8192,
+ 
++        /// <summary>
++        /// Member has a Java Deprecated attribute.
++        /// </summary>
++        Deprecated = 16384,
++
+     }
+ 
+ }
 diff --git a/src/IKVM.Runtime/MonoPInvokeCallbackAttribute.cs b/src/IKVM.Runtime/MonoPInvokeCallbackAttribute.cs
 new file mode 100644
 index 000000000..bf21a7868
@@ -4732,7 +4809,7 @@ index 44ffeeaf4..0304b2dd6 100644
 \ No newline at end of file
 +}
 diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
-index 4c3c07e12..26889c7e1 100644
+index 4c3c07e12..144694761 100644
 --- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
 +++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
 @@ -62,7 +62,18 @@ private sealed partial class JavaTypeImpl : DynamicImpl
@@ -4755,7 +4832,27 @@ index 4c3c07e12..26889c7e1 100644
  #if IMPORTER
              RuntimeByteCodeJavaType enclosingClassWrapper;
              AnnotationBuilder annotationBuilder;
-@@ -1156,9 +1167,14 @@ internal override DynamicImpl Finish()
+@@ -149,6 +160,9 @@ internal void CreateStep1()
+ 
+                         methods[i] = new RuntimeTypicalJavaMethod(wrapper, m.Name, m.Signature, null, null, null, m.Modifiers, flags);
+                     }
++
++                    if (m.DeprecatedAttribute)
++                        methods[i].SetDeprecated();
+                 }
+ 
+                 if (hasclinit)
+@@ -188,6 +202,9 @@ internal void CreateStep1()
+                     {
+                         fields[i] = RuntimeJavaField.Create(wrapper, null, null, fld.Name, fld.Signature, new ExModifiers(fld.Modifiers, fld.IsInternal));
+                     }
++
++                    if (fld.DeprecatedAttribute)
++                        fields[i].SetDeprecated();
+                 }
+ #if IMPORTER
+                 wrapper.AddMapXmlFields(ref fields);
+@@ -1156,9 +1173,14 @@ internal override DynamicImpl Finish()
                  // are in the process of finishing, and this would be a problem.
                  // Prevent infinity recursion for broken class loaders by keeping a recursion count and falling
                  // back to late binding if we recurse more than twice.
@@ -4771,7 +4868,7 @@ index 4c3c07e12..26889c7e1 100644
                  try
                  {
                      classFile.Link(wrapper, mode);
-@@ -1171,7 +1187,11 @@ internal override DynamicImpl Finish()
+@@ -1171,7 +1193,11 @@ internal override DynamicImpl Finish()
                  }
                  finally
                  {
@@ -4784,7 +4881,7 @@ index 4c3c07e12..26889c7e1 100644
                  }
  
                  // this is the correct lock, FinishCore doesn't call any user code and mutates global state,
-@@ -1918,7 +1938,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -1918,7 +1944,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
                  var tw = wrapper.BaseTypeWrapper;
                  while (tw != null)
                  {
@@ -4793,7 +4890,7 @@ index 4c3c07e12..26889c7e1 100644
                      if (baseMethod == null)
                          break;
                      else if (baseMethod.IsAccessStub)
-@@ -1935,7 +1955,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -1935,7 +1961,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
  
                  while (tw != null)
                  {
@@ -4802,7 +4899,7 @@ index 4c3c07e12..26889c7e1 100644
                      if (baseMethod == null)
                      {
                          break;
-@@ -1977,7 +1997,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -1977,7 +2003,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
                              tw = wrapper.BaseTypeWrapper;
                              while (tw != null)
                              {
@@ -4811,7 +4908,7 @@ index 4c3c07e12..26889c7e1 100644
                                  if (baseMethod2 == null || baseMethod2 == baseMethod)
                                      break;
  
-@@ -2040,7 +2060,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -2040,7 +2066,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
                              tw = topPublicOrProtectedMethod.DeclaringType.BaseTypeWrapper;
                              while (tw != null)
                              {
@@ -4820,7 +4917,7 @@ index 4c3c07e12..26889c7e1 100644
                                  if (baseMethod2 == null)
                                      break;
  
-@@ -2101,11 +2121,11 @@ static bool TryGetClassFileVersion(RuntimeJavaType tw, ref int majorVersion)
+@@ -2101,11 +2127,11 @@ static bool TryGetClassFileVersion(RuntimeJavaType tw, ref int majorVersion)
                  return false;
              }
  
@@ -4834,7 +4931,7 @@ index 4c3c07e12..26889c7e1 100644
                      if (mw == null)
                          break;
  
-@@ -2124,7 +2144,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+@@ -2124,7 +2150,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
                  var tw = wrapper.BaseTypeWrapper;
                  while (tw != null)
                  {
@@ -4843,7 +4940,7 @@ index 4c3c07e12..26889c7e1 100644
                      if (baseMethod == null)
                      {
                          return null;
-@@ -2162,7 +2182,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+@@ -2162,7 +2188,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
                              tw = baseMethod.DeclaringType.BaseTypeWrapper;
                              while (tw != null)
                              {
@@ -4852,7 +4949,7 @@ index 4c3c07e12..26889c7e1 100644
                                  if (baseMethod2 == null)
                                  {
                                      break;
-@@ -2211,6 +2231,15 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+@@ -2211,6 +2237,15 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
                  return null;
              }
  
@@ -4868,7 +4965,7 @@ index 4c3c07e12..26889c7e1 100644
              static MethodInfo GetBaseFinalizeMethod(RuntimeJavaType wrapper)
              {
                  for (; ; )
-@@ -2452,6 +2481,12 @@ internal override MethodBase LinkMethod(RuntimeJavaMethod mw)
+@@ -2452,6 +2487,12 @@ internal override MethodBase LinkMethod(RuntimeJavaMethod mw)
  #if IMPORTER
                      wrapper.Context.AttributeHelper.SetThrowsAttribute(method, exceptions);
  
@@ -4881,7 +4978,7 @@ index 4c3c07e12..26889c7e1 100644
                      if (setModifiers || m.IsInternal || (m.Modifiers & (Modifiers.Synthetic | Modifiers.Bridge)) != 0)
                          wrapper.Context.AttributeHelper.SetModifiers(method, m.Modifiers, m.IsInternal);
  
-@@ -2713,6 +2748,7 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
+@@ -2713,6 +2754,7 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
                      bool newslot = baseMethods[index] != null
                          && (methods[index].IsExplicitOverride || baseMethods[index][0].RealName != name || CheckRequireOverrideStub(methods[index], baseMethods[index][0]))
                          && !needFinalize;
@@ -4889,7 +4986,7 @@ index 4c3c07e12..26889c7e1 100644
                      if (newslot)
                      {
                          attribs |= MethodAttributes.NewSlot;
-@@ -2752,7 +2788,14 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
+@@ -2752,7 +2794,14 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
                              }
                              else if (subsequent || methods[index].IsExplicitOverride || baseMethod.RealName != name)
                              {
@@ -4905,7 +5002,7 @@ index 4c3c07e12..26889c7e1 100644
                              }
  
                              // the non-primary base methods always need an explicit method override
-@@ -2867,6 +2910,34 @@ private static MethodAttributes GetMethodAccess(RuntimeJavaMethod mw)
+@@ -2867,6 +2916,34 @@ private static MethodAttributes GetMethodAccess(RuntimeJavaMethod mw)
                  }
              }
  
@@ -4940,15 +5037,100 @@ index 4c3c07e12..26889c7e1 100644
  #if IMPORTER
              // The classic example of an access bridge is StringBuilder.length(), the JDK 6 compiler
              // generates this to work around a reflection problem (which otherwise wouldn't surface the
-@@ -2998,4 +3069,4 @@ internal override RuntimeJavaType Host
+@@ -2998,4 +3075,4 @@ internal override RuntimeJavaType Host
  
      }
  
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.Metadata.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.Metadata.cs
+index 7a9f4745e..a73dd4223 100644
+--- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.Metadata.cs
++++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.Metadata.cs
+@@ -172,7 +172,7 @@ internal static string[] GetEnclosingMethod(Metadata m)
+ 
+             internal static string GetGenericMethodSignature(Metadata m, int index)
+             {
+-                if (m != null && m.genericMetaData != null && m.genericMetaData[0] != null)
++                if (m != null && m.genericMetaData != null && m.genericMetaData[0] != null && (uint)index < (uint)m.genericMetaData[0].Length)
+                     return m.genericMetaData[0][index];
+ 
+                 return null;
+@@ -180,7 +180,7 @@ internal static string GetGenericMethodSignature(Metadata m, int index)
+ 
+             internal static string GetGenericFieldSignature(Metadata m, int index)
+             {
+-                if (m != null && m.genericMetaData != null && m.genericMetaData[1] != null)
++                if (m != null && m.genericMetaData != null && m.genericMetaData[1] != null && (uint)index < (uint)m.genericMetaData[1].Length)
+                     return m.genericMetaData[1][index];
+ 
+                 return null;
+@@ -196,7 +196,7 @@ internal static object[] GetAnnotations(Metadata m)
+ 
+             internal static object[] GetMethodAnnotations(Metadata m, int index)
+             {
+-                if (m != null && m.annotations != null && m.annotations[1] != null)
++                if (m != null && m.annotations != null && m.annotations[1] != null && (uint)index < (uint)m.annotations[1].Length)
+                     return (object[])m.annotations[1][index];
+ 
+                 return null;
+@@ -204,7 +204,7 @@ internal static object[] GetMethodAnnotations(Metadata m, int index)
+ 
+             internal static object[][] GetMethodParameterAnnotations(Metadata m, int index)
+             {
+-                if (m != null && m.annotations != null && m.annotations[2] != null)
++                if (m != null && m.annotations != null && m.annotations[2] != null && (uint)index < (uint)m.annotations[2].Length)
+                     return (object[][])m.annotations[2][index];
+ 
+                 return null;
+@@ -212,7 +212,7 @@ internal static object[][] GetMethodParameterAnnotations(Metadata m, int index)
+ 
+             internal static MethodParametersEntry[] GetMethodParameters(Metadata m, int index)
+             {
+-                if (m != null && m.methodParameters != null)
++                if (m != null && m.methodParameters != null && (uint)index < (uint)m.methodParameters.Length)
+                     return m.methodParameters[index];
+ 
+                 return null;
+@@ -220,7 +220,7 @@ internal static MethodParametersEntry[] GetMethodParameters(Metadata m, int inde
+ 
+             internal static object GetMethodDefaultValue(Metadata m, int index)
+             {
+-                if (m != null && m.annotations != null && m.annotations[3] != null)
++                if (m != null && m.annotations != null && m.annotations[3] != null && (uint)index < (uint)m.annotations[3].Length)
+                     return m.annotations[3][index];
+ 
+                 return null;
+@@ -229,7 +229,7 @@ internal static object GetMethodDefaultValue(Metadata m, int index)
+             // note that unlike GetGenericFieldSignature, the index is simply the field index 
+             internal static object[] GetFieldAnnotations(Metadata m, int index)
+             {
+-                if (m != null && m.annotations != null && m.annotations[4] != null)
++                if (m != null && m.annotations != null && m.annotations[4] != null && (uint)index < (uint)m.annotations[4].Length)
+                     return (object[])m.annotations[4][index];
+ 
+                 return null;
+@@ -250,7 +250,7 @@ internal static byte[] GetRawTypeAnnotations(Metadata m)
+ 
+             internal static byte[] GetMethodRawTypeAnnotations(Metadata m, int index)
+             {
+-                if (m != null && m.methodRuntimeVisibleTypeAnnotations != null)
++                if (m != null && m.methodRuntimeVisibleTypeAnnotations != null && (uint)index < (uint)m.methodRuntimeVisibleTypeAnnotations.Length)
+                     return SerializeTypeAnnotations(in m.methodRuntimeVisibleTypeAnnotations[index]);
+ 
+                 return null;
+@@ -258,7 +258,7 @@ internal static byte[] GetMethodRawTypeAnnotations(Metadata m, int index)
+ 
+             internal static byte[] GetFieldRawTypeAnnotations(Metadata m, int index)
+             {
+-                if (m != null && m.fieldRuntimeVisibleTypeAnnotations != null)
++                if (m != null && m.fieldRuntimeVisibleTypeAnnotations != null && (uint)index < (uint)m.fieldRuntimeVisibleTypeAnnotations.Length)
+                     return SerializeTypeAnnotations(in m.fieldRuntimeVisibleTypeAnnotations[index]);
+ 
+                 return null;
 diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
-index 74dfda7c8..ff31a7fb1 100644
+index 74dfda7c8..283b60d6c 100644
 --- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
 +++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
 @@ -387,12 +387,18 @@ private bool IsSerializable
@@ -4996,7 +5178,24 @@ index 74dfda7c8..ff31a7fb1 100644
          }
  
          /// <summary>
-@@ -1069,4 +1087,4 @@ internal void EmitLevel4Warning(HardError error, string message)
+@@ -929,6 +947,16 @@ private Type GetBaseTypeForDefineType()
+ 
+ #if IMPORTER
+ 
++        internal object GetRawMethodDefaultValue(RuntimeJavaMethod method)
++        {
++            var methods = GetMethods();
++            for (int i = 0; i < methods.Length; i++)
++                if (methods[i] == method)
++                    return impl.GetMethodDefaultValue(i);
++
++            return null;
++        }
++
+         protected virtual Type GetBaseTypeForDefineType()
+         {
+             return BaseTypeWrapper.TypeAsBaseType;
+@@ -1069,4 +1097,4 @@ internal void EmitLevel4Warning(HardError error, string message)
          }
      }
  
@@ -5102,6 +5301,37 @@ index 1a0eb7c92..6bbaccb4a 100644
          }
  
      }
+diff --git a/src/IKVM.Runtime/RuntimeContext.cs b/src/IKVM.Runtime/RuntimeContext.cs
+index e2d770865..6fa42c2f5 100644
+--- a/src/IKVM.Runtime/RuntimeContext.cs
++++ b/src/IKVM.Runtime/RuntimeContext.cs
+@@ -14,7 +14,7 @@
+ using IKVM.Tools.Exporter;
+ #endif
+ 
+-#if IMPORTER == false
++#if IMPORTER == false || EXPORTER == false
+ using IKVM.Runtime.StubGen;
+ #endif
+ 
+@@ -47,7 +47,7 @@ class RuntimeContext
+         ExceptionHelper exceptionHelper;
+ #endif
+ 
+-#if IMPORTER == false
++#if IMPORTER == false || EXPORTER == false
+         StubGenerator stubGenerator;
+ #endif
+ 
+@@ -178,7 +178,7 @@ T GetOrCreateSingleton<T>(ref T value, Func<T> create)
+         /// </summary>
+         public RuntimeVerifierJavaTypeFactory VerifierJavaTypeFactory => GetOrCreateSingleton(ref verifierJavaTypeFactory, () => new RuntimeVerifierJavaTypeFactory(this));
+ 
+-#if IMPORTER == false
++#if IMPORTER == false || EXPORTER == false
+ 
+         /// <summary>
+         /// Gets the <see cref="StubGenerator"/> associated with this instance of the runtime.
 diff --git a/src/IKVM.Runtime/RuntimeJavaField.cs b/src/IKVM.Runtime/RuntimeJavaField.cs
 index 5b6a1ae85..a054f9991 100644
 --- a/src/IKVM.Runtime/RuntimeJavaField.cs
@@ -5128,6 +5358,21 @@ index 5b6a1ae85..a054f9991 100644
              }
          }
  
+diff --git a/src/IKVM.Runtime/RuntimeJavaMember.cs b/src/IKVM.Runtime/RuntimeJavaMember.cs
+index b71f31ab4..87c405295 100644
+--- a/src/IKVM.Runtime/RuntimeJavaMember.cs
++++ b/src/IKVM.Runtime/RuntimeJavaMember.cs
+@@ -185,6 +185,10 @@ bool InPracticeInternalsVisibleTo(RuntimeJavaType caller)
+ 
+         internal bool IsHideFromReflection => (flags & MemberFlags.HideFromReflection) != 0;
+ 
++        internal bool IsDeprecated => (flags & MemberFlags.Deprecated) != 0;
++
++        internal void SetDeprecated() => flags |= MemberFlags.Deprecated;
++
+         internal bool IsExplicitOverride => (flags & MemberFlags.ExplicitOverride) != 0;
+ 
+         internal bool IsMirandaMethod => (flags & MemberFlags.MirandaMethod) != 0;
 diff --git a/src/IKVM.Runtime/RuntimeJavaMethod.cs b/src/IKVM.Runtime/RuntimeJavaMethod.cs
 index 833b0af1a..edbcaa196 100644
 --- a/src/IKVM.Runtime/RuntimeJavaMethod.cs
@@ -5155,7 +5400,7 @@ index 833b0af1a..edbcaa196 100644
          }
  
 diff --git a/src/IKVM.Runtime/RuntimeJavaType.cs b/src/IKVM.Runtime/RuntimeJavaType.cs
-index 113078629..d1892c25e 100644
+index 113078629..c456f5d50 100644
 --- a/src/IKVM.Runtime/RuntimeJavaType.cs
 +++ b/src/IKVM.Runtime/RuntimeJavaType.cs
 @@ -312,11 +312,38 @@ private static void ResolvePrimitiveTypeWrapperClasses(RuntimeContext context)
@@ -5216,6 +5461,15 @@ index 113078629..d1892c25e 100644
                  if (type == typeof(void) || type.IsPrimitive || JVM.Context.ClassLoaderFactory.IsRemappedType(type))
                      tw = JVM.Context.ManagedJavaTypeFactory.GetJavaTypeFromManagedType(type);
                  else
+@@ -1321,7 +1360,7 @@ internal void EmitConvStackTypeToSignatureType(CodeEmitter ilgen, RuntimeJavaTyp
+                 // for any interface reference
+                 else if (IsInterfaceOrInterfaceArray && (sourceType == null || sourceType.IsUnloadable || !sourceType.IsAssignableTo(this)))
+                 {
+-                    ilgen.EmitAssertType(TypeAsTBD);
++                    ilgen.EmitAssertType(TypeAsTBD, "IKVM interface-downcast: checkcast to " + Name + (sourceType != null ? " from " + sourceType.Name : ""));
+                     Profiler.Count("InterfaceDownCast");
+                 }
+                 else if (IsNonPrimitiveValueType)
 diff --git a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs b/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
 index 05961e1ed..5492a5393 100644
 --- a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
@@ -5229,8 +5483,346 @@ index 05961e1ed..5492a5393 100644
          }
  
          /// <summary>
+diff --git a/src/IKVM.Runtime/StubGen/StubGenerator.cs b/src/IKVM.Runtime/StubGen/StubGenerator.cs
+index c50402c56..68374c068 100644
+--- a/src/IKVM.Runtime/StubGen/StubGenerator.cs
++++ b/src/IKVM.Runtime/StubGen/StubGenerator.cs
+@@ -9,7 +9,7 @@
+ using IKVM.ByteCode.Buffers;
+ 
+ 
+-#if EXPORTER
++#if EXPORTER || IMPORTER
+ using IKVM.Reflection;
+ 
+ using Type = IKVM.Reflection.Type;
+@@ -44,7 +44,7 @@ public StubGenerator(RuntimeContext context)
+         /// <param name="includeNonPublicMembers"></param>
+         /// <param name="includeParameterNames"></param>
+         /// <param name="includeSerialVersionUID"></param>
+-        internal void Write(Stream stream, RuntimeJavaType type, bool includeNonPublicTypes, bool includeNonPublicInterfaces, bool includeNonPublicMembers, bool includeParameterNames, bool includeSerialVersionUID)
++        internal void Write(Stream stream, RuntimeJavaType type, bool includeNonPublicTypes, bool includeNonPublicInterfaces, bool includeNonPublicMembers, bool includeParameterNames, bool includeSerialVersionUID, string assemblyName = null)
+         {
+             var name = type.Name.Replace('.', '/');
+ 
+@@ -61,7 +61,7 @@ internal void Write(Stream stream, RuntimeJavaType type, bool includeNonPublicTy
+             AddFields(builder, type, includeNonPublicMembers, includeSerialVersionUID);
+             AddInnerClassesAttribute(builder, type, name, includeNonPublicTypes);
+             AddSignatureAttribute(builder, type);
+-            AddAssemblyAttribute(builder, type);
++            AddAssemblyAttribute(builder, type, assemblyName);
+             AddDeprecatedAttribute(builder, type);
+             AddRuntimeVisibleAnnotationsAttribute(builder, type);
+             AddRuntimeVisibleTypeAnnotationsAttribute(builder, type);
+@@ -127,14 +127,27 @@ void AddMethods(ClassFileBuilder builder, RuntimeJavaType type, bool includeNonP
+                             attributes.AnnotationDefault(e => EncodeAnnotationDefault(builder, ref e, method.ReturnType));
+                     }
+ 
++#if IMPORTER
++                    AddExceptionsAttribute(builder, type, method, attributes, null);
++                    if (method.IsDeprecated)
++                        attributes.Deprecated();
++
++                    if (type is RuntimeByteCodeJavaType byteCodeType)
++                    {
++                        var value = byteCodeType.GetRawMethodDefaultValue(method);
++                        if (value != null)
++                            attributes.AnnotationDefault(e => EncodeElementValue(builder, ref e, value));
++                    }
++#else
+                     var methodBase = method.GetMethod();
+                     if (methodBase != null)
+                     {
+                         AddExceptionsAttribute(builder, type, method, attributes, methodBase);
+                         AddDeprecatedAttribute(builder, type, method, attributes, methodBase);
+                         AddAnnotationDefaultAttribute(builder, type, method, attributes, methodBase);
+-                        AddMethodParameters(builder, type, method, attributes, includeParameterNames);
+                     }
++#endif
++                    AddMethodParameters(builder, type, method, attributes, includeParameterNames);
+ 
+                     AddSignatureAttribute(builder, type, method, attributes);
+                     AddRuntimeVisibleAnnotationsAttribute(builder, type, method, attributes);
+@@ -293,12 +306,12 @@ void AddSignatureAttribute(ClassFileBuilder builder, RuntimeJavaType javaType)
+         /// </summary>
+         /// <param name="builder"></param>
+         /// <param name="javaType"></param>
+-        void AddAssemblyAttribute(ClassFileBuilder builder, RuntimeJavaType javaType)
++        void AddAssemblyAttribute(ClassFileBuilder builder, RuntimeJavaType javaType, string assemblyName)
+         {
+ 
+             // consists of a U2 constant pointing to the full name of the assembly
+             var assemblyAttributeBlob = new BlobBuilder();
+-            new ClassFormatWriter(assemblyAttributeBlob.ReserveBytes(ClassFormatWriter.U2).GetBytes()).WriteU2(builder.Constants.GetOrAddUtf8(GetAssemblyName(javaType)).Slot);
++            new ClassFormatWriter(assemblyAttributeBlob.ReserveBytes(ClassFormatWriter.U2).GetBytes()).WriteU2(builder.Constants.GetOrAddUtf8(assemblyName ?? GetAssemblyName(javaType)).Slot);
+             builder.Attributes.Encoder.Attribute(builder.Constants.GetOrAddUtf8("IKVM.NET.Assembly"), assemblyAttributeBlob);
+         }
+ 
+@@ -312,6 +325,17 @@ void AddAssemblyAttribute(ClassFileBuilder builder, RuntimeJavaType javaType)
+         /// <param name="methodBase"></param>
+         void AddExceptionsAttribute(ClassFileBuilder builder, RuntimeJavaType type, RuntimeJavaMethod method, AttributeTableBuilder attributes, MethodBase methodBase)
+         {
++#if IMPORTER
++            var throwsArray = method.GetDeclaredExceptions();
++            if (throwsArray != null && throwsArray.Length > 0)
++            {
++                attributes.Exceptions(e =>
++                {
++                    foreach (string ex in throwsArray)
++                        e.Class(builder.Constants.GetOrAddClass(ex.Replace('.', '/')));
++                });
++            }
++#else
+             var throws = context.AttributeHelper.GetThrows(methodBase);
+             if (throws == null)
+             {
+@@ -341,6 +365,7 @@ void AddExceptionsAttribute(ClassFileBuilder builder, RuntimeJavaType type, Runt
+                     });
+                 }
+             }
++#endif
+         }
+ 
+ 
+@@ -366,7 +391,7 @@ void AddMethodParameters(ClassFileBuilder builder, RuntimeJavaType type, Runtime
+                     attributes.MethodParameters(e =>
+                     {
+                         foreach (var i in mp)
+-                            e.MethodParameter(builder.Constants.GetOrAddUtf8(i.name), i.accessFlags);
++                            e.MethodParameter(i.name != null ? builder.Constants.GetOrAddUtf8(i.name) : default, i.accessFlags);
+                     });
+                 }
+             }
+@@ -540,9 +565,14 @@ void AddSignatureAttribute(ClassFileBuilder builder, RuntimeJavaType type, Runti
+         /// <param name="attributes"></param>
+         void AddDeprecatedAttribute(ClassFileBuilder builder, RuntimeJavaType type, RuntimeJavaField field, AttributeTableBuilder attributes)
+         {
++#if IMPORTER
++            if (field.IsDeprecated)
++                attributes.Deprecated();
++#else
+             // .NET ObsoleteAttribute translates to Deprecated attribute
+             if (field.GetField() != null && field.GetField().IsDefined(context.Resolver.ResolveCoreType(typeof(ObsoleteAttribute).FullName).AsReflection(), false))
+                 attributes.Deprecated();
++#endif
+         }
+ 
+         /// <summary>
+@@ -585,7 +615,7 @@ bool EncodeAnnotations(ClassFileBuilder builder, ref AnnotationTableEncoder enco
+         {
+             var any = false;
+ 
+-#if !FIRST_PASS && !EXPORTER
++#if !FIRST_PASS && !EXPORTER && !IMPORTER
+             if (source != null)
+             {
+                 foreach (var cad in CustomAttributeData.GetCustomAttributes(source))
+@@ -613,7 +643,7 @@ bool EncodeParameterAnnotations(ClassFileBuilder builder, ref ParameterAnnotatio
+         {
+             var any = false;
+ 
+-#if !FIRST_PASS && !EXPORTER
++#if !FIRST_PASS && !EXPORTER && !IMPORTER
+             if (source != null)
+             {
+                 var parameters = source.GetParameters();
+@@ -651,7 +681,7 @@ bool EncodeParameterAnnotations(ClassFileBuilder builder, ref ParameterAnnotatio
+         /// <exception cref="Exception"></exception>
+         bool ImportTypeAnnotations(ClassFileBuilder builder, ref TypeAnnotationTableEncoder encoder, RuntimeJavaType type, byte[] typeAnnotations)
+         {
+-#if !FIRST_PASS && !EXPORTER
++#if !FIRST_PASS && !EXPORTER && !IMPORTER
+             if (typeAnnotations != null)
+             {
+                 var reader = new ClassFormatReader(typeAnnotations);
+@@ -818,7 +848,7 @@ public PackageConstant Get(PackageConstantHandle handle)
+ 
+         }
+ 
+-#if !FIRST_PASS && !EXPORTER
++#if !FIRST_PASS && !EXPORTER && !IMPORTER
+ 
+         /// <summary>
+         /// Extracts our internal annotation format data from a custom attribute.
+@@ -830,7 +860,13 @@ object[] GetAnnotation(CustomAttributeData cad)
+             // attribute is either a AnnotationAttributeBase or a DynamicAnnotationAttribute with a single object[] in our internal annotation format
+             if (cad.ConstructorArguments.Count == 1 && cad.ConstructorArguments[0].ArgumentType == typeof(object[]) && (cad.Constructor.DeclaringType.BaseType == typeof(ikvm.@internal.AnnotationAttributeBase) || cad.Constructor.DeclaringType == typeof(DynamicAnnotationAttribute)))
+             {
+-                return UnpackArray((IList<CustomAttributeTypedArgument>)cad.ConstructorArguments[0].Value);
++                // .NET Framework/CoreCLR (and IKVM.Reflection in the exporter) represent an
++                // array-typed argument's Value as an IList<CustomAttributeTypedArgument>. Mono
++                // instead returns the raw object[] with unwrapped element values — which is already
++                // our internal annotation format (nested arrays are raw object[] all the way down),
++                // so use it as-is rather than casting (which throws InvalidCastException on Mono).
++                var value = cad.ConstructorArguments[0].Value;
++                return value as object[] ?? UnpackArray((IList<CustomAttributeTypedArgument>)value);
+             }
+ 
+             if (cad.Constructor.DeclaringType.BaseType == typeof(ikvm.@internal.AnnotationAttributeBase))
+@@ -901,19 +937,39 @@ object GetAnnotationValue(CustomAttributeTypedArgument arg)
+             // argument is directly an array, so we encode it a a TAG_ARRAY
+             if (arg.ArgumentType.IsArray)
+             {
+-                var array = (IList<CustomAttributeTypedArgument>)arg.Value;
+-                var arr = new object[array.Count + 1];
+-                arr[0] = IKVM.Attributes.AnnotationDefaultAttribute.TAG_ARRAY;
+-                for (int i = 0; i < array.Count; i++)
+-                    arr[i + 1] = GetAnnotationValue(array[i]);
++                // .NET Framework/CoreCLR (and IKVM.Reflection) wrap each element as a
++                // CustomAttributeTypedArgument; Mono returns the raw CLR array with unwrapped
++                // element values, so wrap each element back up (by its runtime type, so nested
++                // arrays/enums are still detected) and reuse the same encoding path.
++                if (arg.Value is IList<CustomAttributeTypedArgument> array)
++                {
++                    var arr = new object[array.Count + 1];
++                    arr[0] = IKVM.Attributes.AnnotationDefaultAttribute.TAG_ARRAY;
++                    for (int i = 0; i < array.Count; i++)
++                        arr[i + 1] = GetAnnotationValue(array[i]);
+ 
+-                return arr;
++                    return arr;
++                }
++#if !EXPORTER && !IMPORTER
++                var raw = (Array)arg.Value;
++                var elementType = arg.ArgumentType.GetElementType();
++                var rawArr = new object[raw.Length + 1];
++                rawArr[0] = IKVM.Attributes.AnnotationDefaultAttribute.TAG_ARRAY;
++                for (int i = 0; i < raw.Length; i++)
++                {
++                    var element = raw.GetValue(i);
++                    rawArr[i + 1] = GetAnnotationValue(new CustomAttributeTypedArgument(element?.GetType() ?? elementType, element));
++                }
+ 
++                return rawArr;
++#endif
+             }
+ 
+             return arg.Value;
+         }
+ 
++#endif
++
+         /// <summary>
+         /// Encodes multiple objects in our internal annotation format.
+         /// </summary>
+@@ -965,7 +1021,9 @@ void EncodeElementValue(ClassFileBuilder builder, ref ElementValueEncoder encode
+                     {
+                         e.Annotation(builder.Constants.GetOrAddUtf8(DecodeTypeName((string)v[1])), e2 =>
+                         {
+-                            for (int i = 2; i < v.Length; i++)
++                            // elements are (name, value) pairs, so step by 2 — matching EncodeAnnotation.
++                            // stepping by 1 reads v[i + 1] past the end on the last element (AIOOBE).
++                            for (int i = 2; i < v.Length; i += 2)
+                                 e2.Element(builder.Constants.GetOrAddUtf8((string)v[i]), e3 => EncodeElementValue(builder, ref e3, v[i + 1]));
+                         });
+                     });
+@@ -1040,7 +1098,7 @@ static string EncodeTypeName(RuntimeJavaType tw)
+ 
+         static string DecodeTypeName(string typeName)
+         {
+-#if !FIRST_PASS && !EXPORTER
++#if !FIRST_PASS && !EXPORTER && !IMPORTER
+             int index = typeName.IndexOf(',');
+             if (index > 0)
+             {
+@@ -1060,8 +1118,6 @@ static string DecodeTypeName(string typeName)
+             return typeName;
+         }
+ 
+-#endif
+-
+         object[] UnpackArray(IList<CustomAttributeTypedArgument> list)
+         {
+             var arr = new object[list.Count];
+@@ -1073,7 +1129,7 @@ object[] UnpackArray(IList<CustomAttributeTypedArgument> list)
+ 
+         int GetObsoleteCount(MethodBase mb)
+         {
+-#if EXPORTER
++#if EXPORTER || IMPORTER
+             return mb.__GetCustomAttributes(context.Resolver.ResolveCoreType(typeof(ObsoleteAttribute).FullName).AsReflection(), false).Count;
+ #else
+             return mb.GetCustomAttributes(typeof(ObsoleteAttribute), false).Length;
+@@ -1082,7 +1138,7 @@ int GetObsoleteCount(MethodBase mb)
+ 
+         CustomAttributeData GetAnnotationDefault(MethodBase mb)
+         {
+-#if EXPORTER
++#if EXPORTER || IMPORTER
+             var attr = CustomAttributeData.__GetCustomAttributes(mb, context.Resolver.ResolveRuntimeType(typeof(Attributes.AnnotationDefaultAttribute).FullName).AsReflection(), false);
+             return attr.Count == 1 ? attr[0] : null;
+ #else
+diff --git a/src/IKVM.Runtime/Vfs/VfsAssemblyClassFile.cs b/src/IKVM.Runtime/Vfs/VfsAssemblyClassFile.cs
+index 224a48cdd..3732a1f10 100644
+--- a/src/IKVM.Runtime/Vfs/VfsAssemblyClassFile.cs
++++ b/src/IKVM.Runtime/Vfs/VfsAssemblyClassFile.cs
+@@ -1,5 +1,6 @@
+ ﻿using System;
+ using System.IO;
++using System.IO.Compression;
+ 
+ using IKVM.Runtime;
+ using IKVM.Runtime.Accessors.Java.Lang;
+@@ -37,12 +38,57 @@ byte[] GenerateClassFile()
+ #if FIRST_PASS || IMPORTER || EXPORTER
+             throw new NotImplementedException();
+ #else
++            var stored = ReadStoredClassFile();
++            if (stored != null)
++                return stored;
++
+             var stream = new MemoryStream();
+             Context.Context.StubGenerator.Write(stream, type, true, true, true, true, false);
+             return stream.ToArray();
+ #endif
+         }
+ 
++#if !FIRST_PASS && !IMPORTER && !EXPORTER
++
++        /// <summary>
++        /// Reads a pre-generated stub from one of the JAR resources embedded by ikvmc.
++        /// </summary>
++        byte[] ReadStoredClassFile()
++        {
++            if (type.ClassLoader is not RuntimeAssemblyClassLoader loader)
++                return null;
++
++            var assembly = loader.GetAssembly(type);
++            var classFile = type.Name.Replace('.', '/') + ".class";
++
++            foreach (var module in assembly.GetModules(false))
++            {
++                foreach (IKVM.Attributes.JavaModuleAttribute javaModule in Context.Context.AttributeHelper.GetJavaModuleAttributes(module))
++                {
++                    foreach (var jar in javaModule.Jars ?? Array.Empty<string>())
++                    {
++                        using var resource = assembly.GetManifestResourceStream(jar);
++                        if (resource == null)
++                            continue;
++
++                        using var archive = new ZipArchive(resource, ZipArchiveMode.Read, false);
++                        var entry = archive.GetEntry(classFile);
++                        if (entry == null)
++                            continue;
++
++                        using var input = entry.Open();
++                        using var output = new MemoryStream(entry.Length > int.MaxValue ? 0 : (int)entry.Length);
++                        input.CopyTo(output);
++                        return output.ToArray();
++                    }
++                }
++            }
++
++            return null;
++        }
++
++#endif
++
+         /// <summary>
+         /// Opens the class file.
+         /// </summary>
 diff --git a/src/IKVM.Runtime/compiler.cs b/src/IKVM.Runtime/compiler.cs
-index b98d8eb5a..bc67a9ebe 100644
+index b98d8eb5a..8f926cf34 100644
 --- a/src/IKVM.Runtime/compiler.cs
 +++ b/src/IKVM.Runtime/compiler.cs
 @@ -1157,15 +1157,21 @@ void Compile(Block block, int startIndex)
@@ -5259,6 +5851,24 @@ index b98d8eb5a..bc67a9ebe 100644
                      case NormalizedByteCode.__fconst_2:
                          ilGenerator.EmitLdc_R4(2.0f);
                          break;
+@@ -3117,7 +3123,7 @@ void CastInterfaceArgs(RuntimeJavaType declaringType, RuntimeJavaType[] args, in
+                         RuntimeJavaType tw = ma.GetStackTypeWrapper(instructionIndex, args.Length - 1 - i);
+                         if (tw.IsUnloadable || (args[i].IsInterfaceOrInterfaceArray && NeedsInterfaceDownCast(tw, args[i])))
+                         {
+-                            ilGenerator.EmitAssertType(args[i].TypeAsTBD);
++                            ilGenerator.EmitAssertType(args[i].TypeAsTBD, "IKVM interface-downcast: arg #" + i + " (" + args[i].Name + ") in " + classFile.Name + "." + m.Name + m.Signature + " calling " + declaringType.Name);
+                             Profiler.Count("InterfaceDownCast");
+                         }
+                     }
+@@ -3130,7 +3136,7 @@ void CastInterfaceArgs(RuntimeJavaType declaringType, RuntimeJavaType[] args, in
+                 {
+                     if (declaringType.IsInterface)
+                     {
+-                        ilGenerator.EmitAssertType(declaringType.TypeAsTBD);
++                        ilGenerator.EmitAssertType(declaringType.TypeAsTBD, "IKVM interface-downcast: receiver (" + declaringType.Name + ") in " + classFile.Name + "." + m.Name + m.Signature);
+                     }
+                     else if (declaringType.IsNonPrimitiveValueType)
+                     {
 diff --git a/src/IKVM.Runtime/intrinsics.cs b/src/IKVM.Runtime/intrinsics.cs
 index 81b2bfc69..828842733 100644
 --- a/src/IKVM.Runtime/intrinsics.cs
@@ -5578,6 +6188,219 @@ index 6714bea45..1fb144dc5 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Tools.Importer.Tests/IkvmImporterTests.cs b/src/IKVM.Tools.Importer.Tests/IkvmImporterTests.cs
+index d7292300d..48d927534 100644
+--- a/src/IKVM.Tools.Importer.Tests/IkvmImporterTests.cs
++++ b/src/IKVM.Tools.Importer.Tests/IkvmImporterTests.cs
+@@ -1,12 +1,16 @@
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
++using System.IO.Compression;
++using System.Linq;
++using System.Reflection;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ using System.Threading.Tasks;
+ 
+ using FluentAssertions;
+ 
++using IKVM.Attributes;
+ using IKVM.Java.Tests.Util;
+ using IKVM.Tests.Util;
+ 
+@@ -63,6 +67,57 @@ public async Task CanImportSimpleTest(string ikvmFramework, string targetFramewo
+             ret.Should().Be(0);
+             File.Exists(asm).Should().BeTrue();
+             new FileInfo(asm).Length.Should().BeGreaterThanOrEqualTo(128);
++
++            var output = Assembly.LoadFile(asm);
++            var jars = output.GetModules()
++                .SelectMany(i => i.GetCustomAttributes<JavaModuleAttribute>())
++                .SelectMany(i => i.Jars ?? Array.Empty<string>());
++            var classFile = "ikvm/tools/importer/tests/IkvmImporterTests.class";
++            byte[] stub = null;
++
++            foreach (var jar in jars)
++            {
++                using var resource = output.GetManifestResourceStream(jar);
++                using var archive = new ZipArchive(resource, ZipArchiveMode.Read);
++                archive.GetEntry("--ikvm-classes--/").Should().BeNull();
++
++                if (archive.GetEntry(classFile) is ZipArchiveEntry entry)
++                {
++                    using var input = entry.Open();
++                    using var memory = new MemoryStream();
++                    input.CopyTo(memory);
++                    stub = memory.ToArray();
++                }
++            }
++
++            stub.Should().NotBeNull();
++            stub.Take(4).Should().Equal((byte)0xca, (byte)0xfe, (byte)0xba, (byte)0xbe);
++
++            if (ikvmFramework == "net8.0" && targetFramework == "net8.0")
++            {
++                var noStubsAssembly = Path.ChangeExtension(j, ".nojarstubs.dll");
++                var noStubsArgs = args.Where(i => i.StartsWith("-out:") == false).ToList();
++                noStubsArgs.Insert(noStubsArgs.Count - 1, "-nojarstubs");
++                noStubsArgs.Insert(noStubsArgs.Count - 1, $"-out:{noStubsAssembly}");
++
++                ret = await ImportTool.InvokeAsync(noStubsArgs.ToArray(), CancellationToken.None);
++                ret.Should().Be(0);
++
++                var noStubsOutput = Assembly.LoadFile(noStubsAssembly);
++                var noStubsJars = noStubsOutput.GetModules()
++                    .SelectMany(i => i.GetCustomAttributes<JavaModuleAttribute>())
++                    .SelectMany(i => i.Jars ?? Array.Empty<string>())
++                    .ToArray();
++                noStubsJars.Should().NotBeEmpty();
++
++                foreach (var jar in noStubsJars)
++                {
++                    using var resource = noStubsOutput.GetManifestResourceStream(jar);
++                    using var archive = new ZipArchive(resource, ZipArchiveMode.Read);
++                    archive.GetEntry("--ikvm-classes--/").Should().BeNull();
++                    archive.GetEntry(classFile).Should().BeNull();
++                }
++            }
+         }
+     }
+ 
+diff --git a/src/IKVM.Tools.Importer/IKVM.Tools.Importer.csproj b/src/IKVM.Tools.Importer/IKVM.Tools.Importer.csproj
+index 51c48bad6..a1f3b2b50 100644
+--- a/src/IKVM.Tools.Importer/IKVM.Tools.Importer.csproj
++++ b/src/IKVM.Tools.Importer/IKVM.Tools.Importer.csproj
+@@ -25,7 +25,6 @@
+         <ExcludeFromCompile Include="..\IKVM.Runtime\obj\**\*.cs" />
+         <ExcludeFromCompile Include="..\IKVM.Runtime\Util\**\*.cs" />
+         <ExcludeFromCompile Include="..\IKVM.Runtime\Java\Externs\**\*.cs" />
+-        <ExcludeFromCompile Include="..\IKVM.Runtime\StubGen\**\*.cs" />
+         <ExcludeFromCompile Include="..\IKVM.Runtime\Assertions.cs" />
+         <ExcludeFromCompile Include="..\IKVM.Runtime\ByteCodeHelper.cs" />
+         <ExcludeFromCompile Include="..\IKVM.Runtime\common.cs" />
+diff --git a/src/IKVM.Tools.Importer/ImportClassLoader.cs b/src/IKVM.Tools.Importer/ImportClassLoader.cs
+index 3f0ae8b1d..430a0e235 100644
+--- a/src/IKVM.Tools.Importer/ImportClassLoader.cs
++++ b/src/IKVM.Tools.Importer/ImportClassLoader.cs
+@@ -391,7 +391,7 @@ RuntimeJavaType GetTypeWrapperCompilerHook(string name)
+                         }
+                         else
+                         {
+-                            itemRef.MarkAsStub();
++                            itemRef.MarkAsStub(tw);
+                         }
+ 
+                         int pos = f.Name.LastIndexOf('.');
+@@ -583,6 +583,7 @@ void SetMain(RuntimeJavaType type, PEFileKinds target, IDictionary<string, strin
+         void PrepareSave()
+         {
+             ((DynamicClassLoader)this.GetTypeWrapperFactory()).FinishAll();
++            WriteResources();
+         }
+ 
+         void Save()
+@@ -778,15 +779,18 @@ void WriteResources()
+                 var mem = new MemoryStream();
+                 using (var zip = new ZipArchive(mem, ZipArchiveMode.Create))
+                 {
+-                    var stubs = new List<string>();
+                     foreach (Jar.Item item in state.jars[i])
+                     {
+                         if (item.IsStub)
+                         {
+-                            // we don't want stub class pseudo resources for classes loaded from the file system
+-                            if (i != state.classesJar)
+-                                stubs.Add(item.Name);
++                            // Removed items (for example under -nojarstubs) have no associated type.
++                            if (item.StubType == null)
++                                continue;
+ 
++                            var stubZipEntry = zip.CreateEntry(item.Name, state.compressedResources ? CompressionLevel.Optimal : CompressionLevel.NoCompression);
++                            using var stubStream = stubZipEntry.Open();
++                            Context.StubGenerator.Write(stubStream, item.StubType, true, true, true, true, false, assemblyBuilder.FullName);
++                            hasEntries = true;
+                             continue;
+                         }
+                         var zipEntry = zip.CreateEntry(item.Name, state.compressedResources ? CompressionLevel.Optimal : CompressionLevel.NoCompression);
+@@ -799,20 +803,6 @@ void WriteResources()
+                         hasEntries = true;
+                     }
+ 
+-                    if (stubs.Count != 0)
+-                    {
+-                        // generate the --ikvm-classes-- file in the jar
+-                        var zipEntry = zip.CreateEntry(JVM.Internal.JarClassList);
+-
+-                        using Stream stream = zipEntry.Open();
+-                        using BinaryWriter bw = new BinaryWriter(stream);
+-
+-                        bw.Write(stubs.Count);
+-                        foreach (string classFile in stubs)
+-                            bw.Write(classFile);
+-
+-                        hasEntries = true;
+-                    }
+                 }
+ 
+                 // don't include empty classes.jar
+@@ -3033,7 +3023,6 @@ int CompilePass3()
+             }
+ 
+             Diagnostics.GenericCompilerInfo("Compiling class files (2)");
+-            WriteResources();
+ 
+             // add external resources
+             if (state.externalResources != null)
+diff --git a/src/IKVM.Tools.Importer/Jar.cs b/src/IKVM.Tools.Importer/Jar.cs
+index 3f4f09d05..36f315ea1 100644
+--- a/src/IKVM.Tools.Importer/Jar.cs
++++ b/src/IKVM.Tools.Importer/Jar.cs
+@@ -24,6 +24,8 @@ Jeroen Frijters
+ using System.Collections.Generic;
+ using System.IO;
+ 
++using IKVM.Runtime;
++
+ namespace IKVM.Tools.Importer
+ {
+ 
+@@ -59,12 +61,14 @@ private readonly struct JarItem
+             internal readonly string name;
+             internal readonly byte[] data;
+             internal readonly FileInfo path;            // path of the original file, if it was individual file (used to construct source file path)
++            internal readonly RuntimeJavaType stubType;
+ 
+-            internal JarItem(string name, byte[] data, FileInfo path)
++            internal JarItem(string name, byte[] data, FileInfo path, RuntimeJavaType stubType = null)
+             {
+                 this.name = name;
+                 this.data = data;
+                 this.path = path;
++                this.stubType = stubType;
+             }
+         }
+ 
+@@ -99,15 +103,17 @@ internal void Remove()
+                 Jar.Items[Index] = new JarItem();
+             }
+ 
+-            internal void MarkAsStub()
++            internal void MarkAsStub(RuntimeJavaType type)
+             {
+-                Jar.Items[Index] = new JarItem(Jar.Items[Index].name, null, null);
++                Jar.Items[Index] = new JarItem(Jar.Items[Index].name, null, null, type);
+             }
+ 
+             internal bool IsStub
+             {
+                 get { return Jar.Items[Index].data == null; }
+             }
++
++            internal RuntimeJavaType StubType => Jar.Items[Index].stubType;
+         }
+ 
+         internal struct JarEnumerator
 diff --git a/src/libjsound/jni_onload.c b/src/libjsound/jni_onload.c
 index a66940e94..67ef4c4b9 100644
 --- a/src/libjsound/jni_onload.c

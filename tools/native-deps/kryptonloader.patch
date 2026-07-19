@@ -284,10 +284,10 @@ index 0000000..7bbf664
 +#endif /* __EMSCRIPTEN__ */
 diff --git a/src/gl/emscripten_api.c b/src/gl/emscripten_api.c
 new file mode 100644
-index 0000000..a75d0a0
+index 0000000..341f2d2
 --- /dev/null
 +++ b/src/gl/emscripten_api.c
-@@ -0,0 +1,1158 @@
+@@ -0,0 +1,1152 @@
 +#if defined(__EMSCRIPTEN__)
 +
 +#include "../../include/gl4esinit.h"
@@ -1431,19 +1431,13 @@ index 0000000..a75d0a0
 +    ng_gl4es_proc_init();
 +}
 +
-+/* GLX-style entry points so LWJGL's Linux SharedLibraryGL bootstrap (which
-+ * dlsyms `glXGetProcAddress` / `glXGetProcAddressARB` out of libGL.so.1 and
-+ * uses the returned function for every GL function lookup) can route through
-+ * the Krypton Wrapper chain. The user's libGL.so.1 setup just needs to
-+ * re-export these symbols (e.g. via wasm symbol-rename) for LWJGL to find
-+ * them via JVM_FindLibraryEntry. */
-+EXPORT void* glXGetProcAddress(const unsigned char* procName) {
-+    return ng_gl4es_get_proc_address((const char*)procName);
-+}
-+
-+EXPORT void* glXGetProcAddressARB(const unsigned char* procName) {
-+    return ng_gl4es_get_proc_address((const char*)procName);
-+}
++/* The bare GLX-style entry points `glXGetProcAddress` / `glXGetProcAddressARB`
++ * that LWJGL's Linux SharedLibraryGL bootstrap resolves out of libGL.so.1 are
++ * intentionally NOT defined here. In the combined (runtime-switchable) build
++ * both NG-GL4ES and MobileGL are linked into one libglfw3.a, so the emscripten-glfw
++ * dispatch layer (gl_backend.*) owns the single bare `glXGetProcAddress` and routes
++ * it to the selected backend's proc-address entry (krypton_get_proc_address here).
++ * Defining them here too would be a duplicate-symbol collision with that dispatcher. */
 +
 +#endif
 diff --git a/src/gl/fpe.c b/src/gl/fpe.c

@@ -101,13 +101,12 @@ jobs:
           if-no-files-found: error
 
   build-glfw:
-    name: build glfw (${{ matrix.gl-backend }}/${{ matrix.variant }})
+    name: build glfw (${{ matrix.variant }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         variant: [mt, st]
-        gl-backend: [ng-gl4es, mobilegl]
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -117,10 +116,10 @@ jobs:
         with:
           version: ${{ env.EMSDK_VERSION }}
 
-      # The mobilegl backend builds Dawn's tint (SPIR-V -> WGSL); it's slow and only depends on
-      # the pinned Dawn rev + emsdk + variant (mt needs a -pthread tint), so cache it per-variant.
-      - name: Cache tint (mobilegl)
-        if: matrix.gl-backend == 'mobilegl'
+      # MobileGL builds Dawn's tint (SPIR-V -> WGSL); it's slow and only depends on the pinned
+      # Dawn rev + emsdk + variant (mt needs a -pthread tint), so cache it per-variant. MobileGL
+      # is always built now (both backends land in one libglfw3.a), so this always runs.
+      - name: Cache tint
         uses: actions/cache@v4
         with:
           path: tools/native-deps/tint-out-${{ matrix.variant }}
@@ -128,14 +127,14 @@ jobs:
 
       - name: build glfw
         shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}" --gl-backend="${{ matrix.gl-backend }}"
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-glfw.sh" --variant="${{ matrix.variant }}"
 
       - name: Upload GLFW artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: glfw-${{ matrix.gl-backend }}-${{ matrix.variant }}
-          # The mobilegl backend also emits the emdawnwebgpu + JSPI JS libraries the final app
-          # link needs (absent for ng-gl4es; the globs simply match nothing there).
+          name: glfw-${{ matrix.variant }}
+          # One combined libglfw3.a (both backends) plus the emdawnwebgpu + JSPI JS libraries the
+          # final app link always needs (MobileGL is always linked now).
           path: |
             tools/native-deps/out/${{ matrix.variant }}/libglfw3.a
             tools/native-deps/out/${{ matrix.variant }}/lib_emscripten_glfw3.js
@@ -179,10 +178,37 @@ jobs:
           path: tools/native-deps/out/${{ matrix.variant }}/*
           if-no-files-found: error
 
+  build-jvmdowngrader:
+    name: build jvmdowngrader (patched)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # Gradle provisions the per-stub JDK toolchains (java 7..26) via the foojay resolver.
+      - name: build jvmdowngrader
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-jvmdowngrader.sh"
+
+      - name: Upload jvmdowngrader artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvmdowngrader
+          path: |
+            tools/native-deps/out/jvmdowngrader.jar
+            tools/native-deps/out/jvmdg-java-api.jar
+          if-no-files-found: error
+
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-managed, build-wasm-native, build-java-native-deps, build-glfw]
+    needs: [build-managed, build-wasm-native, build-java-native-deps, build-glfw, build-jvmdowngrader]
     permissions:
       contents: write
     steps:
@@ -218,6 +244,12 @@ jobs:
         with:
           name: java-native-deps-st
           path: java-native-deps/st/
+
+      - name: Download jvmdowngrader artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: jvmdowngrader
+          path: jvmdowngrader/
 
       - name: Download all GLFW artifacts
         uses: actions/download-artifact@v4
@@ -270,24 +302,24 @@ jobs:
             native/libfontmanager.a
           zip -r "release/ikvm-wasm-bundle.zip" image
 
-           for backend in ng-gl4es mobilegl; do
-             for variant in mt st; do
-               cp "glfw/glfw-${backend}-${variant}/libglfw3.a" \
-                 "release/libglfw3-${backend}-${variant}.a"
-               cp "glfw/glfw-${backend}-${variant}/lib_emscripten_glfw3.js" \
-                 "release/lib_emscripten_glfw3-${backend}-${variant}.js"
-             done
+           # One combined libglfw3.a per variant (both GL backends; runtime-selectable).
+           for variant in mt st; do
+             cp "glfw/glfw-${variant}/libglfw3.a" \
+               "release/libglfw3-${variant}.a"
+             cp "glfw/glfw-${variant}/lib_emscripten_glfw3.js" \
+               "release/lib_emscripten_glfw3-${variant}.js"
            done
 
-           # mobilegl also ships the emdawnwebgpu bindings + JSPI shim the final app link needs;
-           # bundle them per variant so the client can fetch+unzip one asset into statics/.
+           # MobileGL is always linked, so the emdawnwebgpu bindings + JSPI shim the final app
+           # link needs are always shipped; bundle them per variant so the client can fetch+unzip
+           # one asset into statics/.
            for variant in mt st; do
              zip -q -j "release/mobilegl-webgpu-js-${variant}.zip" \
-               "glfw/glfw-mobilegl-${variant}/library_webgpu_enum_tables.js" \
-               "glfw/glfw-mobilegl-${variant}/library_webgpu_generated_struct_info.js" \
-               "glfw/glfw-mobilegl-${variant}/library_webgpu_generated_sig_info.js" \
-               "glfw/glfw-mobilegl-${variant}/library_webgpu.js" \
-               "glfw/glfw-mobilegl-${variant}/lib_mobilegl_webgpu.js"
+               "glfw/glfw-${variant}/library_webgpu_enum_tables.js" \
+               "glfw/glfw-${variant}/library_webgpu_generated_struct_info.js" \
+               "glfw/glfw-${variant}/library_webgpu_generated_sig_info.js" \
+               "glfw/glfw-${variant}/library_webgpu.js" \
+               "glfw/glfw-${variant}/lib_mobilegl_webgpu.js"
            done
 
           cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
@@ -299,6 +331,9 @@ jobs:
 
           cp java-native-deps/mt/libffi.a release/libffi-mt.a
           cp java-native-deps/st/libffi.a release/libffi-st.a
+
+          cp jvmdowngrader/jvmdowngrader.jar release/jvmdowngrader.jar
+          cp jvmdowngrader/jvmdg-java-api.jar release/jvmdg-java-api.jar
 
           mkdir -p /tmp/st-native
           cp native/ST-libjvm.a /tmp/st-native/libjvm.a

@@ -1,16 +1,17 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 2d9df93..9486a38 100644
+index 2d9df93..b3f339d 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -32,6 +32,7 @@ set(glfw3_headers
+@@ -32,6 +32,8 @@ set(glfw3_headers
      src/cpp/emscripten/glfw3/Cursor.h
      src/cpp/emscripten/glfw3/ErrorHandler.h
      src/cpp/emscripten/glfw3/Events.h
 +    src/cpp/emscripten/glfw3/EventQueue.h
++    src/cpp/emscripten/glfw3/gl_backend.h
      src/cpp/emscripten/glfw3/Keyboard.h
      src/cpp/emscripten/glfw3/KeyboardMapping.h
      src/cpp/emscripten/glfw3/Monitor.h
-@@ -46,6 +47,7 @@ set(glfw3_sources
+@@ -46,6 +48,7 @@ set(glfw3_sources
      src/cpp/emscripten/glfw3/Clipboard.cpp
      src/cpp/emscripten/glfw3/Context.cpp
      src/cpp/emscripten/glfw3/ErrorHandler.cpp
@@ -18,7 +19,7 @@ index 2d9df93..9486a38 100644
      src/cpp/emscripten/glfw3/Keyboard.cpp
      src/cpp/emscripten/glfw3/Window.cpp
  )
-@@ -83,6 +85,12 @@ add_glfw_lib("glfw3")
+@@ -83,6 +86,12 @@ add_glfw_lib("glfw3")
  # library compiled with -pthread
  add_glfw_lib("glfw3_pthread")
  target_compile_options(glfw3_pthread PUBLIC "-pthread")
@@ -64,7 +65,7 @@ index c539cdc..7e04f64 100644
    // GL Context
    int fClientAPI{GLFW_OPENGL_API}; // GLFW_CLIENT_API
 diff --git a/src/cpp/emscripten/glfw3/Context.cpp b/src/cpp/emscripten/glfw3/Context.cpp
-index afb6ea7..f7589ad 100644
+index afb6ea7..28089cf 100644
 --- a/src/cpp/emscripten/glfw3/Context.cpp
 +++ b/src/cpp/emscripten/glfw3/Context.cpp
 @@ -19,13 +19,25 @@
@@ -93,19 +94,21 @@ index afb6ea7..f7589ad 100644
  extern "C" {
  using ScaleChangeCallback = void (*)(emscripten::glfw3::Context *);
  using WindowResizeCallback = void (*)(emscripten::glfw3::Context *, GLFWwindow *, int, int);
-@@ -52,6 +64,12 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
+@@ -52,8 +64,14 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
  bool emscripten_glfw3_context_is_runtime_platform_apple();
  void emscripten_glfw3_create_custom_cursor(GLFWcursor *iCursor, int iWidth, int iHeight, unsigned char *iPixels);
  void emscripten_glfw3_destroy_custom_cursor(GLFWcursor *iCursor);
 +void emscripten_glfw3_context_jspi_settimeout();
 +void emscripten_glfw3_context_jspi_raf();
-+#ifndef GL_BACKEND_KRYPTON
-+// MobileGL (WebGPU) does not auto-present; swapBuffers drives the present explicitly.
-+void mobilegl_present();
-+#endif
  }
  
++// GL context present / proc-address are dispatched at runtime through gl_backend_*
++// (both krypton_* and mobilegl_* symbol sets are linked). See gl_backend.h.
++#include "gl_backend.h"
++
  namespace emscripten::glfw3 {
+ 
+ static ErrorHandler &kErrorHandler = ErrorHandler::instance();
 @@ -66,12 +84,88 @@ std::unique_ptr<Context> Context::init()
    return std::unique_ptr<Context>(new Context{});
  }
@@ -350,7 +353,7 @@ index afb6ea7..f7589ad 100644
    computeWindowPos();
  
  #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
-@@ -1199,16 +1382,32 @@ void Context::pollEvents()
+@@ -1199,16 +1382,36 @@ void Context::pollEvents()
  //------------------------------------------------------------------------
  // Context::swapInterval
  //------------------------------------------------------------------------
@@ -370,13 +373,17 @@ index afb6ea7..f7589ad 100644
 +void Context::swapBuffers() const
 +{
 +	sFrameCount.fetch_add(1, std::memory_order_relaxed);
-+#ifdef GL_BACKEND_KRYPTON
-+	glFlush();
-+	EM_ASM({ try { GL.newRenderingFrameStarted(); } catch {} });
-+#else
-+	// MobileGL: present the WebGPU surface (eglSwapBuffers -> DirectWebGPU::Present).
-+	mobilegl_present();
-+#endif
++	if(gl_backend_current() == GL_BACKEND_MOBILEGL)
++	{
++		// MobileGL: present the WebGPU surface (eglSwapBuffers -> DirectWebGPU::Present).
++		mobilegl_present();
++	}
++	else
++	{
++		// NG-GL4ES (WebGL): flush and let emscripten's GL start a new frame.
++		glFlush();
++		EM_ASM({ try { GL.newRenderingFrameStarted(); } catch {} });
++	}
 +	if (fInterval == 0)
 +		emscripten_glfw3_context_jspi_settimeout();
 +	else
@@ -388,7 +395,7 @@ index afb6ea7..f7589ad 100644
  }
  
  
-@@ -1256,4 +1455,4 @@ bool Context::isRuntimePlatformApple() const
+@@ -1256,4 +1459,4 @@ bool Context::isRuntimePlatformApple() const
    return emscripten_glfw3_context_is_runtime_platform_apple();
  }
  
@@ -738,51 +745,35 @@ index 20b2e04..20fd438 100644
  
    Vec2<double> fCursorPos{};
 diff --git a/src/cpp/emscripten/glfw3/Window.cpp b/src/cpp/emscripten/glfw3/Window.cpp
-index cfa866b..06ceed6 100644
+index cfa866b..590dced 100644
 --- a/src/cpp/emscripten/glfw3/Window.cpp
 +++ b/src/cpp/emscripten/glfw3/Window.cpp
-@@ -39,6 +39,31 @@ void emscripten_glfw3_window_set_visibility(GLFWwindow *iWindow, bool iVisible);
+@@ -39,8 +39,15 @@ void emscripten_glfw3_window_set_visibility(GLFWwindow *iWindow, bool iVisible);
  int emscripten_glfw3_context_make_canvas_resizable(GLFWwindow *window, char const *canvasResizeSelector, char const *handleSelector);
  int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
  double emscripten_glfw3_context_get_now();
 +void emscripten_glfw3_context_keyboard_lock(bool enable);
 +void emscripten_glfw3_window_resize_offscreen_local(int width, int height);
-+}
-+
-+// GL backend WebGL context hooks. Compile-time symbol prefix selects which
-+// translation layer is linked: krypton_* for Krypton Wrapper / NG-GL4ES,
-+// mobilegl_* for MobileGL (GL 3.3 core -> WebGPU). Pick via -DGL_BACKEND_KRYPTON.
-+#ifdef GL_BACKEND_KRYPTON
-+#define GL_BACKEND_WEBGL_CREATE_CONTEXT          krypton_webgl_create_context
-+#define GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT    krypton_webgl_make_context_current
-+#define GL_BACKEND_WEBGL_DESTROY_CONTEXT         krypton_webgl_destroy_context
-+#else
-+#define GL_BACKEND_WEBGL_CREATE_CONTEXT          mobilegl_webgl_create_context
-+#define GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT    mobilegl_webgl_make_context_current
-+#define GL_BACKEND_WEBGL_DESTROY_CONTEXT         mobilegl_webgl_destroy_context
-+#endif
-+extern "C" {
-+EMSCRIPTEN_WEBGL_CONTEXT_HANDLE GL_BACKEND_WEBGL_CREATE_CONTEXT(const char *target, const EmscriptenWebGLContextAttributes *attributes);
-+EMSCRIPTEN_RESULT GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+EMSCRIPTEN_RESULT GL_BACKEND_WEBGL_DESTROY_CONTEXT(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+#ifndef GL_BACKEND_KRYPTON
-+// MobileGL's WebGPU surface does not auto-resize with the canvas the way a WebGL
-+// drawing buffer does, so the canvas-resize path reconfigures it explicitly.
-+void mobilegl_resize(int width, int height);
-+#endif
  }
  
++// GL backend WebGL context hooks are dispatched at runtime through gl_backend_*
++// (both krypton_* and mobilegl_* symbol sets are linked; the backend is chosen
++// before context creation). See gl_backend.h.
++#include "gl_backend.h"
++
  namespace emscripten::glfw3 {
-@@ -134,7 +159,7 @@ void Window::destroy()
+ 
+ static ErrorHandler &kErrorHandler = ErrorHandler::instance();
+@@ -134,7 +141,7 @@ void Window::destroy()
    {
      addOrRemoveEventListeners(false);
      if(hasGLContext())
 -      emscripten_webgl_destroy_context(fWebGLContextHandle);
-+      GL_BACKEND_WEBGL_DESTROY_CONTEXT(fWebGLContextHandle);
++      gl_backend_webgl_destroy_context(fWebGLContextHandle);
      emscripten_glfw3_window_destroy(asOpaquePtr());
      fDestroyed = true;
    }
-@@ -320,6 +345,19 @@ void Window::setCanvasSize(Vec2<int> const &iSize)
+@@ -320,6 +327,18 @@ void Window::setCanvasSize(Vec2<int> const &iSize)
  
    fFramebufferSize = fbSize;
  
@@ -794,15 +785,14 @@ index cfa866b..06ceed6 100644
 +  // shared mem.
 +  emscripten_glfw3_window_resize_offscreen_local(fFramebufferSize.width, fFramebufferSize.height);
 +
-+#ifndef GL_BACKEND_KRYPTON
 +  // MobileGL (WebGPU): reconfigure the surface to the new framebuffer size.
-+  mobilegl_resize(fFramebufferSize.width, fFramebufferSize.height);
-+#endif
++  // No-op when NG-GL4ES is selected (its WebGL drawing buffer auto-resizes).
++  gl_backend_resize(fFramebufferSize.width, fFramebufferSize.height);
 +
    emscripten_glfw3_window_set_size(asOpaquePtr(), fSize.width, fSize.height, fFramebufferSize.width, fFramebufferSize.height);
  
    if(sizeChanged)
-@@ -361,13 +399,21 @@ void Window::onGlobalMouseMove(EmscriptenMouseEvent const *iEvent)
+@@ -361,13 +380,21 @@ void Window::onGlobalMouseMove(EmscriptenMouseEvent const *iEvent)
  {
    if(isPointerLock())
    {
@@ -829,25 +819,25 @@ index cfa866b..06ceed6 100644
    }
    else
    {
-@@ -488,7 +534,7 @@ bool Window::createGLContext()
+@@ -488,7 +515,7 @@ bool Window::createGLContext()
      attributes.stencil = fConfig.fStencilBits > 0;
      attributes.alpha = fConfig.fAlphaBits > 0;
  
 -    fWebGLContextHandle = emscripten_webgl_create_context(getCanvasSelector(), &attributes);
-+    fWebGLContextHandle = GL_BACKEND_WEBGL_CREATE_CONTEXT(getCanvasSelector(), &attributes);
++    fWebGLContextHandle = gl_backend_webgl_create_context(getCanvasSelector(), &attributes);
      if(fWebGLContextHandle == 0)
      {
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot create GL context for [%s]", getCanvasSelector());
-@@ -506,7 +552,7 @@ void Window::makeGLContextCurrent() const
+@@ -506,7 +533,7 @@ void Window::makeGLContextCurrent() const
  {
    if(hasGLContext())
    {
 -    if(emscripten_webgl_make_context_current(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
-+    if(GL_BACKEND_WEBGL_MAKE_CONTEXT_CURRENT(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
++    if(gl_backend_webgl_make_context_current(fWebGLContextHandle) != EMSCRIPTEN_RESULT_SUCCESS)
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot make GL context current for [%s]", getCanvasSelector());
    }
  }
-@@ -642,6 +688,11 @@ void Window::setInputMode(int iMode, int iValue)
+@@ -642,6 +669,11 @@ void Window::setInputMode(int iMode, int iValue)
  //------------------------------------------------------------------------
  void Window::setCursorMode(glfw_cursor_mode_t iCursorMode)
  {
@@ -859,7 +849,7 @@ index cfa866b..06ceed6 100644
    if(fMouse.fCursorMode == iCursorMode)
      return;
  
-@@ -683,7 +734,14 @@ void Window::onPointerLock()
+@@ -683,7 +715,14 @@ void Window::onPointerLock()
    fMouse.fCursorLockResidual = {};
    fMouse.fCursorPosBeforePointerLock = fMouse.fCursorPos;
    fMouse.fCursorMode = GLFW_CURSOR_DISABLED;
@@ -874,7 +864,7 @@ index cfa866b..06ceed6 100644
  }
  
  //------------------------------------------------------------------------
-@@ -695,9 +753,15 @@ bool Window::onPointerUnlock(std::optional<glfw_cursor_mode_t> iCursorMode)
+@@ -695,9 +734,15 @@ bool Window::onPointerUnlock(std::optional<glfw_cursor_mode_t> iCursorMode)
    {
      auto cursorMode = iCursorMode ? *iCursorMode : GLFW_CURSOR_NORMAL;
      fMouse.fCursorMode = cursorMode;
@@ -890,7 +880,7 @@ index cfa866b..06ceed6 100644
      return true;
    }
    return false;
-@@ -754,6 +818,12 @@ bool Window::onMouseButtonDown(int iGLFWButton)
+@@ -754,6 +799,12 @@ bool Window::onMouseButtonDown(int iGLFWButton)
      if(fFocusOnMouse && !isFocused())
        focus();
  
@@ -903,7 +893,7 @@ index cfa866b..06ceed6 100644
      if(fMouse.fButtonCallback)
        fMouse.fButtonCallback(asOpaquePtr(), fMouse.fLastButton, fMouse.fLastButtonState, fKeyboard.computeModifierBits());
    }
-@@ -988,4 +1058,4 @@ int Window::unmakeCanvasResizable()
+@@ -988,4 +1039,4 @@ int Window::unmakeCanvasResizable()
  }
  
  
@@ -922,40 +912,174 @@ index 57505dd..685f683 100644
  
    // mouse
    inline void getCursorPos(double *oXPos, double *oYPos) const {
+diff --git a/src/cpp/emscripten/glfw3/gl_backend.h b/src/cpp/emscripten/glfw3/gl_backend.h
+new file mode 100644
+index 0000000..794c7b7
+--- /dev/null
++++ b/src/cpp/emscripten/glfw3/gl_backend.h
+@@ -0,0 +1,62 @@
++// gl_backend.h - runtime-selectable GL translation backend for the ikvm build.
++//
++// Historically emscripten-glfw picked its GL backend at COMPILE time via
++// -DGL_BACKEND_KRYPTON (krypton_* for NG-GL4ES/WebGL, mobilegl_* for MobileGL/WebGPU).
++// The ikvm build now links BOTH backends into one libglfw3.a and chooses between them
++// at RUNTIME, before the first GL context is created. The consumer selects a backend
++// with gl_backend_select() (see ikvm_gl_init) based on its own heuristic
++// (e.g. Minecraft version + user toggle).
++//
++// There is deliberately NO default backend: any GL context operation attempted while
++// the backend is still GL_BACKEND_UNSET aborts, so a missing selection fails loudly
++// instead of silently rendering through the wrong backend.
++#ifndef EMSCRIPTEN_GLFW3_GL_BACKEND_H
++#define EMSCRIPTEN_GLFW3_GL_BACKEND_H
++
++#include <emscripten/html5.h>
++#include <emscripten/html5_webgl.h>
++
++enum {
++  GL_BACKEND_UNSET    = -1,
++  GL_BACKEND_NG_GL4ES = 0,  // Krypton Wrapper / NG-GL4ES              -> WebGL
++  GL_BACKEND_MOBILEGL = 1,  // MobileGL (GL 3.3 core -> WebGPU) + SFPEW
++};
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// --- Backend entry points (both symbol sets are linked into libglfw3.a) -----
++// NG-GL4ES / Krypton Wrapper:
++EMSCRIPTEN_WEBGL_CONTEXT_HANDLE krypton_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
++EMSCRIPTEN_RESULT               krypton_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++EMSCRIPTEN_RESULT               krypton_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++void*                           krypton_get_proc_address(const char *name);
++void                            krypton_proc_init(void);
++// MobileGL (GL 3.3 core -> WebGPU) + SimpleFPEWrapper:
++EMSCRIPTEN_WEBGL_CONTEXT_HANDLE mobilegl_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
++EMSCRIPTEN_RESULT               mobilegl_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++EMSCRIPTEN_RESULT               mobilegl_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++void*                           mobilegl_get_proc_address(const char *name);
++void                            mobilegl_present(void);
++void                            mobilegl_resize(int width, int height);
++void                            mobilegl_proc_init(void);
++
++// --- Runtime selector -------------------------------------------------------
++// Choose a backend BEFORE the first glfwCreateWindow()/makeGLContextCurrent().
++void gl_backend_select(int backend);   // GL_BACKEND_NG_GL4ES | GL_BACKEND_MOBILEGL
++int  gl_backend_current(void);
++void gl_backend_proc_init(void);       // initialize the currently-selected backend
++
++// --- Unified dispatchers (the patched emscripten-glfw seam calls these) -----
++EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl_backend_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
++EMSCRIPTEN_RESULT               gl_backend_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++EMSCRIPTEN_RESULT               gl_backend_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
++void*                           gl_backend_get_proc_address(const char *name);
++void                            gl_backend_resize(int width, int height);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // EMSCRIPTEN_GLFW3_GL_BACKEND_H
 diff --git a/src/cpp/glfw3.cpp b/src/cpp/glfw3.cpp
-index 8475a25..b3deca5 100644
+index 8475a25..7605ffd 100644
 --- a/src/cpp/glfw3.cpp
 +++ b/src/cpp/glfw3.cpp
-@@ -19,7 +19,10 @@
+@@ -19,7 +19,13 @@
  #include "../../include/GLFW/emscripten_glfw3.h"
  #include "../../include/GLFW/emscripten_glfw3_version.h"
  #include "emscripten/glfw3/Context.h"
++#include "emscripten/glfw3/gl_backend.h"
 +#include <emscripten.h>
++#include <emscripten/console.h>
 +#include <emscripten/html5_webgl.h>
++#include <cstdlib>
  #include <memory>
 +#include <stdint.h>
  #include "emscripten/glfw3/ErrorHandler.h"
  #include "emscripten/glfw3/Keyboard.h"
  
-@@ -117,6 +120,17 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
+@@ -117,6 +123,80 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
  extern "C" {
  #endif
  
-+// The GL translation backend's proc-address entry point. The symbol prefix
-+// is selected at compile time so the resulting wasm makes it obvious which
-+// backend is linked (krypton_* for Krypton Wrapper / NG-GL4ES, otherwise
-+// mobilegl_* for MobileGL / WebGPU).
-+#ifdef GL_BACKEND_KRYPTON
-+#define GL_BACKEND_GET_PROC_ADDRESS krypton_get_proc_address
-+#else
-+#define GL_BACKEND_GET_PROC_ADDRESS mobilegl_get_proc_address
-+#endif
-+void* GL_BACKEND_GET_PROC_ADDRESS(const char* name);
++// Runtime GL-backend dispatch. Both krypton_* (NG-GL4ES/WebGL) and mobilegl_*
++// (MobileGL/WebGPU) are linked; gl_backend_select() (via ikvm_gl_init) picks one
++// before the first GL context is created. No default: an op attempted while unset
++// aborts so a missing selection fails loudly. Declarations live in gl_backend.h.
++static int g_gl_backend = GL_BACKEND_UNSET;
++
++static void gl_backend_require_selected()
++{
++  if(g_gl_backend != GL_BACKEND_NG_GL4ES && g_gl_backend != GL_BACKEND_MOBILEGL)
++  {
++    emscripten_console_error("[gl_backend] no GL backend selected before a GL context "
++                             "operation (call ikvm_gl_init / gl_backend_select first)");
++    abort();
++  }
++}
++
++void gl_backend_select(int backend) { g_gl_backend = backend; }
++int  gl_backend_current(void)       { return g_gl_backend; }
++
++void gl_backend_proc_init(void)
++{
++  gl_backend_require_selected();
++  if(g_gl_backend == GL_BACKEND_NG_GL4ES) krypton_proc_init();
++  else                                    mobilegl_proc_init();
++}
++
++EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl_backend_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes)
++{
++  gl_backend_require_selected();
++  return g_gl_backend == GL_BACKEND_NG_GL4ES
++           ? krypton_webgl_create_context(target, attributes)
++           : mobilegl_webgl_create_context(target, attributes);
++}
++
++EMSCRIPTEN_RESULT gl_backend_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context)
++{
++  gl_backend_require_selected();
++  return g_gl_backend == GL_BACKEND_NG_GL4ES
++           ? krypton_webgl_make_context_current(context)
++           : mobilegl_webgl_make_context_current(context);
++}
++
++EMSCRIPTEN_RESULT gl_backend_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context)
++{
++  gl_backend_require_selected();
++  return g_gl_backend == GL_BACKEND_NG_GL4ES
++           ? krypton_webgl_destroy_context(context)
++           : mobilegl_webgl_destroy_context(context);
++}
++
++void* gl_backend_get_proc_address(const char *name)
++{
++  gl_backend_require_selected();
++  return g_gl_backend == GL_BACKEND_NG_GL4ES
++           ? krypton_get_proc_address(name)
++           : mobilegl_get_proc_address(name);
++}
++
++void gl_backend_resize(int width, int height)
++{
++  // Only MobileGL's WebGPU surface needs an explicit reconfigure; NG-GL4ES's
++  // WebGL drawing buffer auto-resizes with the canvas.
++  if(g_gl_backend == GL_BACKEND_MOBILEGL)
++    mobilegl_resize(width, height);
++}
++
++// Canonical GL/EGL proc-address entry points that LWJGL resolves out of libGL.so.1
++// (org.lwjgl.opengl.GL.create() takes glXGetProcAddress on the Linux path, with an
++// eglGetProcAddress fallback). Owned by the dispatcher — NOT by a specific backend —
++// so the pointers handed to LWJGL always match the currently-selected backend.
++void* glXGetProcAddress(const char *name)    { return gl_backend_get_proc_address(name); }
++void* glXGetProcAddressARB(const char *name) { return gl_backend_get_proc_address(name); }
++void* eglGetProcAddress(const char *name)    { return gl_backend_get_proc_address(name); }
 +
  //------------------------------------------------------------------------
  // glfwInit
  //------------------------------------------------------------------------
-@@ -1310,21 +1324,80 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
+@@ -1310,21 +1390,80 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
  //------------------------------------------------------------------------
  GLFWAPI const GLFWvidmode* glfwGetVideoModes(GLFWmonitor* monitor, int* count)
  {
@@ -1041,7 +1165,7 @@ index 8475a25..b3deca5 100644
  GLFWAPI void glfwIconifyWindow(GLFWwindow* window) { logNotImplemented("glfwIconifyWindow"); }
  GLFWAPI void glfwRestoreWindow(GLFWwindow* window) { logNotImplemented("glfwRestoreWindow"); }
  GLFWAPI void glfwMaximizeWindow(GLFWwindow* window) { logNotImplemented("glfwMaximizeWindow"); }
-@@ -1336,7 +1409,19 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
+@@ -1336,7 +1475,19 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
  GLFWAPI GLFWwindowiconifyfun glfwSetWindowIconifyCallback(GLFWwindow* window, GLFWwindowiconifyfun callback) { logNotImplemented("glfwSetWindowIconifyCallback"); return callback; }
  GLFWAPI GLFWwindowmaximizefun glfwSetWindowMaximizeCallback(GLFWwindow* window, GLFWwindowmaximizefun callback) { logNotImplemented("glfwSetWindowMaximizeCallback"); return callback; }
  GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* window, GLFWdropfun callback) { logNotImplemented("glfwSetDropCallback"); return callback; }
@@ -1056,18 +1180,48 @@ index 8475a25..b3deca5 100644
 +
 +GLFWAPI GLFWglproc emscripten_glfw3_get_proc_address(const char* procname)
 +{
-+  return reinterpret_cast<GLFWglproc>(GL_BACKEND_GET_PROC_ADDRESS(procname));
++  return reinterpret_cast<GLFWglproc>(gl_backend_get_proc_address(procname));
 +}
 +
  // GLFWAPI GLFWglproc glfwGetProcAddress(const char* procname) { logNotImplemented("glfwGetProcAddress"); } implemented by emscripten GL
  GLFWAPI int glfwVulkanSupported(void) { return GLFW_FALSE; }
  GLFWAPI const char** glfwGetRequiredInstanceExtensions(uint32_t* count) { logNotImplemented("glfwGetRequiredInstanceExtensions"); *count = 0; return nullptr; }
-@@ -1509,4 +1594,4 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
+@@ -1509,4 +1660,34 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
    };
  }
  
 -}
 \ No newline at end of file
++}
++
++//------------------------------------------------------------------------
++// ikvm: inert stubs for the GLFW-IME (preedit) extension.
++//
++// LWJGL 3.4 ships bindings for the GLFW IME/preedit fork that Minecraft's LWJGL uses for CJK /
++// composed text input (com.mojang.blaze3d.platform.InputConstants.setupKeyboardCallbacks).
++// emscripten-glfw does not implement these; LWJGL resolves them with apiGetFunctionAddressOptional
++// (0 when absent) and then NPEs on its own null-address check the moment Minecraft calls one.
++// IME/preedit isn't supported on the web backend anyway, so expose no-op stubs (with C linkage so
++// the symbol names match) purely so the addresses resolve. Signatures use void*/int to match the
++// call ABI without pulling in the fork's GLFWpreedit*/GLFWimestatus* typedefs (absent here).
++//------------------------------------------------------------------------
++extern "C" {
++
++void *glfwSetPreeditCallback(void *window, void *cbfun) { (void) window; (void) cbfun; return nullptr; }
++void *glfwSetIMEStatusCallback(void *window, void *cbfun) { (void) window; (void) cbfun; return nullptr; }
++void *glfwSetPreeditCandidateCallback(void *window, void *cbfun) { (void) window; (void) cbfun; return nullptr; }
++void glfwSetPreeditCursorRectangle(void *window, int x, int y, int w, int h) { (void) window; (void) x; (void) y; (void) w; (void) h; }
++void glfwGetPreeditCursorRectangle(void *window, int *x, int *y, int *w, int *h)
++{
++  (void) window;
++  if(x) *x = 0;
++  if(y) *y = 0;
++  if(w) *w = 0;
++  if(h) *h = 0;
++}
++void glfwResetPreeditText(void *window) { (void) window; }
++unsigned int *glfwGetPreeditCandidate(void *window, int index, int *textCount) { (void) window; (void) index; if(textCount) *textCount = 0; return nullptr; }
++
 +}
 diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
 index 0cfd23c..37b41ec 100644
