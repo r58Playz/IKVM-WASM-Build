@@ -224,6 +224,41 @@ index b13beac47..521baa20c 100644
              }
              catch (NoSuchMethodException x)
              {
+diff --git a/src/IKVM.Java/local/ikvm/lang/LinkTrustPolicy.java b/src/IKVM.Java/local/ikvm/lang/LinkTrustPolicy.java
+new file mode 100644
+index 000000000..0b139ad2b
+--- /dev/null
++++ b/src/IKVM.Java/local/ikvm/lang/LinkTrustPolicy.java
+@@ -0,0 +1,29 @@
++package ikvm.lang;
++
++/**
++ * Extension point for class loaders running under IKVM's lazy (OpenJDK-aligned) linking mode.
++ *
++ * When lazy linking is enabled (IKVM_LAZY_CLASS_LOADING), the runtime never invokes a user
++ * class loader's loadClass while linking a class's constant pool or member signatures; references
++ * to classes that are not yet loaded are instead resolved lazily at the first execution of the
++ * referencing instruction, matching HotSpot's resolution timing (JVMS 5.4.3). Such lazily
++ * resolved call sites carry a permanent indirection cost.
++ *
++ * A class loader may implement this interface to declare that eagerly loading certain class
++ * names through it is unobservable: loading them runs no bytecode transformation, has no side
++ * effects, and always yields the same class regardless of timing (for example names served
++ * directly from statically compiled assemblies). For such names the runtime is allowed to
++ * invoke loadClass eagerly at link time, producing a direct (full speed) binding.
++ *
++ * Implementations must be side-effect free and must not load or define classes.
++ */
++public interface LinkTrustPolicy
++{
++
++    /**
++     * Returns true if the given class name (binary name, e.g. "com.google.common.base.Joiner")
++     * may be loaded eagerly through this loader at link time without observable effects.
++     */
++    boolean isEagerLinkSafe(String name);
++
++}
 diff --git a/src/IKVM.Java/local/java/util/zip/ZipFile.java b/src/IKVM.Java/local/java/util/zip/ZipFile.java
 index 163ad9935..daa49808f 100644
 --- a/src/IKVM.Java/local/java/util/zip/ZipFile.java
@@ -513,11 +548,295 @@ index 000000000..50d9e5cdf
 +#endif
 +
 +}
+diff --git a/src/IKVM.Runtime/Annotation.cs b/src/IKVM.Runtime/Annotation.cs
+index 66ec184db..ca640033c 100644
+--- a/src/IKVM.Runtime/Annotation.cs
++++ b/src/IKVM.Runtime/Annotation.cs
+@@ -100,7 +100,9 @@ internal static Annotation Load(RuntimeJavaType owner, object[] def)
+ 
+             if (ClassFile.IsValidFieldDescriptor(annotationClass))
+             {
+-                var tw = owner.ClassLoader.RetTypeWrapperFromSig(annotationClass.Replace('/', '.'), LoadMode.Link);
++                // under lazy linking we may not eagerly invoke a user class loader for the annotation type
++                var mode = JVM.LazyClassLoading && owner.ClassLoader.InvokesUserLoadClass ? LoadMode.LinkLazy : LoadMode.Link;
++                var tw = owner.ClassLoader.RetTypeWrapperFromSig(annotationClass.Replace('/', '.'), mode);
+                 // Java allows inaccessible annotations to be used, so when the annotation isn't visible
+                 // we fall back to using the DynamicAnnotationAttribute.
+                 if (!tw.IsUnloadable && tw.IsAccessibleFrom(owner))
 diff --git a/src/IKVM.Runtime/ByteCodeHelper.cs b/src/IKVM.Runtime/ByteCodeHelper.cs
-index 463e8da14..ffd7b69f2 100644
+index 463e8da14..c0cc478aa 100644
 --- a/src/IKVM.Runtime/ByteCodeHelper.cs
 +++ b/src/IKVM.Runtime/ByteCodeHelper.cs
-@@ -1574,51 +1574,45 @@ internal bool TrySetType(global::java.lang.invoke.MethodType newType)
+@@ -38,6 +38,7 @@ Jeroen Frijters
+ using Type = IKVM.Reflection.Type;
+ #else
+ using System.Reflection;
++using System.Reflection.Emit;
+ #endif
+ 
+ #if EXPORTER == false
+@@ -365,6 +366,24 @@ public static T DynamicBinderMemberLookup<T>(int kind, string clazz, string name
+ #if FIRST_PASS
+             throw new NotImplementedException();
+ #else
++#if !IMPORTER
++            // fast path: resolve the member and compile a small direct-call thunk instead of going
++            // through the MethodHandle/LambdaForm machinery; shapes the thunk builder cannot handle
++            // (missing members, CallerID, ghost/remapped receivers, packed-arg delegates, volatile
++            // fields, access errors) fall through to the MethodHandle path below, which also
++            // produces the correct linkage errors
++            try
++            {
++                var direct = TryCreateDirectBinderDelegate<T>((MethodHandleKind)kind, clazz, name, sig, callerID);
++                if (direct != null)
++                    return direct;
++            }
++            catch (RetargetableJavaException e)
++            {
++                throw e.ToJava();
++            }
++#endif
++
+             try
+             {
+                 var mh = DynamicLoadMethodHandleImpl(kind, clazz, name, sig, callerID);
+@@ -389,6 +408,235 @@ public static T DynamicBinderMemberLookup<T>(int kind, string clazz, string name
+ #endif
+         }
+ 
++#if !FIRST_PASS && !IMPORTER
++
++        /// <summary>
++        /// Attempts to resolve the member referenced by a __dynamic_* call site and compile a small
++        /// DynamicMethod thunk with the call site delegate's exact signature that casts and invokes
++        /// the member directly. Returns null for any shape it cannot handle; the caller then falls
++        /// back to the MethodHandle path, which also produces the correct linkage errors.
++        /// </summary>
++        static T TryCreateDirectBinderDelegate<T>(MethodHandleKind kind, string clazz, string name, string sig, ikvm.@internal.CallerID callerID)
++            where T : class, Delegate
++        {
++            var context = JVM.Context;
++            var tw = LoadTypeWrapper(clazz, callerID);
++            if (tw.IsGhost || tw.IsRemapped || tw.IsNonPrimitiveValueType || tw.IsFakeTypeContainer)
++                return null;
++
++            var caller = RuntimeJavaType.FromClass(callerID.getCallerClass());
++            var invoke = context.MethodHandleUtil.GetDelegateInvokeMethod(typeof(T));
++            var dp = invoke.GetParameters();
++
++            RuntimeJavaMethod mw = null;
++            RuntimeJavaField fw = null;
++            RuntimeJavaType[] args;
++            RuntimeJavaType ret;
++            bool hasReceiver;
++
++            switch (kind)
++            {
++                case MethodHandleKind.InvokeStatic:
++                case MethodHandleKind.InvokeVirtual:
++                case MethodHandleKind.InvokeInterface:
++                case MethodHandleKind.NewInvokeSpecial:
++                    mw = tw.GetMethod(name, sig, kind != MethodHandleKind.NewInvokeSpecial);
++                    if (mw == null || mw.HasCallerID || mw.IsFinalizeOrClone)
++                        return null;
++                    mw.Link();
++                    if (!mw.IsAccessibleFrom(tw, caller, tw))
++                        return null;
++                    if (kind == MethodHandleKind.InvokeStatic ? !mw.IsStatic : mw.IsStatic)
++                        return null;
++                    if (kind == MethodHandleKind.NewInvokeSpecial && (!mw.IsConstructor || tw.IsAbstract))
++                        return null;
++                    if ((kind == MethodHandleKind.InvokeVirtual || kind == MethodHandleKind.InvokeInterface) && mw.IsConstructor)
++                        return null;
++                    hasReceiver = kind == MethodHandleKind.InvokeVirtual || kind == MethodHandleKind.InvokeInterface;
++                    args = mw.GetParameters();
++                    ret = kind == MethodHandleKind.NewInvokeSpecial ? tw : mw.ReturnType;
++                    break;
++                case MethodHandleKind.GetField:
++                case MethodHandleKind.GetStatic:
++                case MethodHandleKind.PutField:
++                case MethodHandleKind.PutStatic:
++                    fw = tw.GetFieldWrapper(name, sig);
++                    if (fw == null)
++                        return null;
++                    fw.Link();
++                    if (!fw.IsAccessibleFrom(tw, caller, tw))
++                        return null;
++                    var isStaticKind = kind == MethodHandleKind.GetStatic || kind == MethodHandleKind.PutStatic;
++                    var isPut = kind == MethodHandleKind.PutField || kind == MethodHandleKind.PutStatic;
++                    if (fw.IsStatic != isStaticKind)
++                        return null;
++                    // preserve the MethodHandle path's final-field error and volatile access semantics
++                    if (isPut && fw.IsFinal)
++                        return null;
++                    if (fw.IsVolatile)
++                        return null;
++                    hasReceiver = !isStaticKind;
++                    args = isPut ? new[] { fw.FieldTypeWrapper } : Array.Empty<RuntimeJavaType>();
++                    ret = isPut ? context.PrimitiveJavaTypeFactory.VOID : fw.FieldTypeWrapper;
++                    break;
++                default:
++                    return null;
++            }
++
++            var firstArg = hasReceiver ? 1 : 0;
++
++            // a length mismatch means the delegate uses packed args (arity > MaxArity)
++            if (dp.Length != firstArg + args.Length)
++                return null;
++
++            if (hasReceiver && (dp[0].ParameterType.IsValueType || tw.TypeAsSignatureType.IsValueType))
++                return null;
++            for (int i = 0; i < args.Length; i++)
++                if (!CanEmitDirectBinderConversion(dp[firstArg + i].ParameterType, args[i]))
++                    return null;
++            if (!CanEmitDirectBinderReturn(ret, invoke.ReturnType, context))
++                return null;
++
++            // the DynamicMethod signature and body must not reference unbaked types (unloadable
++            // signature types are already erased to object and cannot be finished), and the member
++            // must be re-resolved from its builder to the baked runtime member
++            tw.Finish();
++            foreach (var arg in args)
++                if (!arg.IsUnloadable)
++                    arg.Finish();
++            if (!ret.IsUnloadable)
++                ret.Finish();
++
++            if (mw != null)
++            {
++                mw.DeclaringType.Finish();
++                mw.ResolveMethod();
++            }
++            else
++            {
++                fw.DeclaringType.Finish();
++                fw.ResolveField();
++            }
++
++            Profiler.Count("DynamicBinderDirect");
++
++            // owning the DynamicMethod with the target type can run the target's class initializer
++            // at delegate creation; that matches JVMS timing for the kinds that must initialize on
++            // first execution (we are inside the referencing instruction's first execution), but
++            // getfield/invokevirtual/invokeinterface must never trigger initialization (JVMS §5.5)
++            var initializes = kind == MethodHandleKind.InvokeStatic || kind == MethodHandleKind.NewInvokeSpecial
++                || kind == MethodHandleKind.GetStatic || kind == MethodHandleKind.PutStatic;
++            var owner = initializes ? tw.TypeAsBaseType : typeof(ByteCodeHelper);
++            if (!ReflectUtil.CanOwnDynamicMethod(owner))
++                owner = typeof(ByteCodeHelper);
++
++            var dpTypes = new Type[dp.Length];
++            for (int i = 0; i < dp.Length; i++)
++                dpTypes[i] = dp[i].ParameterType;
++
++            var dm = new DynamicMethod($"__<>DynamicBinder__{tw.Name}__{name}", invoke.ReturnType, dpTypes, owner, true);
++            var ilgen = context.CodeEmitterFactory.Create(dm);
++
++            if (hasReceiver)
++            {
++                ilgen.EmitLdarg(0);
++                if (dpTypes[0] != tw.TypeAsSignatureType)
++                    tw.EmitCheckcast(ilgen);
++            }
++
++            for (int i = 0; i < args.Length; i++)
++            {
++                ilgen.EmitLdarg(firstArg + i);
++                EmitDirectBinderConversion(ilgen, dpTypes[firstArg + i], args[i]);
++            }
++
++            if (mw != null)
++            {
++                if (kind == MethodHandleKind.NewInvokeSpecial)
++                    mw.EmitNewobj(ilgen);
++                else if (hasReceiver)
++                    mw.EmitCallvirt(ilgen);
++                else
++                    mw.EmitCall(ilgen);
++            }
++            else if (kind == MethodHandleKind.GetField || kind == MethodHandleKind.GetStatic)
++            {
++                fw.EmitGet(ilgen);
++            }
++            else
++            {
++                fw.EmitSet(ilgen);
++            }
++
++            EmitDirectBinderReturn(ilgen, ret, invoke.ReturnType, context);
++
++            ilgen.Emit(OpCodes.Ret);
++            ilgen.DoEmit();
++
++            return (T)dm.CreateDelegate(typeof(T));
++        }
++
++        static bool CanEmitDirectBinderConversion(Type have, RuntimeJavaType want)
++        {
++            if (want.IsUnloadable)
++                return !have.IsValueType;
++
++            var wantType = want.TypeAsSignatureType;
++            if (have == wantType)
++                return true;
++
++            if (want.IsGhost)
++                return !have.IsValueType;
++
++            // primitive and value-type shapes must match exactly; everything else is a reference cast
++            if (want.IsPrimitive || wantType.IsValueType || have.IsValueType)
++                return false;
++
++            return true;
++        }
++
++        static void EmitDirectBinderConversion(CodeEmitter ilgen, Type have, RuntimeJavaType want)
++        {
++            if (want.IsUnloadable || have == want.TypeAsSignatureType)
++                return;
++
++            want.EmitCheckcast(ilgen);
++            if (want.IsGhost)
++                want.EmitConvStackTypeToSignatureType(ilgen, null);
++        }
++
++        static bool CanEmitDirectBinderReturn(RuntimeJavaType ret, Type want, RuntimeContext context)
++        {
++            if (ret == context.PrimitiveJavaTypeFactory.VOID)
++                return want == typeof(void);
++
++            var retType = ret.TypeAsSignatureType;
++            if (retType == want)
++                return true;
++
++            if (ret.IsGhost)
++                return !want.IsValueType;
++
++            if (ret.IsPrimitive || retType.IsValueType || want.IsValueType)
++                return false;
++
++            return true;
++        }
++
++        static void EmitDirectBinderReturn(CodeEmitter ilgen, RuntimeJavaType ret, Type want, RuntimeContext context)
++        {
++            if (ret == context.PrimitiveJavaTypeFactory.VOID || ret.TypeAsSignatureType == want)
++                return;
++
++            if (ret.IsGhost)
++                ret.EmitConvSignatureTypeToStackType(ilgen);
++
++            if (want != typeof(object) && !want.IsValueType)
++                ilgen.EmitCastclass(want);
++        }
++
++#endif
++
+         [DebuggerStepThrough]
+         public static Delegate DynamicCreateDelegate(object obj, Type delegateType, string name, string sig)
+         {
+@@ -1574,51 +1822,45 @@ internal bool TrySetType(global::java.lang.invoke.MethodType newType)
  
  #endif
  
@@ -2617,10 +2936,24 @@ index 589833449..a9198569d 100644
          if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
              p["jdk.lang.Process.launchMechanism"] = "FORK";
 diff --git a/src/IKVM.Runtime/JVM.cs b/src/IKVM.Runtime/JVM.cs
-index b3c9d17bc..843bbe0dc 100644
+index b3c9d17bc..716323dc5 100644
 --- a/src/IKVM.Runtime/JVM.cs
 +++ b/src/IKVM.Runtime/JVM.cs
-@@ -169,6 +169,7 @@ internal static Exception GetPendingException()
+@@ -26,6 +26,13 @@ public static partial class JVM
+         internal static bool RelaxedVerification = true;
+         internal static bool AllowNonVirtualCalls;
+         internal static readonly bool DisableEagerClassLoading = SafeGetEnvironmentVariable("IKVM_DISABLE_EAGER_CLASS_LOADING") != null;
++        // OpenJDK-aligned lazy linking for classes defined by user Java class loaders: constant pool
++        // and member signatures link without invoking user loadClass; unresolved references fall back
++        // to the __dynamic_* stubs which resolve at first execution (JVMS §5.4.3 timing).
++        internal static readonly bool LazyClassLoading = SafeGetEnvironmentVariable("IKVM_LAZY_CLASS_LOADING") != null;
++        // logs every invocation of a Java class loader's loadClass with the loader's type, for
++        // diffing load order/set against a real JVM run with -verbose:class
++        internal static readonly bool TraceLoadClass = SafeGetEnvironmentVariable("IKVM_TRACE_LOADCLASS") != null;
+ #endif
+ 
+         /// <summary>
+@@ -169,6 +176,7 @@ internal static Exception GetPendingException()
          /// <param name="e"></param>
          internal static void SetPendingException(Exception e)
          {
@@ -2824,11 +3157,116 @@ index f5afd4c8c..6a1e08583 100644
  
      }
  
+diff --git a/src/IKVM.Runtime/Java/Externs/java/lang/Runtime.cs b/src/IKVM.Runtime/Java/Externs/java/lang/Runtime.cs
+index c2eed832a..10093b5ac 100644
+--- a/src/IKVM.Runtime/Java/Externs/java/lang/Runtime.cs
++++ b/src/IKVM.Runtime/Java/Externs/java/lang/Runtime.cs
+@@ -23,6 +23,8 @@ Jeroen Frijters
+ */
+ using System;
+ 
++using IKVM.Runtime;
++
+ namespace IKVM.Java.Externs.java.lang
+ {
+ 
+@@ -34,22 +36,68 @@ public static int availableProcessors(object thisRuntime)
+             return Environment.ProcessorCount;
+         }
+ 
++        /// <summary>
++        /// Reads the managed heap's committed and free sizes from the GC's cached
++        /// statistics. This is an O(1) read of the values recorded at the end of the
++        /// last collection; it does NOT walk the heap. (GC.GetTotalMemory, previously
++        /// used here, resolves on mono/sgen to a full iteration of every object in the
++        /// major heap plus a forced concurrent-sweep finish, which is far too expensive
++        /// to run on every Runtime.totalMemory()/freeMemory() call.)
++        /// </summary>
++        static (long total, long free) GetHeapInfo()
++        {
++#if NETFRAMEWORK
++            // Desktop .NET Framework only (never the WASM target): GetTotalMemory(false) is
++            // a cheap cached read here — the expensive sgen heap-walk is mono-specific — so
++            // the legacy behavior is fine and GetGCMemoryInfo isn't available anyway.
++            return (GC.GetTotalMemory(false), 0);
++#else
++            var info = GC.GetGCMemoryInfo();
++            var total = info.HeapSizeBytes;
++            var free = info.FragmentedBytes;
++
++            // Before the first GC the cached stats are zero. Nothing has been collected
++            // yet, so the cumulative allocated byte count approximates the live set; use
++            // it as "used" with no known free headroom. This self-corrects once the first
++            // collection runs. GetTotalAllocatedBytes(false) is a cheap counter read.
++            if (total <= 0)
++                return (GC.GetTotalAllocatedBytes(false), 0);
++
++            return (total, free);
++#endif
++        }
++
+         public static long freeMemory(object thisRuntime)
+         {
+-            // TODO figure out if there is anything meaningful we can return here
+-            return 10 * 1024 * 1024;
++            return GetHeapInfo().free;
+         }
+ 
+         public static long totalMemory(object thisRuntime)
+         {
+-            // NOTE this really is a bogus number, but we have to return something
+-            return GC.GetTotalMemory(false) + freeMemory(thisRuntime);
++            return GetHeapInfo().total;
+         }
+ 
+         public static long maxMemory(object thisRuntime)
+         {
+-            // spec says: If there is no inherent limit then the value Long.MAX_VALUE will be returned.
+-            return Int64.MaxValue;
++#if FIRST_PASS
++            throw new NotImplementedException();
++#else
++            // On WASM this is the linear-memory ceiling (the module's MAXIMUM_MEMORY):
++            // how far the heap can grow, the honest analogue of the JVM's -Xmx.
++            var max = LibIkvm.Instance.get_heap_max();
++            if (max > 0)
++                return max;
++
++            // Not a WASM build (or the runtime can't report a ceiling): fall back to the
++            // GC's notion of total available memory, else Long.MAX_VALUE. The spec says:
++            // if there is no inherent limit then Long.MAX_VALUE is returned.
++#if NETFRAMEWORK == false
++            var avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
++            if (avail > 0)
++                return avail;
++#endif
++            return long.MaxValue;
++#endif
+         }
+ 
+         public static void gc(object thisRuntime)
 diff --git a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs b/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
-index e9f3aa23d..e46bd67d5 100644
+index e9f3aa23d..5fd3cee7f 100644
 --- a/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
 +++ b/src/IKVM.Runtime/Java/Externs/java/lang/invoke/MethodHandleNatives.cs
-@@ -419,7 +419,7 @@ public static long objectFieldOffset(global::java.lang.invoke.MemberName self)
+@@ -129,13 +129,14 @@ static void InitMethodImpl(global::java.lang.invoke.MemberName self, RuntimeJava
+             global::java.lang.Class[] parameters = new global::java.lang.Class[mw.GetParameters().Length + firstParam];
+             for (int i = 0; i < mw.GetParameters().Length; i++)
+             {
+-                parameters[i + firstParam] = mw.GetParameters()[i].ClassObject;
++                parameters[i + firstParam] = mw.GetParameters()[i].EnsureLoadable(mw.DeclaringType.ClassLoader).ClassObject;
+             }
+             if (!mw.IsStatic)
+             {
+                 parameters[0] = mw.DeclaringType.ClassObject;
+             }
+-            self.vmtarget = CreateMemberNameDelegate(mw, mw.ReturnType.ClassObject, !wantSpecial, global::java.lang.invoke.MethodType.methodType(mw.ReturnType.ClassObject, parameters));
++            var returnClass = mw.ReturnType.EnsureLoadable(mw.DeclaringType.ClassLoader).ClassObject;
++            self.vmtarget = CreateMemberNameDelegate(mw, returnClass, !wantSpecial, global::java.lang.invoke.MethodType.methodType(returnClass, parameters));
+ #endif
+         }
+ 
+@@ -419,7 +420,7 @@ public static long objectFieldOffset(global::java.lang.invoke.MemberName self)
              if (fw.IsStatic)
                  throw new global::java.lang.IllegalArgumentException();
  
@@ -2837,7 +3275,7 @@ index e9f3aa23d..e46bd67d5 100644
  #endif
          }
  
-@@ -538,4 +538,4 @@ public static int getNamedCon(int which, object[] name)
+@@ -538,4 +539,4 @@ public static int getNamedCon(int which, object[] name)
  
      }
  
@@ -2866,7 +3304,7 @@ index 0322f2275..c9db1de29 100644
  		{
  #if !FIRST_PASS
 diff --git a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
-index 50a0078d2..064ef0797 100644
+index 50a0078d2..a67dafb2c 100644
 --- a/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
 +++ b/src/IKVM.Runtime/Java/Externs/sun/misc/Unsafe.cs
 @@ -1,4 +1,7 @@
@@ -2878,7 +3316,7 @@ index 50a0078d2..064ef0797 100644
  using System.Linq;
  using System.Linq.Expressions;
  using System.Reflection;
-@@ -68,6 +71,432 @@ public ArrayDelegateRef(RuntimeJavaType type)
+@@ -68,6 +71,433 @@ public ArrayDelegateRef(RuntimeJavaType type)
              .Where(i => i.Name == nameof(CompareAndSwapArray) && i.IsGenericMethodDefinition && i.GetGenericArguments().Length == 1)
              .FirstOrDefault();
  
@@ -3074,7 +3512,8 @@ index 50a0078d2..064ef0797 100644
 +                return 4;
 +            if (ft == p.LONG || ft == p.DOUBLE)
 +                return 8;
-+            if (ft.IsPrimitive == false && ft.IsNonPrimitiveValueType)
++            // unloadable field types are reference fields (erased to object)
++            if (ft.IsPrimitive == false && ft.IsUnloadable == false && ft.IsNonPrimitiveValueType)
 +                return Marshal.SizeOf(ft.TypeAsTBD);
 +
 +            return IntPtr.Size;
@@ -3311,7 +3750,7 @@ index 50a0078d2..064ef0797 100644
          /// <summary>
          /// Emits the appropriate ldind opcode for the given type.
          /// </summary>
-@@ -132,6 +561,24 @@ public static void registerNatives()
+@@ -132,6 +562,24 @@ public static void registerNatives()
  
          }
  
@@ -3336,7 +3775,7 @@ index 50a0078d2..064ef0797 100644
          /// <summary>
          /// Implements the logic to get a field by offset.
          /// </summary>
-@@ -145,7 +592,7 @@ static T GetField<T>(object o, long offset)
+@@ -145,7 +593,7 @@ static T GetField<T>(object o, long offset)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3345,7 +3784,7 @@ index 50a0078d2..064ef0797 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -171,7 +618,7 @@ static void PutField<T>(object o, long offset, T value)
+@@ -171,7 +619,7 @@ static void PutField<T>(object o, long offset, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3354,7 +3793,7 @@ index 50a0078d2..064ef0797 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -265,7 +712,7 @@ public static bool getBoolean(object self, object o, long offset)
+@@ -265,7 +713,7 @@ public static bool getBoolean(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3363,7 +3802,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<bool>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset) != 0,
                      _ => GetField<bool>(o, offset)
-@@ -295,7 +742,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
+@@ -295,7 +743,7 @@ public static void putBoolean(object self, object o, long offset, bool x)
                  switch (o)
                  {
                      case null:
@@ -3372,7 +3811,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -331,7 +778,7 @@ public static byte getByte(object self, object o, long offset)
+@@ -331,7 +779,7 @@ public static byte getByte(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3381,7 +3820,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<byte>(null, offset),
                      Array array => Buffer.GetByte(array, (int)offset),
                      _ => GetField<byte>(o, offset)
-@@ -361,7 +808,7 @@ public static void putByte(object self, object o, long offset, byte x)
+@@ -361,7 +809,7 @@ public static void putByte(object self, object o, long offset, byte x)
                  switch (o)
                  {
                      case null:
@@ -3390,7 +3829,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -395,9 +842,16 @@ public static short getShort(object self, object o, long offset)
+@@ -395,9 +843,16 @@ public static short getShort(object self, object o, long offset)
  #else
              try
              {
@@ -3408,7 +3847,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<short>(null, offset),
                      Array array => ReadInt16(array, offset),
                      _ => GetField<short>(o, offset)
-@@ -424,10 +878,22 @@ public static void putShort(object self, object o, long offset, short x)
+@@ -424,10 +879,22 @@ public static void putShort(object self, object o, long offset, short x)
  #else
              try
              {
@@ -3432,7 +3871,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -461,9 +927,19 @@ public static char getChar(object self, object o, long offset)
+@@ -461,9 +928,19 @@ public static char getChar(object self, object o, long offset)
  #else
              try
              {
@@ -3453,7 +3892,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<char>(null, offset),
                      Array array => (char)ReadInt16(array, offset),
                      _ => GetField<char>(o, offset)
-@@ -490,10 +966,22 @@ public static void putChar(object self, object o, long offset, char x)
+@@ -490,10 +967,22 @@ public static void putChar(object self, object o, long offset, char x)
  #else
              try
              {
@@ -3477,7 +3916,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -527,9 +1015,16 @@ public static int getInt(object self, object o, long offset)
+@@ -527,9 +1016,16 @@ public static int getInt(object self, object o, long offset)
  #else
              try
              {
@@ -3495,7 +3934,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<int>(null, offset),
                      Array array => ReadInt32(array, offset),
                      _ => GetField<int>(o, offset)
-@@ -556,10 +1051,22 @@ public static void putInt(object self, object o, long offset, int x)
+@@ -556,10 +1052,22 @@ public static void putInt(object self, object o, long offset, int x)
  #else
              try
              {
@@ -3519,7 +3958,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -593,9 +1100,16 @@ public static long getLong(object self, object o, long offset)
+@@ -593,9 +1101,16 @@ public static long getLong(object self, object o, long offset)
  #else
              try
              {
@@ -3537,7 +3976,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<long>(null, offset),
                      Array array => ReadInt64(array, offset),
                      _ => GetField<long>(o, offset)
-@@ -622,10 +1136,22 @@ public static void putLong(object self, object o, long offset, long x)
+@@ -622,10 +1137,22 @@ public static void putLong(object self, object o, long offset, long x)
  #else
              try
              {
@@ -3561,7 +4000,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -659,9 +1185,19 @@ public static float getFloat(object self, object o, long offset)
+@@ -659,9 +1186,19 @@ public static float getFloat(object self, object o, long offset)
  #else
              try
              {
@@ -3582,7 +4021,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<float>(null, offset),
                      Array array => global::java.lang.Float.intBitsToFloat(ReadInt32(array, offset)),
                      _ => GetField<float>(o, offset)
-@@ -688,10 +1224,23 @@ public static void putFloat(object self, object o, long offset, float x)
+@@ -688,10 +1225,23 @@ public static void putFloat(object self, object o, long offset, float x)
  #else
              try
              {
@@ -3607,7 +4046,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -725,9 +1274,19 @@ public static double getDouble(object self, object o, long offset)
+@@ -725,9 +1275,19 @@ public static double getDouble(object self, object o, long offset)
  #else
              try
              {
@@ -3628,7 +4067,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetField<double>(null, offset),
                      Array array => global::java.lang.Double.longBitsToDouble(ReadInt64(array, offset)),
                      _ => GetField<double>(o, offset)
-@@ -754,10 +1313,23 @@ public static void putDouble(object self, object o, long offset, double x)
+@@ -754,10 +1314,23 @@ public static void putDouble(object self, object o, long offset, double x)
  #else
              try
              {
@@ -3653,7 +4092,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutField(w, offset, x);
-@@ -790,7 +1362,7 @@ public static byte getByte(object self, long address)
+@@ -790,7 +1363,7 @@ public static byte getByte(object self, long address)
  #else
              try
              {
@@ -3662,7 +4101,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -812,7 +1384,7 @@ public static void putByte(object self, long address, byte x)
+@@ -812,7 +1385,7 @@ public static void putByte(object self, long address, byte x)
  #else
              try
              {
@@ -3671,7 +4110,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -834,7 +1406,7 @@ public static short getShort(object self, long address)
+@@ -834,7 +1407,7 @@ public static short getShort(object self, long address)
  #else
              try
              {
@@ -3680,7 +4119,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -856,7 +1428,7 @@ public static void putShort(object self, long address, short x)
+@@ -856,7 +1429,7 @@ public static void putShort(object self, long address, short x)
  #else
              try
              {
@@ -3689,7 +4128,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -878,7 +1450,7 @@ public static char getChar(object self, long address)
+@@ -878,7 +1451,7 @@ public static char getChar(object self, long address)
  #else
              try
              {
@@ -3698,7 +4137,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -900,7 +1472,7 @@ public static void putChar(object self, long address, char x)
+@@ -900,7 +1473,7 @@ public static void putChar(object self, long address, char x)
  #else
              try
              {
@@ -3707,7 +4146,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -922,7 +1494,7 @@ public static int getInt(object self, long address)
+@@ -922,7 +1495,7 @@ public static int getInt(object self, long address)
  #else
              try
              {
@@ -3716,7 +4155,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -944,7 +1516,7 @@ public static void putInt(object self, long address, int x)
+@@ -944,7 +1517,7 @@ public static void putInt(object self, long address, int x)
  #else
              try
              {
@@ -3725,7 +4164,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -966,7 +1538,7 @@ public static long getLong(object self, long address)
+@@ -966,7 +1539,7 @@ public static long getLong(object self, long address)
  #else
              try
              {
@@ -3734,7 +4173,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -988,7 +1560,7 @@ public static void putLong(object self, long address, long x)
+@@ -988,7 +1561,7 @@ public static void putLong(object self, long address, long x)
  #else
              try
              {
@@ -3743,7 +4182,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1084,7 +1656,7 @@ public static long getAddress(object self, long address)
+@@ -1084,7 +1657,7 @@ public static long getAddress(object self, long address)
  #else
              try
              {
@@ -3752,7 +4191,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1106,7 +1678,7 @@ public static void putAddress(object self, long address, long x)
+@@ -1106,7 +1679,7 @@ public static void putAddress(object self, long address, long x)
  #else
              try
              {
@@ -3761,7 +4200,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (Exception e) when (e is not global::java.lang.Throwable)
              {
-@@ -1136,7 +1708,7 @@ public static unsafe long allocateMemory(object self, long bytes)
+@@ -1136,7 +1709,7 @@ public static unsafe long allocateMemory(object self, long bytes)
                  var ptr = Marshal.AllocHGlobal(len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -3770,7 +4209,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1171,7 +1743,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1171,7 +1744,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  }
  
                  // remove memory pressure
@@ -3779,7 +4218,7 @@ index 50a0078d2..064ef0797 100644
                  var len = Marshal.ReadIntPtr(ptr);
                  System.GC.RemoveMemoryPressure((long)len);
  
-@@ -1180,7 +1752,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
+@@ -1180,7 +1753,7 @@ public static unsafe long reallocateMemory(object self, long address, long bytes
                  ptr = Marshal.ReAllocHGlobal(ptr, len);
                  Marshal.WriteIntPtr(ptr, len);
                  System.GC.AddMemoryPressure((long)len);
@@ -3788,7 +4227,7 @@ index 50a0078d2..064ef0797 100644
              }
              catch (OutOfMemoryException e)
              {
-@@ -1210,7 +1782,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
+@@ -1210,7 +1783,7 @@ public static unsafe void setMemory(object self, object o, long offset, long byt
              try
              {
                  if (o == null)
@@ -3797,7 +4236,7 @@ index 50a0078d2..064ef0797 100644
                  else if (o is byte[] array)
                      ((Span<byte>)array).Slice((int)offset, (int)bytes).Fill(value);
                  else if (o is Array array2)
-@@ -1259,7 +1831,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1259,7 +1832,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (destBase is byte[] byteArray)
                      {
@@ -3806,7 +4245,7 @@ index 50a0078d2..064ef0797 100644
                      }
                      else if (destBase is bool[])
                      {
-@@ -1269,31 +1841,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1269,31 +1842,31 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (destBase is short[] shortArray)
                      {
@@ -3845,7 +4284,7 @@ index 50a0078d2..064ef0797 100644
                      }
                      else
                      {
-@@ -1308,7 +1880,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1308,7 +1881,7 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                  {
                      if (srcBase is byte[] byteArray)
                      {
@@ -3854,7 +4293,7 @@ index 50a0078d2..064ef0797 100644
                      }
                      else if (srcBase is bool[])
                      {
-@@ -1318,27 +1890,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1318,27 +1891,27 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
                      }
                      else if (srcBase is short[] shortArray)
                      {
@@ -3888,7 +4327,7 @@ index 50a0078d2..064ef0797 100644
                      }
                      else
                      {
-@@ -1360,11 +1932,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
+@@ -1360,11 +1933,11 @@ public static unsafe void copyMemory(object self, object srcBase, long srcOffset
          /// <param name="address"></param>
          public static unsafe void freeMemory(object self, long address)
          {
@@ -3903,7 +4342,7 @@ index 50a0078d2..064ef0797 100644
              var len = Marshal.ReadIntPtr(ptr);
              Marshal.FreeHGlobal(ptr);
              System.GC.RemoveMemoryPressure((long)len);
-@@ -1412,7 +1984,7 @@ public static long objectFieldOffset(object self, global::java.lang.reflect.Fiel
+@@ -1412,7 +1985,7 @@ public static long objectFieldOffset(object self, global::java.lang.reflect.Fiel
              if (w.IsStatic)
                  throw new global::java.lang.IllegalArgumentException();
  
@@ -3912,7 +4351,20 @@ index 50a0078d2..064ef0797 100644
          }
  
          /// <summary>
-@@ -1675,7 +2247,7 @@ static T GetFieldVolatile<T>(object o, long offset)
+@@ -1481,9 +2054,10 @@ static int ArrayIndexScale(RuntimeJavaType tw)
+                 return 4;
+             else if (et == context.PrimitiveJavaTypeFactory.LONG || et == context.PrimitiveJavaTypeFactory.DOUBLE)
+                 return 8;
+-            else if (et.IsPrimitive == false && et.IsNonPrimitiveValueType)
++            // unloadable element types are reference elements (erased to object)
++            else if (et.IsPrimitive == false && et.IsUnloadable == false && et.IsNonPrimitiveValueType)
+                 return Marshal.SizeOf(et.TypeAsTBD);
+-            else if (et.IsPrimitive == false && et.IsNonPrimitiveValueType == false)
++            else if (et.IsPrimitive == false)
+                 return IntPtr.Size;
+             else
+                 return 1;
+@@ -1675,7 +2249,7 @@ static T GetFieldVolatile<T>(object o, long offset)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3921,7 +4373,7 @@ index 50a0078d2..064ef0797 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -1701,7 +2273,7 @@ static void PutFieldVolatile<T>(object o, long offset, T value)
+@@ -1701,7 +2275,7 @@ static void PutFieldVolatile<T>(object o, long offset, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -3930,7 +4382,7 @@ index 50a0078d2..064ef0797 100644
              if (o is RuntimeJavaType w)
              {
                  if (w != f.DeclaringType)
-@@ -1904,7 +2476,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
+@@ -1904,7 +2478,7 @@ public static unsafe int getIntVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3939,7 +4391,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetFieldVolatile<int>(null, offset),
                      Array array => ReadInt32Volatile(array, offset),
                      _ => GetFieldVolatile<int>(o, offset)
-@@ -1934,7 +2506,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
+@@ -1934,7 +2508,7 @@ public static unsafe void putIntVolatile(object self, object o, long offset, int
                  switch (o)
                  {
                      case null:
@@ -3948,7 +4400,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -1970,7 +2542,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
+@@ -1970,7 +2544,7 @@ public static unsafe bool getBooleanVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3957,7 +4409,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetFieldVolatile<bool>(null, offset),
                      Array array => ReadByteVolatile(array, offset) != 0,
                      _ => GetFieldVolatile<bool>(o, offset)
-@@ -2000,7 +2572,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
+@@ -2000,7 +2574,7 @@ public static unsafe void putBooleanVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -3966,7 +4418,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2036,7 +2608,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
+@@ -2036,7 +2610,7 @@ public static unsafe byte getByteVolatile(object self, object o, long offset)
              {
                  return o switch
                  {
@@ -3975,7 +4427,7 @@ index 50a0078d2..064ef0797 100644
                      RuntimeJavaType w => GetFieldVolatile<byte>(null, offset),
                      Array array => ReadByteVolatile(array, offset),
                      _ => GetFieldVolatile<byte>(o, offset)
-@@ -2066,7 +2638,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
+@@ -2066,7 +2640,7 @@ public static unsafe void putByteVolatile(object self, object o, long offset, by
                  switch (o)
                  {
                      case null:
@@ -3984,7 +4436,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2130,7 +2702,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
+@@ -2130,7 +2704,7 @@ public static unsafe void putShortVolatile(object self, object o, long offset, s
                  switch (o)
                  {
                      case null:
@@ -3993,7 +4445,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2194,7 +2766,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
+@@ -2194,7 +2768,7 @@ public static unsafe void putCharVolatile(object self, object o, long offset, ch
                  switch (o)
                  {
                      case null:
@@ -4002,7 +4454,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2258,7 +2830,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
+@@ -2258,7 +2832,7 @@ public static unsafe void putLongVolatile(object self, object o, long offset, lo
                  switch (o)
                  {
                      case null:
@@ -4011,7 +4463,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2323,7 +2895,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
+@@ -2323,7 +2897,7 @@ public static unsafe void putFloatVolatile(object self, object o, long offset, f
                  switch (o)
                  {
                      case null:
@@ -4020,7 +4472,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2388,7 +2960,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
+@@ -2388,7 +2962,7 @@ public static unsafe void putDoubleVolatile(object self, object o, long offset,
                  switch (o)
                  {
                      case null:
@@ -4029,7 +4481,7 @@ index 50a0078d2..064ef0797 100644
                          break;
                      case RuntimeJavaType w:
                          PutFieldVolatile(w, offset, x);
-@@ -2438,7 +3010,7 @@ static bool CompareAndSwapField<T>(object o, long offset, T expected, T value)
+@@ -2438,7 +3012,7 @@ static bool CompareAndSwapField<T>(object o, long offset, T expected, T value)
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -4038,7 +4490,7 @@ index 50a0078d2..064ef0797 100644
  #endif
          }
  
-@@ -3351,4 +3923,4 @@ static void InterlockedWrite(ref double location, double value)
+@@ -3351,4 +3925,4 @@ static void InterlockedWrite(ref double location, double value)
  
      }
  
@@ -4579,6 +5031,52 @@ index 22e86df4c..b524ddd86 100644
                  }
              }
  
+diff --git a/src/IKVM.Runtime/LibIkvm.cs b/src/IKVM.Runtime/LibIkvm.cs
+index 6553ff921..21c54732b 100644
+--- a/src/IKVM.Runtime/LibIkvm.cs
++++ b/src/IKVM.Runtime/LibIkvm.cs
+@@ -68,6 +68,20 @@ static class Externs
+             [DllImport("ikvm", SetLastError = false)]
+             internal static unsafe extern int IKVM_sig_set_chld_action(void* sig);
+ 
++            /// <summary>
++            /// Invokes the native 'IKVM_get_heap_max' function.
++            /// </summary>
++            /// <returns></returns>
++            [DllImport("ikvm", SetLastError = false)]
++            internal static extern long IKVM_get_heap_max();
++
++            /// <summary>
++            /// Invokes the native 'IKVM_get_heap_size' function.
++            /// </summary>
++            /// <returns></returns>
++            [DllImport("ikvm", SetLastError = false)]
++            internal static extern long IKVM_get_heap_size();
++
+         }
+ 
+         /// <summary>
+@@ -223,6 +237,20 @@ static nint Load()
+         /// <returns></returns>
+         public unsafe int sig_set_chld_action(void* sig) => Externs.IKVM_sig_set_chld_action(sig);
+ 
++        /// <summary>
++        /// Invokes the 'get_heap_max' function. On WASM this is the linear-memory ceiling
++        /// (MAXIMUM_MEMORY), in bytes; returns 0 on platforms where it does not apply.
++        /// </summary>
++        /// <returns></returns>
++        public long get_heap_max() => Externs.IKVM_get_heap_max();
++
++        /// <summary>
++        /// Invokes the 'get_heap_size' function. On WASM this is the current linear-memory
++        /// size, in bytes; returns 0 on platforms where it does not apply.
++        /// </summary>
++        /// <returns></returns>
++        public long get_heap_size() => Externs.IKVM_get_heap_size();
++
+         /// <summary>
+         /// Releases the instance.
+         /// </summary>
 diff --git a/src/IKVM.Runtime/LibJVM.cs b/src/IKVM.Runtime/LibJVM.cs
 index 2fa4d5bcd..db0a84758 100644
 --- a/src/IKVM.Runtime/LibJVM.cs
@@ -4753,6 +5251,33 @@ index 2fa4d5bcd..db0a84758 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/IKVM.Runtime/LoadMode.cs b/src/IKVM.Runtime/LoadMode.cs
+index 582b3b1f3..c78378ef6 100644
+--- a/src/IKVM.Runtime/LoadMode.cs
++++ b/src/IKVM.Runtime/LoadMode.cs
+@@ -35,6 +35,10 @@ enum LoadMode
+         LoadOrNull = Load | ReturnNull,
+         LoadOrThrow = Load | ThrowClassNotFound,
+         Link = Load | ReturnUnloadable | SuppressExceptions,
++        // OpenJDK-aligned lazy linking: never invokes user-defined loadClass (no Load bit); classes
++        // not resolvable through trusted no-user-code paths become unloadable and are resolved
++        // lazily at first execution of the referencing instruction via the __dynamic_* stubs.
++        LinkLazy = ReturnUnloadable | SuppressExceptions | TrustedProbe,
+ 
+         // call into Java class loader
+         Load = 0x0001,
+@@ -52,6 +56,11 @@ enum LoadMode
+         // warnings
+         WarnClassNotFound = 0x0020,
+ 
++        // may resolve through loaders that run no user code (boot image) and through names the
++        // initiating loader explicitly vouches for (ikvm.lang.LinkTrustPolicy), but never through
++        // an unsolicited user-defined loadClass
++        TrustedProbe = 0x0040,
++
+     }
+ 
+ }
 diff --git a/src/IKVM.Runtime/MemberFlags.cs b/src/IKVM.Runtime/MemberFlags.cs
 index 78c395b3c..b250b5f0a 100644
 --- a/src/IKVM.Runtime/MemberFlags.cs
@@ -4769,6 +5294,24 @@ index 78c395b3c..b250b5f0a 100644
      }
  
  }
+diff --git a/src/IKVM.Runtime/MethodHandleUtil.jniexport.cs b/src/IKVM.Runtime/MethodHandleUtil.jniexport.cs
+index 0d4e61431..fda9232f8 100644
+--- a/src/IKVM.Runtime/MethodHandleUtil.jniexport.cs
++++ b/src/IKVM.Runtime/MethodHandleUtil.jniexport.cs
+@@ -344,8 +344,11 @@ internal static Delegate CreateMemberName(RuntimeContext context, RuntimeJavaMet
+                 FinishTypes(type);
+ 
+                 var tw = mw.DeclaringType;
+-                var owner = tw.TypeAsBaseType;
+-                var dm = new DynamicMethodBuilder(context, "MemberName:" + mw.DeclaringType.Name + "::" + mw.Name + mw.Signature, type, null, mw.HasCallerID ? DynamicCallerIDProvider.Instance : null, null, owner, true);
++                // NOTE do not own the DynamicMethod with the target type: on Mono, creating the
++                // delegate can run the owner's class initializer, but resolving a MethodHandle
++                // must not initialize the target class (JVMS §5.4.3.5) — initialization belongs
++                // at first invocation, which the emitted direct call already triggers
++                var dm = new DynamicMethodBuilder(context, "MemberName:" + mw.DeclaringType.Name + "::" + mw.Name + mw.Signature, type, null, mw.HasCallerID ? DynamicCallerIDProvider.Instance : null, null, null, true);
+                 for (int i = 0, count = type.parameterCount(); i < count; i++)
+                 {
+                     if (i == 0 && !mw.IsStatic && (tw.IsGhost || tw.IsNonPrimitiveValueType || tw.IsRemapped) && (!mw.IsConstructor || tw != context.JavaBase.TypeOfJavaLangString))
 diff --git a/src/IKVM.Runtime/MonoPInvokeCallbackAttribute.cs b/src/IKVM.Runtime/MonoPInvokeCallbackAttribute.cs
 new file mode 100644
 index 000000000..bf21a7868
@@ -4814,10 +5357,36 @@ index 000000000..bf21a7868
 +    }
 +
 +}
+diff --git a/src/IKVM.Runtime/RuntimeAssemblyClassLoader.cs b/src/IKVM.Runtime/RuntimeAssemblyClassLoader.cs
+index 56fb9139a..fc2a04dd7 100644
+--- a/src/IKVM.Runtime/RuntimeAssemblyClassLoader.cs
++++ b/src/IKVM.Runtime/RuntimeAssemblyClassLoader.cs
+@@ -1153,6 +1153,12 @@ internal List<KeyValuePair<string, string[]>> GetPackageInfo()
+ 
+ #if !IMPORTER && !FIRST_PASS && !EXPORTER
+ 
++        /// <summary>
++        /// Assembly class loaders resolve from .NET metadata; only a custom assembly class loader
++        /// (CustomAssemblyClassLoaderAttribute / app.config redirect) runs user loadClass code.
++        /// </summary>
++        internal override bool InvokesUserLoadClass => GetCustomClassLoaderType() != null;
++
+         Type GetCustomClassLoaderType()
+         {
+             LoadCustomClassLoaderRedirects(this);
 diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
-index 44ffeeaf4..0304b2dd6 100644
+index 44ffeeaf4..f2434f49e 100644
 --- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
 +++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.FinishContext.cs
+@@ -132,7 +132,7 @@ internal void EmitDynamicClassLiteral(CodeEmitter ilgen, RuntimeJavaType tw, boo
+ 
+                 if (!dynamicClassLiteral.TryGetValue(cacheKey, out var method))
+                 {
+-                    var fb = typeBuilder.DefineField("__<>class", context.JavaBase.TypeOfJavaLangClass.TypeAsSignatureType, FieldAttributes.PrivateScope | FieldAttributes.Static);
++                    var fb = typeBuilder.DefineField("__<>class" + helperNameCounter++, context.JavaBase.TypeOfJavaLangClass.TypeAsSignatureType, FieldAttributes.PrivateScope | FieldAttributes.Static);
+                     var mb = DefineHelperMethod("__<>class", context.JavaBase.TypeOfJavaLangClass.TypeAsSignatureType, Type.EmptyTypes);
+                     var ilgen2 = context.CodeEmitterFactory.Create(mb);
+                     ilgen2.Emit(OpCodes.Ldsfld, fb);
 @@ -1791,7 +1791,7 @@ internal void Generate(RuntimeByteCodeJavaType.FinishContext context, CodeEmitte
                          realRetType = retTypeWrapper.TypeAsSignatureType;
                      else
@@ -4827,7 +5396,53 @@ index 44ffeeaf4..0304b2dd6 100644
  
                      CodeEmitterLocal retValue = null;
                      if (retTypeWrapper != context.Context.PrimitiveJavaTypeFactory.VOID)
-@@ -2346,4 +2346,4 @@ internal void EmitLiveObjectLoad(CodeEmitter ilgen, object value)
+@@ -2276,9 +2276,14 @@ internal TypeBuilder DefineAnonymousClass()
+                 return tb;
+             }
+ 
++            // PrivateScope members may legally share names, but name-based token resolution
++            // (e.g. Mono's dynamic-image fallback for baked TypeBuilders) can then bind call
++            // sites to the wrong member, so every helper gets a unique name
++            int helperNameCounter;
++
+             MethodBuilder DefineHelperMethod(string name, Type returnType, Type[] parameterTypes)
+             {
+-                return typeBuilder.DefineMethod(name, MethodAttributes.PrivateScope | MethodAttributes.Static, returnType, parameterTypes);
++                return typeBuilder.DefineMethod(name + helperNameCounter++, MethodAttributes.PrivateScope | MethodAttributes.Static, returnType, parameterTypes);
+             }
+ 
+             internal MethodBuilder DefineMethodHandleDispatchStub(Type returnType, Type[] parameterTypes)
+@@ -2288,17 +2293,17 @@ internal MethodBuilder DefineMethodHandleDispatchStub(Type returnType, Type[] pa
+ 
+             internal FieldBuilder DefineMethodHandleInvokeCacheField(Type fieldType)
+             {
+-                return typeBuilder.DefineField("__<>invokeCache", fieldType, FieldAttributes.Static | FieldAttributes.PrivateScope);
++                return typeBuilder.DefineField("__<>invokeCache" + helperNameCounter++, fieldType, FieldAttributes.Static | FieldAttributes.PrivateScope);
+             }
+ 
+             internal FieldBuilder DefineDynamicMethodHandleCacheField()
+             {
+-                return typeBuilder.DefineField("__<>dynamicMethodHandleCache", context.JavaBase.TypeOfJavaLangInvokeMethodHandle.TypeAsSignatureType, FieldAttributes.Static | FieldAttributes.PrivateScope);
++                return typeBuilder.DefineField("__<>dynamicMethodHandleCache" + helperNameCounter++, context.JavaBase.TypeOfJavaLangInvokeMethodHandle.TypeAsSignatureType, FieldAttributes.Static | FieldAttributes.PrivateScope);
+             }
+ 
+             internal FieldBuilder DefineDynamicMethodTypeCacheField()
+             {
+-                return typeBuilder.DefineField("__<>dynamicMethodTypeCache", context.JavaBase.TypeOfJavaLangInvokeMethodType.TypeAsSignatureType, FieldAttributes.Static | FieldAttributes.PrivateScope);
++                return typeBuilder.DefineField("__<>dynamicMethodTypeCache" + helperNameCounter++, context.JavaBase.TypeOfJavaLangInvokeMethodType.TypeAsSignatureType, FieldAttributes.Static | FieldAttributes.PrivateScope);
+             }
+ 
+             internal MethodBuilder DefineDelegateInvokeErrorStub(Type returnType, Type[] parameterTypes)
+@@ -2315,7 +2320,7 @@ internal MethodInfo GetInvokeSpecialStub(RuntimeJavaMethod method)
+                 if (!invokespecialstubcache.TryGetValue(key, out var mi))
+                 {
+                     var dmh = method.GetDefineMethodHelper();
+-                    var stub = dmh.DefineMethod(wrapper, typeBuilder, "__<>", MethodAttributes.PrivateScope);
++                    var stub = dmh.DefineMethod(wrapper, typeBuilder, "__<>" + helperNameCounter++, MethodAttributes.PrivateScope);
+                     var ilgen = context.CodeEmitterFactory.Create(stub);
+                     ilgen.Emit(OpCodes.Ldarg_0);
+                     for (int i = 1; i <= dmh.ParameterCount; i++)
+@@ -2346,4 +2351,4 @@ internal void EmitLiveObjectLoad(CodeEmitter ilgen, object value)
          }
      }
  
@@ -4835,7 +5450,7 @@ index 44ffeeaf4..0304b2dd6 100644
 \ No newline at end of file
 +}
 diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
-index 4c3c07e12..144694761 100644
+index 4c3c07e12..411b8ea21 100644
 --- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
 +++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.JavaTypeImpl.cs
 @@ -62,7 +62,18 @@ private sealed partial class JavaTypeImpl : DynamicImpl
@@ -4878,23 +5493,29 @@ index 4c3c07e12..144694761 100644
                  }
  #if IMPORTER
                  wrapper.AddMapXmlFields(ref fields);
-@@ -1156,9 +1173,14 @@ internal override DynamicImpl Finish()
+@@ -1156,9 +1173,19 @@ internal override DynamicImpl Finish()
                  // are in the process of finishing, and this would be a problem.
                  // Prevent infinity recursion for broken class loaders by keeping a recursion count and falling
                  // back to late binding if we recurse more than twice.
 -                var mode = System.Threading.Interlocked.Increment(ref recursionCount) > 2 || (JVM.DisableEagerClassLoading && wrapper.Name != "sun.reflect.misc.Trampoline")
+-                    ? LoadMode.ReturnUnloadable
 +                t_recursionCounts ??= new System.Collections.Generic.Dictionary<JavaTypeImpl, int>();
 +                t_recursionCounts.TryGetValue(this, out int t_rc);
 +                t_recursionCounts[this] = t_rc + 1;
-+                var mode = (t_rc + 1) > 2 || (JVM.DisableEagerClassLoading && wrapper.Name != "sun.reflect.misc.Trampoline")
-                     ? LoadMode.ReturnUnloadable
++                // OpenJDK-aligned lazy linking applies only to classes defined by loaders that run
++                // user loadClass code (Fabric Knot, LaunchWrapper, app loader, ...); boot and
++                // assembly-backed classes keep the eager direct binding.
++                var lazy = (JVM.LazyClassLoading && wrapper.ClassLoader.InvokesUserLoadClass)
++                    || (JVM.DisableEagerClassLoading && wrapper.Name != "sun.reflect.misc.Trampoline");
++                var mode = (t_rc + 1) > 2 ? LoadMode.ReturnUnloadable
++                    : lazy ? LoadMode.LinkLazy
                      : LoadMode.Link;
 +				if (mode == LoadMode.ReturnUnloadable)
 +					Console.WriteLine($"[IKVM internal] loadmode unloadable!!! uh oh {this} {wrapper.Name}");
                  try
                  {
                      classFile.Link(wrapper, mode);
-@@ -1171,7 +1193,11 @@ internal override DynamicImpl Finish()
+@@ -1171,7 +1198,11 @@ internal override DynamicImpl Finish()
                  }
                  finally
                  {
@@ -4907,7 +5528,17 @@ index 4c3c07e12..144694761 100644
                  }
  
                  // this is the correct lock, FinishCore doesn't call any user code and mutates global state,
-@@ -1918,7 +1944,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -1291,6 +1322,9 @@ FinishedTypeImpl FinishCore()
+ #if !IMPORTER
+                 catch (Exception x)
+                 {
++                    // the wrapped exception's stack can get lost when surfaced to Java (notably on
++                    // mono-wasm), so dump the full details here
++                    Console.Error.WriteLine($"[IKVM finish-failed] {wrapper.Name}: {x}");
+                     throw new InternalException($"Exception during finishing of: {wrapper.Name}", x);
+                 }
+ #endif
+@@ -1918,7 +1952,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
                  var tw = wrapper.BaseTypeWrapper;
                  while (tw != null)
                  {
@@ -4916,7 +5547,7 @@ index 4c3c07e12..144694761 100644
                      if (baseMethod == null)
                          break;
                      else if (baseMethod.IsAccessStub)
-@@ -1935,7 +1961,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -1935,7 +1969,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
  
                  while (tw != null)
                  {
@@ -4925,7 +5556,7 @@ index 4c3c07e12..144694761 100644
                      if (baseMethod == null)
                      {
                          break;
-@@ -1977,7 +2003,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -1977,7 +2011,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
                              tw = wrapper.BaseTypeWrapper;
                              while (tw != null)
                              {
@@ -4934,7 +5565,7 @@ index 4c3c07e12..144694761 100644
                                  if (baseMethod2 == null || baseMethod2 == baseMethod)
                                      break;
  
-@@ -2040,7 +2066,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
+@@ -2040,7 +2074,7 @@ RuntimeJavaMethod[] FindBaseMethods7(string name, string sig, bool packageFinal,
                              tw = topPublicOrProtectedMethod.DeclaringType.BaseTypeWrapper;
                              while (tw != null)
                              {
@@ -4943,7 +5574,7 @@ index 4c3c07e12..144694761 100644
                                  if (baseMethod2 == null)
                                      break;
  
-@@ -2101,11 +2127,11 @@ static bool TryGetClassFileVersion(RuntimeJavaType tw, ref int majorVersion)
+@@ -2101,11 +2135,11 @@ static bool TryGetClassFileVersion(RuntimeJavaType tw, ref int majorVersion)
                  return false;
              }
  
@@ -4957,7 +5588,7 @@ index 4c3c07e12..144694761 100644
                      if (mw == null)
                          break;
  
-@@ -2124,7 +2150,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+@@ -2124,7 +2158,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
                  var tw = wrapper.BaseTypeWrapper;
                  while (tw != null)
                  {
@@ -4966,7 +5597,7 @@ index 4c3c07e12..144694761 100644
                      if (baseMethod == null)
                      {
                          return null;
-@@ -2162,7 +2188,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+@@ -2162,7 +2196,7 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
                              tw = baseMethod.DeclaringType.BaseTypeWrapper;
                              while (tw != null)
                              {
@@ -4975,7 +5606,7 @@ index 4c3c07e12..144694761 100644
                                  if (baseMethod2 == null)
                                  {
                                      break;
-@@ -2211,6 +2237,15 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
+@@ -2211,6 +2245,15 @@ RuntimeJavaMethod[] FindBaseMethodsLegacy(string name, string sig, out bool expl
                  return null;
              }
  
@@ -4991,7 +5622,7 @@ index 4c3c07e12..144694761 100644
              static MethodInfo GetBaseFinalizeMethod(RuntimeJavaType wrapper)
              {
                  for (; ; )
-@@ -2452,6 +2487,12 @@ internal override MethodBase LinkMethod(RuntimeJavaMethod mw)
+@@ -2452,6 +2495,12 @@ internal override MethodBase LinkMethod(RuntimeJavaMethod mw)
  #if IMPORTER
                      wrapper.Context.AttributeHelper.SetThrowsAttribute(method, exceptions);
  
@@ -5004,7 +5635,7 @@ index 4c3c07e12..144694761 100644
                      if (setModifiers || m.IsInternal || (m.Modifiers & (Modifiers.Synthetic | Modifiers.Bridge)) != 0)
                          wrapper.Context.AttributeHelper.SetModifiers(method, m.Modifiers, m.IsInternal);
  
-@@ -2713,6 +2754,7 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
+@@ -2713,6 +2762,7 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
                      bool newslot = baseMethods[index] != null
                          && (methods[index].IsExplicitOverride || baseMethods[index][0].RealName != name || CheckRequireOverrideStub(methods[index], baseMethods[index][0]))
                          && !needFinalize;
@@ -5012,7 +5643,7 @@ index 4c3c07e12..144694761 100644
                      if (newslot)
                      {
                          attribs |= MethodAttributes.NewSlot;
-@@ -2752,7 +2794,14 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
+@@ -2752,7 +2802,14 @@ MethodBuilder GenerateMethod(int index, ClassFile.Method m, ref bool setModifier
                              }
                              else if (subsequent || methods[index].IsExplicitOverride || baseMethod.RealName != name)
                              {
@@ -5028,7 +5659,7 @@ index 4c3c07e12..144694761 100644
                              }
  
                              // the non-primary base methods always need an explicit method override
-@@ -2867,6 +2916,34 @@ private static MethodAttributes GetMethodAccess(RuntimeJavaMethod mw)
+@@ -2867,6 +2924,34 @@ private static MethodAttributes GetMethodAccess(RuntimeJavaMethod mw)
                  }
              }
  
@@ -5063,7 +5694,7 @@ index 4c3c07e12..144694761 100644
  #if IMPORTER
              // The classic example of an access bridge is StringBuilder.length(), the JDK 6 compiler
              // generates this to work around a reflection problem (which otherwise wouldn't surface the
-@@ -2998,4 +3075,4 @@ internal override RuntimeJavaType Host
+@@ -2998,4 +3083,4 @@ internal override RuntimeJavaType Host
  
      }
  
@@ -5156,7 +5787,7 @@ index 7a9f4745e..a73dd4223 100644
  
                  return null;
 diff --git a/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs b/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
-index 74dfda7c8..283b60d6c 100644
+index 74dfda7c8..ea7b3c12e 100644
 --- a/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
 +++ b/src/IKVM.Runtime/RuntimeByteCodeJavaType.cs
 @@ -387,12 +387,18 @@ private bool IsSerializable
@@ -5204,6 +5835,15 @@ index 74dfda7c8..283b60d6c 100644
          }
  
          /// <summary>
+@@ -911,7 +929,7 @@ internal override object GetAnnotationDefault(RuntimeJavaMethod mw)
+                     object defVal = impl.GetMethodDefaultValue(i);
+                     if (defVal != null)
+                     {
+-                        return JVM.NewAnnotationElementValue(mw.DeclaringType.ClassLoader.GetJavaClassLoader(), mw.ReturnType.ClassObject, defVal);
++                        return JVM.NewAnnotationElementValue(mw.DeclaringType.ClassLoader.GetJavaClassLoader(), mw.ReturnType.EnsureLoadable(mw.DeclaringType.ClassLoader).ClassObject, defVal);
+                     }
+                     return null;
+                 }
 @@ -929,6 +947,16 @@ private Type GetBaseTypeForDefineType()
  
  #if IMPORTER
@@ -5229,7 +5869,7 @@ index 74dfda7c8..283b60d6c 100644
 \ No newline at end of file
 +}
 diff --git a/src/IKVM.Runtime/RuntimeClassLoader.cs b/src/IKVM.Runtime/RuntimeClassLoader.cs
-index 2131a95a0..51f210658 100644
+index 2131a95a0..45b8bba9a 100644
 --- a/src/IKVM.Runtime/RuntimeClassLoader.cs
 +++ b/src/IKVM.Runtime/RuntimeClassLoader.cs
 @@ -106,8 +106,7 @@ internal void SetRemappedType(Type type, RuntimeJavaType tw)
@@ -5242,6 +5882,159 @@ index 2131a95a0..51f210658 100644
  
              context.ClassLoaderFactory.remappedTypes.Add(type, tw.Name);
          }
+@@ -247,6 +246,23 @@ protected virtual void CheckProhibitedPackage(string className)
+                 throw new JavaSecurityException("Prohibited package name: " + className.Substring(0, className.LastIndexOf('.')));
+         }
+ 
++        /// <summary>
++        /// Returns true if loading a class through this loader may invoke user-defined loadClass code.
++        /// Lazy (OpenJDK-aligned) linking only applies to classes defined by such loaders; all other
++        /// loaders resolve classes without observable side effects and continue to link eagerly.
++        /// </summary>
++        internal virtual bool InvokesUserLoadClass
++        {
++            get
++            {
++#if !IMPORTER && !FIRST_PASS && !EXPORTER
++                return javaClassLoader != null;
++#else
++                return false;
++#endif
++            }
++        }
++
+ #if !EXPORTER
+         internal RuntimeJavaType DefineClass(ClassFile f, ProtectionDomain protectionDomain)
+         {
+@@ -374,13 +390,22 @@ internal RuntimeJavaType LoadClass(string name, LoadMode mode)
+                 if (javaType != null)
+                     return RegisterInitiatingLoader(javaType);
+ 
+-                if (!(name.Length > 1 && name[0] == '[') && ((mode & LoadMode.WarnClassNotFound) != 0) || WarningLevelHigh)
++                // lazy linking: we may not invoke user loadClass, but trusted no-user-code paths may
++                // still resolve the reference eagerly (full speed direct binding)
++                if ((mode & LoadMode.Load) == 0 && (mode & LoadMode.TrustedProbe) != 0)
++                {
++                    javaType = TryTrustedEagerLink(name, mode);
++                    if (javaType != null)
++                        return javaType;
++                }
++
++                if (!(name.Length > 1 && name[0] == '[') && (mode & LoadMode.WarnClassNotFound) != 0 && (mode & LoadMode.TrustedProbe) == 0 || WarningLevelHigh)
+                     Diagnostics.ClassNotFound(name);
+ 
+                 return (mode & LoadMode.MaskReturn) switch
+                 {
+                     LoadMode.ReturnNull => null,
+-                    LoadMode.ReturnUnloadable => new RuntimeUnloadableJavaType(context, name),
++                    LoadMode.ReturnUnloadable => GetUnloadableJavaType(name),
+                     LoadMode.ThrowClassNotFound => throw new ClassNotFoundException(name),
+                     _ => throw new InvalidOperationException(),
+                 };
+@@ -391,6 +416,30 @@ internal RuntimeJavaType LoadClass(string name, LoadMode mode)
+             }
+         }
+ 
++        System.Collections.Concurrent.ConcurrentDictionary<string, RuntimeJavaType> unloadableTypes;
++
++        /// <summary>
++        /// Gets the canonical unloadable placeholder for the given name. Canonicalizing per loader
++        /// matters because the verifier compares constant pool class entries by reference (e.g. the
++        /// uninitialized type of a 'new' against the class of the matching invokespecial &lt;init&gt;),
++        /// and distinct constant pool entries naming the same unresolved class must agree.
++        /// </summary>
++        RuntimeJavaType GetUnloadableJavaType(string name)
++        {
++            var cache = unloadableTypes;
++            if (cache == null)
++            {
++                Interlocked.CompareExchange(ref unloadableTypes, new System.Collections.Concurrent.ConcurrentDictionary<string, RuntimeJavaType>(), null);
++                cache = unloadableTypes;
++            }
++
++            if (cache.TryGetValue(name, out var tw))
++                return tw;
++
++            tw = new RuntimeUnloadableJavaType(context, name);
++            return cache.GetOrAdd(name, tw);
++        }
++
+         RuntimeJavaType LoadRegisteredOrPendingClass(string name)
+         {
+             RuntimeJavaType javaType;
+@@ -417,6 +466,62 @@ RuntimeJavaType LoadRegisteredOrPendingClass(string name)
+             return javaType;
+         }
+ 
++        /// <summary>
++        /// Attempts to resolve a class reference at link time without invoking an unsolicited
++        /// user-defined loadClass (lazy linking, see <see cref="LoadMode.LinkLazy"/>). Names the
++        /// loader vouches for via ikvm.lang.LinkTrustPolicy load eagerly through the normal path;
++        /// anything else may only resolve through the boot image, which runs no user code. Boot
++        /// probe hits are deliberately not registered as initiating loads so that findLoadedClass
++        /// stays faithful to what the loader actually initiated.
++        /// </summary>
++        RuntimeJavaType TryTrustedEagerLink(string name, LoadMode mode)
++        {
++#if !IMPORTER && !FIRST_PASS && !EXPORTER
++            if (IsEagerLinkSafe(name))
++            {
++                var javaType = LoadClassImpl(name, mode | LoadMode.Load);
++                if (javaType != null)
++                    return RegisterInitiatingLoader(javaType);
++            }
++            else
++            {
++                var bootstrap = context.ClassLoaderFactory.GetBootstrapClassLoader();
++                if (bootstrap != this)
++                    return bootstrap.TryLoadClassByName(name);
++            }
++#endif
++            return null;
++        }
++
++#if !IMPORTER && !FIRST_PASS && !EXPORTER
++
++        System.Collections.Concurrent.ConcurrentDictionary<string, bool> eagerLinkSafeCache;
++
++        /// <summary>
++        /// Consults the loader's ikvm.lang.LinkTrustPolicy, if implemented; memoized per name.
++        /// </summary>
++        bool IsEagerLinkSafe(string name)
++        {
++            if (javaClassLoader is not ikvm.lang.LinkTrustPolicy policy)
++                return false;
++
++            var cache = eagerLinkSafeCache;
++            if (cache == null)
++            {
++                Interlocked.CompareExchange(ref eagerLinkSafeCache, new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(), null);
++                cache = eagerLinkSafeCache;
++            }
++
++            if (cache.TryGetValue(name, out var safe))
++                return safe;
++
++            safe = policy.isEagerLinkSafe(name);
++            cache.TryAdd(name, safe);
++            return safe;
++        }
++
++#endif
++
+         /// <summary>
+         /// Returns the <see cref="RuntimeJavaType"/> for the given array class name.
+         /// </summary>
+@@ -642,6 +747,9 @@ protected virtual RuntimeJavaType LoadClassImpl(string name, LoadMode mode)
+ 
+             try
+             {
++                if (JVM.TraceLoadClass)
++                    Console.Error.WriteLine($"[IKVM loadClass] {name} via {javaClassLoader?.GetType().FullName ?? "<boot>"}");
++
+                 // invoke 'loadClass' on the associated Java class loader instance
+                 // this can cause a call to defineClass
+                 var c = (java.lang.Class)ClassLoaderAccessor.InvokeLoadClassInternal(GetJavaClassLoader(), name);
 diff --git a/src/IKVM.Runtime/RuntimeClassLoaderFactory.cs b/src/IKVM.Runtime/RuntimeClassLoaderFactory.cs
 index 1a0eb7c92..6bbaccb4a 100644
 --- a/src/IKVM.Runtime/RuntimeClassLoaderFactory.cs
@@ -5359,7 +6152,7 @@ index e2d770865..6fa42c2f5 100644
          /// <summary>
          /// Gets the <see cref="StubGenerator"/> associated with this instance of the runtime.
 diff --git a/src/IKVM.Runtime/RuntimeJavaField.cs b/src/IKVM.Runtime/RuntimeJavaField.cs
-index 5b6a1ae85..a054f9991 100644
+index 5b6a1ae85..1960c1fe6 100644
 --- a/src/IKVM.Runtime/RuntimeJavaField.cs
 +++ b/src/IKVM.Runtime/RuntimeJavaField.cs
 @@ -381,12 +381,8 @@ internal void Link(LoadMode mode)
@@ -5384,6 +6177,26 @@ index 5b6a1ae85..a054f9991 100644
              }
          }
  
+@@ -508,7 +503,8 @@ Delegate GetUnsafeGetDelegate()
+         Delegate CreateUnsafeGetDelegate()
+         {
+             DeclaringType.Finish();
+-            FieldTypeWrapper.Finish();
++            if (!FieldTypeWrapper.IsUnloadable)
++                FieldTypeWrapper.Finish();
+             ResolveField();
+ 
+             var ft = FieldTypeWrapper.IsPrimitive ? FieldTypeWrapper.TypeAsSignatureType : typeof(object);
+@@ -555,7 +551,8 @@ Delegate GetUnsafeSetDelegate()
+         Delegate CreateUnsafeSetDelegate()
+         {
+             DeclaringType.Finish();
+-            FieldTypeWrapper.Finish();
++            if (!FieldTypeWrapper.IsUnloadable)
++                FieldTypeWrapper.Finish();
+             ResolveField();
+ 
+             var ft = FieldTypeWrapper.IsPrimitive ? FieldTypeWrapper.TypeAsSignatureType : typeof(object);
 diff --git a/src/IKVM.Runtime/RuntimeJavaMember.cs b/src/IKVM.Runtime/RuntimeJavaMember.cs
 index b71f31ab4..87c405295 100644
 --- a/src/IKVM.Runtime/RuntimeJavaMember.cs
@@ -5400,7 +6213,7 @@ index b71f31ab4..87c405295 100644
  
          internal bool IsMirandaMethod => (flags & MemberFlags.MirandaMethod) != 0;
 diff --git a/src/IKVM.Runtime/RuntimeJavaMethod.cs b/src/IKVM.Runtime/RuntimeJavaMethod.cs
-index 833b0af1a..edbcaa196 100644
+index 833b0af1a..c46feaf89 100644
 --- a/src/IKVM.Runtime/RuntimeJavaMethod.cs
 +++ b/src/IKVM.Runtime/RuntimeJavaMethod.cs
 @@ -309,12 +309,8 @@ internal void Link(LoadMode mode)
@@ -5425,8 +6238,89 @@ index 833b0af1a..edbcaa196 100644
              }
          }
  
+@@ -497,22 +492,39 @@ internal void ResolveMethod()
+                 var types = new Type[typeLength];
+                 for (int i = 0; i < parameters.Length; i++)
+                 {
+-                    parameters[i].Finish();
++                    // unloadable signature types are erased to object and cannot be finished
++                    if (!parameters[i].IsUnloadable)
++                        parameters[i].Finish();
+                     types[i] = parameters[i].TypeAsSignatureType;
+                 }
+ 
+                 if (HasCallerID)
+                     types[typeLength - 1] = DeclaringType.Context.JavaBase.TypeOfIkvmInternalCallerID.TypeAsSignatureType;
+ 
+-                if (ReturnType != null)
++                if (ReturnType != null && !ReturnType.IsUnloadable)
+                     ReturnType.Finish();
+ 
+                 var flags = BindingFlags.DeclaredOnly;
+                 flags |= mb.IsPublic ? BindingFlags.Public : BindingFlags.NonPublic;
+                 flags |= mb.IsStatic ? BindingFlags.Static : BindingFlags.Instance;
+-                method = DeclaringType.TypeAsTBD.GetMethods(flags).FirstOrDefault(i => i.Name == mb.Name && i.GetParameters().Select(j => j.ParameterType).SequenceEqual(types) && i.ReturnType.Equals(ReturnType.TypeAsSignatureType));
+-                if (method == null)
+-                    method = DeclaringType.TypeAsTBD.GetConstructor(flags, null, types, null);
++
++                // Java overloads may erase to identical CIL parameter types (e.g. unloadable
++                // signature types become object); IKVM disambiguates such signatures with optional
++                // custom modifiers, so when the plain type match is ambiguous the modifiers decide
++                var candidates = new System.Collections.Generic.List<MethodBase>();
++                foreach (var i in DeclaringType.TypeAsTBD.GetMethods(flags))
++                    if (i.Name == mb.Name && i.GetParameters().Select(j => j.ParameterType).SequenceEqual(types) && i.ReturnType.Equals(ReturnType.TypeAsSignatureType))
++                        candidates.Add(i);
++                if (candidates.Count == 0)
++                    foreach (var i in DeclaringType.TypeAsTBD.GetConstructors(flags))
++                        if (i.GetParameters().Select(j => j.ParameterType).SequenceEqual(types))
++                            candidates.Add(i);
++
++                if (candidates.Count == 1)
++                    method = candidates[0];
++                else if (candidates.Count > 1)
++                    method = candidates.FirstOrDefault(MatchesModOpt) ?? candidates[0];
++
+                 if (method == null)
+                     throw new InternalException("Could not resolve method against runtime type.");
+ #endif
+@@ -520,6 +532,35 @@ internal void ResolveMethod()
+ #endif
+         }
+ 
++#if !FIRST_PASS && !NETFRAMEWORK
++
++        /// <summary>
++        /// Returns true if the candidate's parameter optional custom modifiers match the ones IKVM
++        /// would emit for this method's signature (used to disambiguate erased overloads).
++        /// </summary>
++        bool MatchesModOpt(MethodBase candidate)
++        {
++            var parameters = GetParameters();
++            var pi = candidate.GetParameters();
++            var factory = DeclaringType.ClassLoader.GetTypeWrapperFactory();
++
++            for (int i = 0; i < parameters.Length; i++)
++            {
++                var expected = RuntimeByteCodeJavaType.GetModOpt(factory, parameters[i], false);
++                var actual = pi[i].GetOptionalCustomModifiers();
++                if (expected.Length != actual.Length)
++                    return false;
++
++                for (int j = 0; j < expected.Length; j++)
++                    if (Array.IndexOf(actual, expected[j]) < 0)
++                        return false;
++            }
++
++            return true;
++        }
++
++#endif
++
+         [HideFromJava]
+         internal virtual object InvokeNonvirtualRemapped(object obj, object[] args)
+         {
 diff --git a/src/IKVM.Runtime/RuntimeJavaType.cs b/src/IKVM.Runtime/RuntimeJavaType.cs
-index 113078629..c456f5d50 100644
+index 113078629..9069753c7 100644
 --- a/src/IKVM.Runtime/RuntimeJavaType.cs
 +++ b/src/IKVM.Runtime/RuntimeJavaType.cs
 @@ -312,11 +312,38 @@ private static void ResolvePrimitiveTypeWrapperClasses(RuntimeContext context)
@@ -5487,7 +6381,17 @@ index 113078629..c456f5d50 100644
                  if (type == typeof(void) || type.IsPrimitive || JVM.Context.ClassLoaderFactory.IsRemappedType(type))
                      tw = JVM.Context.ManagedJavaTypeFactory.GetJavaTypeFromManagedType(type);
                  else
-@@ -1321,7 +1360,7 @@ internal void EmitConvStackTypeToSignatureType(CodeEmitter ilgen, RuntimeJavaTyp
+@@ -527,7 +566,8 @@ internal bool IsNonPrimitiveValueType
+         {
+             get
+             {
+-                return this != context.VerifierJavaTypeFactory.Null && !IsPrimitive && !IsGhost && TypeAsTBD.IsValueType;
++                // unloadable types are erased to object, never a value type (and TypeAsTBD throws)
++                return this != context.VerifierJavaTypeFactory.Null && !IsUnloadable && !IsPrimitive && !IsGhost && TypeAsTBD.IsValueType;
+             }
+         }
+ 
+@@ -1321,7 +1361,7 @@ internal void EmitConvStackTypeToSignatureType(CodeEmitter ilgen, RuntimeJavaTyp
                  // for any interface reference
                  else if (IsInterfaceOrInterfaceArray && (sourceType == null || sourceType.IsUnloadable || !sourceType.IsAssignableTo(this)))
                  {
@@ -5496,16 +6400,30 @@ index 113078629..c456f5d50 100644
                      Profiler.Count("InterfaceDownCast");
                  }
                  else if (IsNonPrimitiveValueType)
+@@ -1535,7 +1575,7 @@ internal virtual object GetAnnotationDefault(RuntimeJavaMethod mw)
+                 object[] attr = mb.GetCustomAttributes(typeof(AnnotationDefaultAttribute), false);
+                 if (attr.Length == 1)
+                 {
+-                    return JVM.NewAnnotationElementValue(mw.DeclaringType.ClassLoader.GetJavaClassLoader(), mw.ReturnType.ClassObject, ((AnnotationDefaultAttribute)attr[0]).Value);
++                    return JVM.NewAnnotationElementValue(mw.DeclaringType.ClassLoader.GetJavaClassLoader(), mw.ReturnType.EnsureLoadable(mw.DeclaringType.ClassLoader).ClassObject, ((AnnotationDefaultAttribute)attr[0]).Value);
+                 }
+             }
+             return null;
 diff --git a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs b/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
-index 05961e1ed..5492a5393 100644
+index 05961e1ed..23c1ffa58 100644
 --- a/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
 +++ b/src/IKVM.Runtime/RuntimeUnloadableJavaType.cs
-@@ -54,7 +54,7 @@ sealed class RuntimeUnloadableJavaType : RuntimeJavaType
+@@ -54,7 +54,12 @@ sealed class RuntimeUnloadableJavaType : RuntimeJavaType
          internal RuntimeUnloadableJavaType(RuntimeContext context, string name) :
              base(context, TypeFlags.None, RuntimeJavaType.UnloadableModifiersHack, name)
          {
 -
-+			Console.WriteLine($"[IKVM internal] Java type failed to load!! This may crash later {name}");
++#if !EXPORTER
++            // under lazy linking unloadable types are the expected mechanism for deferred
++            // resolution, not a sign of trouble, so don't spam the console
++            if (!JVM.LazyClassLoading)
++                Console.WriteLine($"[IKVM internal] Java type failed to load!! This may crash later {name}");
++#endif
          }
  
          /// <summary>
@@ -5848,7 +6766,7 @@ index 224a48cdd..3732a1f10 100644
          /// Opens the class file.
          /// </summary>
 diff --git a/src/IKVM.Runtime/compiler.cs b/src/IKVM.Runtime/compiler.cs
-index b98d8eb5a..8f926cf34 100644
+index b98d8eb5a..97b328c40 100644
 --- a/src/IKVM.Runtime/compiler.cs
 +++ b/src/IKVM.Runtime/compiler.cs
 @@ -1157,15 +1157,21 @@ void Compile(Block block, int startIndex)
@@ -5877,16 +6795,28 @@ index b98d8eb5a..8f926cf34 100644
                      case NormalizedByteCode.__fconst_2:
                          ilGenerator.EmitLdc_R4(2.0f);
                          break;
-@@ -3117,7 +3123,7 @@ void CastInterfaceArgs(RuntimeJavaType declaringType, RuntimeJavaType[] args, in
+@@ -1637,6 +1643,10 @@ void Compile(Block block, int startIndex)
+                             var wrapper = classFile.GetConstantPoolClassType(instr.Arg1);
+                             if (wrapper.IsUnloadable)
+                             {
++#if !IMPORTER && !FIRST_PASS && !EXPORTER
++                                if (JVM.TraceLoadClass)
++                                    Console.Error.WriteLine($"[IKVM new-unloadable] {wrapper.Name} in {clazz.Name}.{m.Name}{m.Signature} @{i}");
++#endif
+                                 Profiler.Count("EmitDynamicNewCheckOnly");
+                                 // this is here to make sure we throw the exception in the right location (before
+                                 // evaluating the constructor arguments)
+@@ -3117,7 +3127,8 @@ void CastInterfaceArgs(RuntimeJavaType declaringType, RuntimeJavaType[] args, in
                          RuntimeJavaType tw = ma.GetStackTypeWrapper(instructionIndex, args.Length - 1 - i);
                          if (tw.IsUnloadable || (args[i].IsInterfaceOrInterfaceArray && NeedsInterfaceDownCast(tw, args[i])))
                          {
 -                            ilGenerator.EmitAssertType(args[i].TypeAsTBD);
-+                            ilGenerator.EmitAssertType(args[i].TypeAsTBD, "IKVM interface-downcast: arg #" + i + " (" + args[i].Name + ") in " + classFile.Name + "." + m.Name + m.Signature + " calling " + declaringType.Name);
++                            // declaringType is null on the invokedynamic path
++                            ilGenerator.EmitAssertType(args[i].TypeAsTBD, "IKVM interface-downcast: arg #" + i + " (" + args[i].Name + ") in " + classFile.Name + "." + m.Name + m.Signature + (declaringType != null ? " calling " + declaringType.Name : ""));
                              Profiler.Count("InterfaceDownCast");
                          }
                      }
-@@ -3130,7 +3136,7 @@ void CastInterfaceArgs(RuntimeJavaType declaringType, RuntimeJavaType[] args, in
+@@ -3130,7 +3141,7 @@ void CastInterfaceArgs(RuntimeJavaType declaringType, RuntimeJavaType[] args, in
                  {
                      if (declaringType.IsInterface)
                      {

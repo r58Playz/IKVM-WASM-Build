@@ -130,7 +130,8 @@ create_archive "$OUT_DIR/native/${PREFIX}libjvm.a" "$TMP_DIR/jni.o" "$TMP_DIR/jn
 log "Building ${PREFIX}libikvm ..."
 run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c"  -o "$TMP_DIR/dl.o"
 run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o "$TMP_DIR/sig.o"
-create_archive "$OUT_DIR/native/${PREFIX}libikvm.a" "$TMP_DIR/dl.o" "$TMP_DIR/sig.o"
+run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/mem.c" -o "$TMP_DIR/mem.o"
+create_archive "$OUT_DIR/native/${PREFIX}libikvm.a" "$TMP_DIR/dl.o" "$TMP_DIR/sig.o" "$TMP_DIR/mem.o"
 
 # ── libiava ───────────────────────────────────────────────────────────────────
 # Source directories (linux uses solaris as the OS API dir per OpenJDK 8 convention)
