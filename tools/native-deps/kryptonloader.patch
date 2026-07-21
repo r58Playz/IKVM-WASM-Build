@@ -1454,10 +1454,50 @@ index 721c3ff..58ddcf2 100644
  #define DBG(a)
  #define DBGLOGD(...)                                                                                                   \
 diff --git a/src/gl/framebuffers.c b/src/gl/framebuffers.c
-index 3d56b6e..f448151 100644
+index 3d56b6e..f2fecc0 100644
 --- a/src/gl/framebuffers.c
 +++ b/src/gl/framebuffers.c
-@@ -1575,7 +1575,7 @@ void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX
+@@ -1324,22 +1324,31 @@ void createMainFBO(int width, int height) {
+     gles_glTexImage2D(GL_TEXTURE_2D, 0, globals4es.fbo_noalpha ? GL_RGB : GL_RGBA, width, height, 0,
+                       globals4es.fbo_noalpha ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+     gles_glBindTexture(GL_TEXTURE_2D, 0);
+-    // create the render buffers
++    // create the render buffers. ANGLE/WebGL rejects a framebuffer with separate depth and
++    // stencil renderbuffers (GL_FRAMEBUFFER_UNSUPPORTED), so when packed depth-stencil is
++    // available use a single combined DEPTH24_STENCIL8 buffer attached to both points.
+     if (createIt) {
+         gles_glGenRenderbuffers(1, &glstate->fbo.mainfbo_dep);
+-        gles_glGenRenderbuffers(1, &glstate->fbo.mainfbo_ste);
++        if (!hardext.depthstencil) gles_glGenRenderbuffers(1, &glstate->fbo.mainfbo_ste);
++    }
++    if (hardext.depthstencil) {
++        gles_glBindRenderbuffer(GL_RENDERBUFFER, glstate->fbo.mainfbo_dep);
++        gles_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
++        gles_glBindRenderbuffer(GL_RENDERBUFFER, 0);
++    } else {
++        gles_glBindRenderbuffer(GL_RENDERBUFFER, glstate->fbo.mainfbo_ste);
++        gles_glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, width, height);
++        gles_glBindRenderbuffer(GL_RENDERBUFFER, glstate->fbo.mainfbo_dep);
++        gles_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
++        gles_glBindRenderbuffer(GL_RENDERBUFFER, 0);
+     }
+-    gles_glBindRenderbuffer(GL_RENDERBUFFER, glstate->fbo.mainfbo_ste);
+-    gles_glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, width, height);
+-    gles_glBindRenderbuffer(GL_RENDERBUFFER, glstate->fbo.mainfbo_dep);
+-    gles_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+-    gles_glBindRenderbuffer(GL_RENDERBUFFER, 0);
+     // create a fbo
+     if (createIt) gles_glGenFramebuffers(1, &glstate->fbo.mainfbo_fbo);
+     gles_glBindFramebuffer(GL_FRAMEBUFFER, glstate->fbo.mainfbo_fbo);
+ 
+     // re-attach, even if not creating the fbo...
+-    gles_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, glstate->fbo.mainfbo_ste);
++    gles_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
++                                   hardext.depthstencil ? glstate->fbo.mainfbo_dep : glstate->fbo.mainfbo_ste);
+     gles_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, glstate->fbo.mainfbo_dep);
+ 
+     gles_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glstate->fbo.mainfbo_tex, 0);
+@@ -1575,7 +1584,7 @@ void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX
      // #endif
  }
  
@@ -1617,6 +1657,28 @@ index 4008caf..8b8e6cf 100644
      // stub non-squared matrix access
      STUB(glUniformMatrix2x3fv);
      STUB(glUniformMatrix3x2fv);
+diff --git a/src/gl/glsl/glsl_for_es.cpp b/src/gl/glsl/glsl_for_es.cpp
+index ad4337e..89faf21 100644
+--- a/src/gl/glsl/glsl_for_es.cpp
++++ b/src/gl/glsl/glsl_for_es.cpp
+@@ -343,6 +343,17 @@ char* GLSLtoGLSLES_c(const char* glsl_code, GLenum glsl_type, unsigned int essl_
+     std::string result = GLSLtoGLSLES(glsl_code, glsl_type, essl_version, glsl_version, tmp_return_code);
+     *return_code = tmp_return_code;
+ 
++    // A negative return code means the GLSL -> GLSL ES translation failed (glslang or SPIRV-Cross
++    // error). In that case GLSLtoGLSLES() returns the *raw desktop GLSL input unchanged*, which is
++    // invalid for GLES/WebGL: wrong #version (e.g. 460), no default precision, and desktop-only
++    // types such as sampler1DShadow. Handing that back would ship it straight to the driver and
++    // produce "invalid version directive" / "No precision specified" / "sampler1DShadow reserved
++    // word" errors. Return NULL instead so callers fall back to the text-based converter
++    // (ConvertShaderConditionally), which emits valid GLSL ES.
++    if (tmp_return_code < 0) {
++        return nullptr;
++    }
++
+     char* cstr = (char*)malloc(result.size() + 1);
+     if (!cstr) {
+         *return_code = -1;
 diff --git a/src/gl/krypton_export_names.h b/src/gl/krypton_export_names.h
 new file mode 100644
 index 0000000..c23345d
@@ -1689,6 +1751,87 @@ index 7615413..9f35033 100644
  #define DBG(a) a
  #pragma GCC optimize 0
  #else
+diff --git a/src/gl/shader.c b/src/gl/shader.c
+index d8c1533..c3f2a1b 100644
+--- a/src/gl/shader.c
++++ b/src/gl/shader.c
+@@ -729,9 +729,18 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
+                         convertedSource = ConvertShaderBuiltInVariableOnly(
+                             convertedSource, glshader->type == GL_VERTEX_SHADER ? 1 : 0, &glshader->need,
+                             isBuiltInVariableConverted ? 0 : 1);
+-                    free(glshader->source);
++                    // Only free the original source when ConvertShaderBuiltInVariableOnly() returned
++                    // a new buffer; when it was skipped, convertedSource == glshader->source and
++                    // freeing it here would dangle everything below.
++                    if (convertedSource != glshader->source) free(glshader->source);
+                     if (glshader->type == GL_FRAGMENT_SHADER) {
+-                        if (contains_glFragColor(glshader->source)) {
++                        // NB: check convertedSource, not glshader->source (which may already be
++                        // freed above). ConvertShaderBuiltInVariableOnly() does not touch
++                        // gl_FragColor, so convertedSource still carries it. The old code read the
++                        // just-freed glshader->source: when the freed block reads back as cleared,
++                        // gl_FragColor is left unreplaced and glslang later rejects it (undeclared in
++                        // core GLSL), dropping the shader onto the broken raw-desktop-GLSL fallback.
++                        if (contains_glFragColor(convertedSource)) {
+                             convertedSource = replace_glFragColor(convertedSource);
+                             convertedSource = insert_gl_FragColor_if_missing(convertedSource);
+                         } else {
+diff --git a/src/gl/shaderconv.c b/src/gl/shaderconv.c
+index c1cd238..c680dfe 100644
+--- a/src/gl/shaderconv.c
++++ b/src/gl/shaderconv.c
+@@ -944,35 +944,16 @@ char* ConvertShaderBuiltInVariableOnly(const char* pEntry, int isVertex, shaderc
+         Tmp = ReplaceFunctionName(Tmp, &tmpsize, "texture2D", "texture");
+         Tmp = ReplaceFunctionName(Tmp, &tmpsize, "texture3D", "texture");
+         Tmp = ReplaceFunctionName(Tmp, &tmpsize, "texture2DLod", "textureLod");
+-        // insert shadowany wrapper :
+-        // vec4 shadow1D(sampler1DShadow s, vec3 c){float r=texture(s,c);return vec4(r);} vec4 shadow1D(sampler1DShadow
+-        // s, vec3 c,float b){float r=texture(s,c,b);return vec4(r);} vec4 shadow2D(sampler2DShadow s, vec3 c){float
+-        // r=texture(s,c);return vec4(r);} vec4 shadow2D(sampler2DShadow s, vec3 c,float b){float
+-        // r=texture(s,c,b);return vec4(r);} vec4 shadow1DProj(sampler1DShadow s, vec4 c){float
+-        // r=textureProj(s,c);return vec4(r);} vec4 shadow1DProj(sampler1DShadow s, vec4 c,float b){float
+-        // r=textureProj(s,c,b);return vec4(r);} vec4 shadow2DProj(sampler2DShadow s, vec4 c){float
+-        // r=textureProj(s,c);return vec4(r);} vec4 shadow2DProj(sampler2DShadow s, vec4 c,float b){float
+-        // r=textureProj(s,c,b);return vec4(r);} vec4 shadow1DLod(sampler1DShadow s, vec3 c,float l){float
+-        // r=textureLod(s,c,l);return vec4(r);} vec4 shadow2DLod(sampler2DShadow s, vec3 c,float l){float
+-        // r=textureLod(s,c,l);return vec4(r);} vec4 shadow1DProjLod(sampler1DShadow s, vec4 c,float l){float
+-        // r=textureProjLod(s,c,l);return vec4(r);} vec4 shadow2DProjLod(sampler2DShadow s, vec4 c,float l){float
+-        // r=textureProjLod(s,c,l);return vec4(r);}
++        // insert shadow wrapper helpers.
++        // GLSL ES has no sampler1D / sampler1DShadow (they are reserved words with no valid
++        // meaning), so the shadow1D* overloads can never compile and must never be emitted --
++        // injecting them unconditionally is what produced the "sampler1DShadow : Illegal use of
++        // reserved word" error. Only emit the sampler2DShadow helpers, and only when the shader
++        // actually references a shadow2D* function, so ordinary shaders are left untouched.
+         const char* wrapper =
+-            "vec4 shadow1D(sampler1DShadow s, vec3 c){float r=texture(s,c);return vec4(r);}\n "
+-            "//vec4 shadow1D(sampler1DShadow s, vec3 c,float b){float r=texture(s,c,b);return vec4(r);}\n "
+             "vec4 shadow2D(sampler2DShadow s, vec3 c){float r=texture(s,c);return vec4(r);}\n "
+-            "//vec4 shadow2D(sampler2DShadow s, vec3 c,float b){float r=texture(s,c,b);return vec4(r);}\n "
+-            "vec4 shadow1DProj(sampler1DShadow s, vec4 c){float r=textureProj(s,c);return vec4(r);}\n "
+-            "//vec4 shadow1DProj(sampler1DShadow s, vec4 c,float b){float r=textureProj(s,c,b);return vec4(r);}\n "
+-            "vec4 shadow2DProj(sampler2DShadow s, vec4 c){float r=textureProj(s,c);return vec4(r);}\n "
+-            "//vec4 shadow2DProj(sampler2DShadow s, vec4 c,float b){float r=textureProj(s,c,b);return vec4(r);}\n "
+-            "//vec4 shadow1DLod(sampler1DShadow s, vec3 c,float l){float r=textureLod(s,c,l);return vec4(r);}\n "
+-            "//vec4 shadow2DLod(sampler2DShadow s, vec3 c,float l){float r=textureLod(s,c,l);return vec4(r);}\n "
+-            "//vec4 shadow1DProjLod(sampler1DShadow s, vec4 c,float l){float r=textureProjLod(s,c,l);return "
+-            "vec4(r);}\n "
+-            "//vec4 shadow2DProjLod(sampler2DShadow s, vec4 c,float l){float r=textureProjLod(s,c,l);return "
+-            "vec4(r);}\n";
+-        if (!strstr(Tmp, "vec4 shadow1D(sampler1DShadow s, vec3 c)")) {
++            "vec4 shadow2DProj(sampler2DShadow s, vec4 c){float r=textureProj(s,c);return vec4(r);}\n";
++        if (FindString(Tmp, "shadow2D") && !strstr(Tmp, "vec4 shadow2D(sampler2DShadow s, vec3 c)")) {
+             Tmp = InplaceInsert(GetLine(Tmp, headline), wrapper, Tmp, &tmpsize);
+         }
+ 
+@@ -1047,7 +1028,6 @@ char* ConvertShader(const char* pEntry, int isVertex, shaderconv_need_t* need, i
+     int wanthighp = !fpeShader;
+     if (wanthighp && !hardext.highp) wanthighp = 0;
+     int versionHeader = 0;
+-    printf("version string: %s", versionString);
+     if (versionString && (strcmp(versionString, "120") == 0 || strcmp(versionString, "110") == 0 ||
+                           strstr(versionString, "150") != NULL))
+         version120 = forwardPort ? 1 : 0;
 diff --git a/src/gl/texture.c b/src/gl/texture.c
 index 3fc443f..affb969 100644
 --- a/src/gl/texture.c
@@ -2056,3 +2199,28 @@ index 13605f6..9f9967e 100644
      return gles_glGetProgramResourceLocationIndexEXT(program, programInterface, name);
  }
 +} // extern "C"
+diff --git a/src/glx/hardext.c b/src/glx/hardext.c
+index 7edb6aa..ae856cc 100644
+--- a/src/glx/hardext.c
++++ b/src/glx/hardext.c
+@@ -365,6 +365,20 @@ void GetHardwareExtensions(int notest) {
+         S("GL_OES_depth_texture ", depthtex, 1);
+         S("GL_OES_texture_stencil8 ", stenciltex, 1);
+     }
++    // Packed depth-stencil (DEPTH24_STENCIL8) and 24bit depth are core in GLES3+, so the
++    // OES extension strings are not advertised. Force them on so depth+stencil framebuffers
++    // use a single combined DEPTH24_STENCIL8 image instead of two separate renderbuffers:
++    // ANGLE/WebGL rejects separate depth+stencil attachments with GL_FRAMEBUFFER_UNSUPPORTED.
++    if (hardext.esversion > 2) {
++        if (!hardext.depthstencil) {
++            hardext.depthstencil = 1;
++            SHUT_LOGD("Packed depth-stencil is core in GLES3, and so used");
++        }
++        if (!hardext.depth24) {
++            hardext.depth24 = 1;
++            SHUT_LOGD("24bit depth is core in GLES3, and so used");
++        }
++    }
+     S("GL_OES_draw_texture ", drawtex, 1);
+     S("GL_EXT_texture_rg ", rgtex, 1);
+     if (globals4es.floattex) {
