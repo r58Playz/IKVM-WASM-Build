@@ -2,7 +2,9 @@ name: IKVM WASM Build
 
 env:
   EMSDK_VERSION: 3.1.56
-  IKVM_REF: 8.14.0
+  IKVM_REPO: https://github.com/r58playz/ikvm.git
+  IKVM_REF: wasm
+  IKVM_VERSION: 8.14.0
   BUILD_RUNTIME: linux-x64
 
 on:
@@ -16,8 +18,17 @@ jobs:
     name: Build IKVM Managed Runtime
     runs-on: ubuntu-24.04
     timeout-minutes: 720
+    # IKVM.Java resolves org.ikvm:java-ref-plugin from GitHub Packages, which
+    # rejects anonymous maven reads (401) even for public packages.
+    permissions:
+      contents: read
+      packages: read
     env:
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+      # Prefer a PAT with read:packages if one is configured; the automatic token
+      # works for public packages but cannot read private ones cross-repository.
+      IKVM_MAVEN_USER: ${{ github.actor }}
+      IKVM_MAVEN_TOKEN: ${{ secrets.IKVM_MAVEN_TOKEN || github.token }}
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -30,15 +41,35 @@ jobs:
           restore-keys: |
             nuget-${{ runner.os }}-
 
-      - name: Setup .NET 9
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 9.0.x
+          # IKVM's global.json pins the SDK feature band; the fork's base wants 10.0.x
+          dotnet-version: 10.0.x
 
       - name: Install Managed Build Prereqs
         run: |
           sudo apt-get update && \
-          sudo apt-get install -y mono-runtime mono-devel openjdk-8-jdk-headless clang llvm
+          sudo apt-get install -y mono-runtime mono-devel openjdk-8-jdk-headless clang llvm maven
+
+      - name: Configure Maven for GitHub Packages
+        shell: bash
+        run: |
+          # ubuntu-24.04 ships maven 3.8, which predates MAVEN_ARGS, so the
+          # credentials have to go in the user settings file. The token itself is
+          # read from the environment at run time rather than written out here.
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'XML'
+          <settings>
+              <servers>
+                  <server>
+                      <id>ikvmnet</id>
+                      <username>${env.IKVM_MAVEN_USER}</username>
+                      <password>${env.IKVM_MAVEN_TOKEN}</password>
+                  </server>
+              </servers>
+          </settings>
+          XML
 
       - name: Build managed artifacts via script
         shell: bash

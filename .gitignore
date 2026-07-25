@@ -2,6 +2,7 @@
 /.dotnet
 /.nuget
 /tools/ikvm/ikvm
+/tools/ikvm/ikvm.old*
 /tools/ikvm/out
 /tools/native-deps/emscripten-glfw
 /tools/native-deps/MobileGL

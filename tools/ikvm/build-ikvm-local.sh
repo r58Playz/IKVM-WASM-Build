@@ -4,11 +4,21 @@
 
 set -euo pipefail
 
-IKVM_REF="${IKVM_REF:-8.14.0}"
+# The WASM fork of IKVM. Its `wasm` branch carries what used to live in ikvm.patch,
+# as a series of individually described commits on top of ikvmnet/ikvm main.
+IKVM_REPO="${IKVM_REPO:-https://github.com/r58playz/ikvm.git}"
+IKVM_REF="${IKVM_REF:-wasm}"
+# Version stamp for the assemblies; unrelated to IKVM_REF, which is now a branch name
+# and not a valid semver.
+IKVM_VERSION="${IKVM_VERSION:-8.14.0}"
+# Must satisfy the checkout's global.json sdk pin (10.0.x on the fork's base).
+DOTNET_CHANNEL="${DOTNET_CHANNEL:-10.0}"
 NATIVE_SDK_VERSION="${NATIVE_SDK_VERSION:-20251124.1}"
 EMSDK_VERSION="${EMSDK_VERSION:-3.1.56}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
+# Where the fork gets cloned. Override to build from an existing checkout.
+IKVM_DIR="${IKVM_DIR:-$WORKSPACE/ikvm}"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_RUNTIME="${BUILD_RUNTIME:-linux-x64}"
 ENABLED_RUNTIMES="${ENABLED_RUNTIMES:-$BUILD_RUNTIME}"
@@ -56,6 +66,26 @@ require_cmd() {
         echo "ERROR: required command '$1' not found" >&2
         exit 1
     fi
+}
+
+# The TFM the tools are published under tracks whatever upstream currently builds
+# them for (net8.0 up to 8.14.0, net10.0 since) and is independent of the net8.0
+# JRE image, so discover it rather than pinning it. Highest version wins.
+find_tools_dist_dir() {
+    local d newest="" a b
+    for d in "$IKVM_DIR"/dist/tools/*/"$BUILD_RUNTIME"; do
+        [ -d "$d" ] || continue
+        if [ -z "$newest" ]; then
+            newest="$d"
+            continue
+        fi
+        a="$(basename "$(dirname "$d")")"
+        b="$(basename "$(dirname "$newest")")"
+        if [ "$(printf '%s\n%s\n' "${a#net}" "${b#net}" | sort -V | tail -1)" = "${a#net}" ]; then
+            newest="$d"
+        fi
+    done
+    printf '%s' "$newest"
 }
 
 apply_patch_once() {
@@ -226,8 +256,9 @@ if [ "$SKIP_MANAGED" = "false" ]; then
 fi
 
 # ── .NET SDK setup ────────────────────────────────────────────────────────────
-# IKVM's global.json requires .NET 9.0.x (rollForward: latestFeature).
-# Install it locally via dotnet-install.sh if the system doesn't have it.
+# IKVM's global.json pins the SDK feature band (rollForward: latestFeature): 9.0.x
+# up to 8.14.0, 10.0.x on the fork's current base. Install it locally via
+# dotnet-install.sh if the system doesn't have it.
 
 if [ "$SKIP_MANAGED" = "false" ]; then
 
@@ -235,19 +266,19 @@ DOTNET_INSTALL_DIR="$REPO_ROOT/.dotnet"
 DOTNET_INSTALL_SCRIPT="$REPO_ROOT/.dotnet-install.sh"
 
 _dotnet_has_sdk() {
-    # returns 0 if a 9.x SDK is already reachable
-    dotnet --list-sdks 2>/dev/null | grep -q "^9\."
+    # returns 0 if an SDK from the required channel is already reachable
+    dotnet --list-sdks 2>/dev/null | grep -q "^${DOTNET_CHANNEL%%.*}\."
 }
 
 if ! _dotnet_has_sdk; then
-    log "No .NET 9 SDK found – installing to $DOTNET_INSTALL_DIR ..."
+    log "No .NET ${DOTNET_CHANNEL} SDK found – installing to $DOTNET_INSTALL_DIR ..."
     mkdir -p "$DOTNET_INSTALL_DIR"
     if [ ! -f "$DOTNET_INSTALL_SCRIPT" ]; then
         curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$DOTNET_INSTALL_SCRIPT"
         chmod +x "$DOTNET_INSTALL_SCRIPT"
     fi
-    log "  Installing .NET 9 SDK ..."
-    "$DOTNET_INSTALL_SCRIPT" --channel "9.0" --install-dir "$DOTNET_INSTALL_DIR" --no-path
+    log "  Installing .NET ${DOTNET_CHANNEL} SDK ..."
+    "$DOTNET_INSTALL_SCRIPT" --channel "$DOTNET_CHANNEL" --install-dir "$DOTNET_INSTALL_DIR" --no-path
     export DOTNET_ROOT="$DOTNET_INSTALL_DIR"
     export PATH="$DOTNET_INSTALL_DIR:$PATH"
 else
@@ -263,28 +294,29 @@ fi # end SKIP_MANAGED=false
 
 # ── Step 1: Clone IKVM source ─────────────────────────────────────────────────
 
-if [ ! -d "$WORKSPACE/ikvm/.git" ]; then
-    log "Cloning ikvmnet/ikvm @ $IKVM_REF ..."
+if [ ! -d "$IKVM_DIR/.git" ]; then
+    log "Cloning $IKVM_REPO @ $IKVM_REF ..."
     git clone \
         --recurse-submodules \
         --branch "$IKVM_REF" \
-        https://github.com/ikvmnet/ikvm.git \
-        "$WORKSPACE/ikvm"
+        "$IKVM_REPO" \
+        "$IKVM_DIR"
 else
     log "IKVM source already present, skipping clone."
 fi
 
 log "Updating IKVM submodules ..."
-git -C "$WORKSPACE/ikvm" submodule update --init --recursive
+git -C "$IKVM_DIR" submodule update --init --recursive
 
 # ── Step 2: Apply patch ───────────────────────────────────────────────────────
+# The IKVM-side changes are commits on the fork's branch, not a patch. Only the
+# OpenJDK submodule is still patched in place.
 
-apply_patch_once "$WORKSPACE/ikvm" "$WORKSPACE/ikvm.patch" "ikvm.patch"
-apply_patch_once "$WORKSPACE/ikvm/ext/openjdk" "$WORKSPACE/openjdk.patch" "openjdk.patch"
+apply_patch_once "$IKVM_DIR/ext/openjdk" "$WORKSPACE/openjdk.patch" "openjdk.patch"
 
 # ── Step 3: Version environment variables ─────────────────────────────────────
 
-VERSION="$IKVM_REF"
+VERSION="$IKVM_VERSION"
 export GitVersion_FullSemVer="$VERSION"
 export GitVersion_SemVer="$VERSION"
 export GitVersion_AssemblySemVer="${VERSION}.0"
@@ -299,7 +331,7 @@ export GitVersion_WeightedPreReleaseNumber="0"
 
 if [ "$SKIP_MANAGED" = "false" ]; then
 
-JTREG_DIR="$WORKSPACE/ikvm/ext/jtreg"
+JTREG_DIR="$IKVM_DIR/ext/jtreg"
 JTREG_STAMP="$JTREG_DIR/build/stamp"
 
 if [ -f "$JTREG_STAMP" ]; then
@@ -317,7 +349,7 @@ fi
 
 # ── Step 5: Download Native SDKs ─────────────────────────────────────────────
 
-NATIVE_SDK_DIR="$WORKSPACE/ikvm/ext/ikvm-native-sdk"
+NATIVE_SDK_DIR="$IKVM_DIR/ext/ikvm-native-sdk"
 mkdir -p "$NATIVE_SDK_DIR"
 
 collect_native_sdk_assets "$ENABLED_RUNTIMES"
@@ -365,7 +397,90 @@ if [ -n "$CLANG_COMPAT_FLAGS" ]; then
     RUNTIME_BUILD_PROPS+=("/p:AdditionalCompileOptions=$CLANG_COMPAT_FLAGS")
 fi
 
-cd "$WORKSPACE/ikvm"
+# ── Step 6b: Maven credentials for the java-ref-plugin ───────────────────────
+# IKVM.Java (the ref assembly) runs `mvn copy-dependencies` to fetch
+# org.ikvm:java-ref-plugin from https://maven.pkg.github.com/ikvmnet/*. GitHub
+# Packages refuses anonymous maven reads with HTTP 401 even for public packages,
+# so a token is required. Fail here with something readable instead of letting it
+# surface as MSB3073 several minutes into the build.
+setup_maven_auth() {
+    if ! command -v mvn &>/dev/null; then
+        cat >&2 <<'EOF'
+ERROR: 'mvn' not found on PATH.
+  IKVM.Java fetches org.ikvm:java-ref-plugin through maven. Install it, e.g.:
+    Arch:   sudo pacman -S maven
+    Debian: sudo apt-get install -y maven
+EOF
+        exit 1
+    fi
+
+    # An existing user-level settings.xml that already knows about the repo wins;
+    # don't second-guess it.
+    if grep -qs 'maven\.pkg\.github\.com\|<id>ikvmnet</id>' "$HOME/.m2/settings.xml"; then
+        log "Maven: using server credentials from $HOME/.m2/settings.xml"
+        return
+    fi
+
+    if [ -z "${IKVM_MAVEN_TOKEN:-}" ]; then
+        cat >&2 <<'EOF'
+ERROR: no maven credentials for GitHub Packages.
+  IKVM.Java fetches org.ikvm:java-ref-plugin from
+  https://maven.pkg.github.com/ikvmnet/* , which returns 401 without a token
+  (this is true even though the package is public).
+
+  Create a classic personal access token with the read:packages scope, then:
+
+    export IKVM_MAVEN_USER=<your github username>
+    export IKVM_MAVEN_TOKEN=<the token>
+
+  and re-run. Alternatively add a <server> with id 'ikvmnet' to
+  ~/.m2/settings.xml yourself and this check will defer to it.
+EOF
+        exit 1
+    fi
+
+    # Generate a settings file that reads the token from the environment, so the
+    # credential itself is never written to disk.
+    local settings="$WORKSPACE/out/maven-settings.xml"
+    mkdir -p "$(dirname "$settings")"
+    cat > "$settings" <<'EOF'
+<settings>
+    <servers>
+        <server>
+            <id>ikvmnet</id>
+            <username>${env.IKVM_MAVEN_USER}</username>
+            <password>${env.IKVM_MAVEN_TOKEN}</password>
+        </server>
+    </servers>
+</settings>
+EOF
+
+    export IKVM_MAVEN_USER="${IKVM_MAVEN_USER:-x-access-token}"
+
+    # -s can only be injected without patching IKVM.Java.ikvmproj via MAVEN_ARGS,
+    # which maven only honours from 3.9 on. Older maven has to use ~/.m2.
+    local ver major minor
+    ver="$(mvn -v 2>/dev/null | sed -n '1s/.*Apache Maven \([0-9.]*\).*/\1/p')"
+    major="${ver%%.*}"
+    minor="$(printf '%s' "${ver#*.}" | cut -d. -f1)"
+    if [ "${major:-0}" -gt 3 ] || { [ "${major:-0}" -eq 3 ] && [ "${minor:-0}" -ge 9 ]; }; then
+        export MAVEN_ARGS="-s $settings ${MAVEN_ARGS:-}"
+        log "Maven $ver: injecting -s $settings via MAVEN_ARGS"
+    else
+        mkdir -p "$HOME/.m2"
+        if [ -e "$HOME/.m2/settings.xml" ]; then
+            echo "ERROR: maven $ver predates MAVEN_ARGS and $HOME/.m2/settings.xml already exists." >&2
+            echo "       Add a <server> with id 'ikvmnet' to it, or upgrade maven to 3.9+." >&2
+            exit 1
+        fi
+        cp "$settings" "$HOME/.m2/settings.xml"
+        log "Maven $ver predates MAVEN_ARGS; wrote $HOME/.m2/settings.xml"
+    fi
+}
+
+setup_maven_auth
+
+cd "$IKVM_DIR"
 log "Running NuGet restore ..."
 dotnet restore IKVM.sln "${RUNTIME_BUILD_PROPS[@]}"
 
@@ -402,13 +517,16 @@ dotnet msbuild /m /bl /nr:false \
 log "Packaging managed outputs ..."
 mkdir -p "$WORKSPACE/out/managed"
 
-cp "$WORKSPACE/ikvm/dist/jre/net8.0/$BUILD_RUNTIME/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll "$WORKSPACE/out/managed/"
+cp "$IKVM_DIR/dist/jre/net8.0/$BUILD_RUNTIME/bin/IKVM."{ByteCode,CoreLib,Java,Runtime}.dll "$WORKSPACE/out/managed/"
 
-IKVM_TOOLS_DIST_DIR="$WORKSPACE/ikvm/dist/tools/net8.0/$BUILD_RUNTIME"
-if [ ! -d "$IKVM_TOOLS_DIST_DIR" ]; then
-    echo "ERROR: IKVM tools directory not found at: $IKVM_TOOLS_DIST_DIR" >&2
+IKVM_TOOLS_DIST_DIR="${IKVM_TOOLS_DIST_DIR:-$(find_tools_dist_dir)}"
+if [ -z "$IKVM_TOOLS_DIST_DIR" ] || [ ! -d "$IKVM_TOOLS_DIST_DIR" ]; then
+    echo "ERROR: no IKVM tools dist found under $IKVM_DIR/dist/tools/*/$BUILD_RUNTIME" >&2
+    echo "       present: $(ls -d "$IKVM_DIR"/dist/tools/*/ 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')" >&2
+    echo "       (override with IKVM_TOOLS_DIST_DIR=<path>)" >&2
     exit 1
 fi
+log "Using IKVM tools from ${IKVM_TOOLS_DIST_DIR#$IKVM_DIR/}"
 
 rm -rf "$WORKSPACE/out/managed/ikvm-tools"
 mkdir -p "$WORKSPACE/out/managed/ikvm-tools"
@@ -472,19 +590,19 @@ else
         mt)
             log "Building WASM native artifacts (mt) ..."
             log "Using fdlibm symbol prefix: $FDLIBM_SYMBOL_PREFIX"
-            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt
+            bash "$WORKSPACE/build-ikvm-native.sh" "$IKVM_DIR" "$WORKSPACE/out" mt
             ;;
         st)
             log "Building WASM native artifacts (st) ..."
             log "Using fdlibm symbol prefix: $FDLIBM_SYMBOL_PREFIX"
-            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st
+            bash "$WORKSPACE/build-ikvm-native.sh" "$IKVM_DIR" "$WORKSPACE/out" st
             ;;
         both)
             log "Building WASM native artifacts (mt + st in parallel) ..."
             log "Using fdlibm symbol prefix: $FDLIBM_SYMBOL_PREFIX"
-            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" mt &
+            bash "$WORKSPACE/build-ikvm-native.sh" "$IKVM_DIR" "$WORKSPACE/out" mt &
             pid_mt=$!
-            bash "$WORKSPACE/build-ikvm-native.sh" "$WORKSPACE/ikvm" "$WORKSPACE/out" st &
+            bash "$WORKSPACE/build-ikvm-native.sh" "$IKVM_DIR" "$WORKSPACE/out" st &
             pid_st=$!
             wait "$pid_mt"
             wait "$pid_st"
@@ -503,7 +621,7 @@ elif [ ! -f "$WORKSPACE/out/managed/IKVM.Runtime.dll" ]; then
 else
     log "Bundling release zips ..."
 
-    IMAGE_DIR="$WORKSPACE/ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/$BUILD_RUNTIME/"
+    IMAGE_DIR="$IKVM_DIR/src/IKVM.Image/bin/Release/net8.0/ikvm/$BUILD_RUNTIME/"
     if [ ! -d "$IMAGE_DIR" ]; then
         echo "ERROR: $BUILD_RUNTIME JRE image not found at: $IMAGE_DIR" >&2
         exit 1
@@ -517,9 +635,12 @@ else
     cp -r "$IMAGE_DIR/." "$WORKSPACE/out/bundle-staging/image/"
 
     IKVM_TOOLS_SRC="$WORKSPACE/out/managed/ikvm-tools"
-    if [ ! -d "$IKVM_TOOLS_SRC" ] && [ -d "$WORKSPACE/ikvm/dist/tools/net8.0/$BUILD_RUNTIME" ]; then
-        log "ikvm-tools not found in out/managed, using dist/tools fallback."
-        IKVM_TOOLS_SRC="$WORKSPACE/ikvm/dist/tools/net8.0/$BUILD_RUNTIME"
+    if [ ! -d "$IKVM_TOOLS_SRC" ]; then
+        _tools_fallback="$(find_tools_dist_dir)"
+        if [ -n "$_tools_fallback" ]; then
+            log "ikvm-tools not found in out/managed, using ${_tools_fallback#$IKVM_DIR/} fallback."
+            IKVM_TOOLS_SRC="$_tools_fallback"
+        fi
     fi
     if [ ! -d "$IKVM_TOOLS_SRC" ]; then
         echo "ERROR: ikvm-tools directory not found for bundling." >&2
