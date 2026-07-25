@@ -564,7 +564,7 @@ index 66ec184db..ca640033c 100644
                  // we fall back to using the DynamicAnnotationAttribute.
                  if (!tw.IsUnloadable && tw.IsAccessibleFrom(owner))
 diff --git a/src/IKVM.Runtime/ByteCodeHelper.cs b/src/IKVM.Runtime/ByteCodeHelper.cs
-index 463e8da14..c0cc478aa 100644
+index 463e8da14..a09a5431e 100644
 --- a/src/IKVM.Runtime/ByteCodeHelper.cs
 +++ b/src/IKVM.Runtime/ByteCodeHelper.cs
 @@ -38,6 +38,7 @@ Jeroen Frijters
@@ -575,7 +575,33 @@ index 463e8da14..c0cc478aa 100644
  #endif
  
  #if EXPORTER == false
-@@ -365,6 +366,24 @@ public static T DynamicBinderMemberLookup<T>(int kind, string clazz, string name
+@@ -163,7 +164,13 @@ public static void DynamicAastore(object arrayref, int index, object val)
+             throw new NotImplementedException();
+ #else
+             Profiler.Count("DynamicAastore");
+-            ((Array)arrayref).SetValue(val, index);
++            // any Java reference type array is assignable to object[], so this takes the same
++            // stelem.ref path (including the array store check) the compiler emits for loadable
++            // array types; only remapped non-primitive value type arrays need the reflective path
++            if (arrayref is object[] arr)
++                arr[index] = val;
++            else
++                ((Array)arrayref).SetValue(val, index);
+ #endif
+         }
+ 
+@@ -174,6 +181,10 @@ public static object DynamicAaload(object arrayref, int index)
+             throw new NotImplementedException();
+ #else
+             Profiler.Count("DynamicAaload");
++            // same ldelem.ref path the compiler emits for loadable array types; only remapped
++            // non-primitive value type arrays need the reflective (boxing) path
++            if (arrayref is object[] arr)
++                return arr[index];
+             return ((Array)arrayref).GetValue(index);
+ #endif
+         }
+@@ -365,6 +376,24 @@ public static T DynamicBinderMemberLookup<T>(int kind, string clazz, string name
  #if FIRST_PASS
              throw new NotImplementedException();
  #else
@@ -600,7 +626,7 @@ index 463e8da14..c0cc478aa 100644
              try
              {
                  var mh = DynamicLoadMethodHandleImpl(kind, clazz, name, sig, callerID);
-@@ -389,6 +408,235 @@ public static T DynamicBinderMemberLookup<T>(int kind, string clazz, string name
+@@ -389,6 +418,235 @@ public static T DynamicBinderMemberLookup<T>(int kind, string clazz, string name
  #endif
          }
  
@@ -836,7 +862,7 @@ index 463e8da14..c0cc478aa 100644
          [DebuggerStepThrough]
          public static Delegate DynamicCreateDelegate(object obj, Type delegateType, string name, string sig)
          {
-@@ -1574,51 +1822,45 @@ internal bool TrySetType(global::java.lang.invoke.MethodType newType)
+@@ -1574,51 +1832,45 @@ internal bool TrySetType(global::java.lang.invoke.MethodType newType)
  
  #endif
  
@@ -4859,6 +4885,32 @@ index 000000000..1cca31bbe
 +    }
 +
 +}
+diff --git a/src/IKVM.Runtime/Java/Externs/sun/reflect/ReflectionFactory.cs b/src/IKVM.Runtime/Java/Externs/sun/reflect/ReflectionFactory.cs
+index 99bcba6b8..1ecca5cb2 100644
+--- a/src/IKVM.Runtime/Java/Externs/sun/reflect/ReflectionFactory.cs
++++ b/src/IKVM.Runtime/Java/Externs/sun/reflect/ReflectionFactory.cs
+@@ -573,7 +573,9 @@ internal unsafe FastMethodAccessorImpl(RuntimeJavaMethod mw)
+                 try
+                 {
+                     mw.DeclaringType.Finish();
+-                    var parameters = mw.GetParameters();
++                    // clone: GetParameters() returns the method's live linked signature state; replacing
++                    // unloadable wrappers in place would desync it from the erased CLR signature
++                    var parameters = (RuntimeJavaType[])mw.GetParameters().Clone();
+ 
+                     for (int i = 0; i < parameters.Length; i++)
+                     {
+@@ -824,7 +826,9 @@ internal FastConstructorAccessorImpl(global::java.lang.reflect.Constructor const
+                     var mw = RuntimeJavaMethod.FromExecutable(constructor);
+ 
+                     mw.DeclaringType.Finish();
+-                    var parameters = mw.GetParameters();
++                    // clone: GetParameters() returns the method's live linked signature state; replacing
++                    // unloadable wrappers in place would desync it from the erased CLR signature
++                    var parameters = (RuntimeJavaType[])mw.GetParameters().Clone();
+ 
+                     for (int i = 0; i < parameters.Length; i++)
+                     {
 diff --git a/src/IKVM.Runtime/LambdaMetafactory.cs b/src/IKVM.Runtime/LambdaMetafactory.cs
 index 22e86df4c..b524ddd86 100644
 --- a/src/IKVM.Runtime/LambdaMetafactory.cs
@@ -6213,7 +6265,7 @@ index b71f31ab4..87c405295 100644
  
          internal bool IsMirandaMethod => (flags & MemberFlags.MirandaMethod) != 0;
 diff --git a/src/IKVM.Runtime/RuntimeJavaMethod.cs b/src/IKVM.Runtime/RuntimeJavaMethod.cs
-index 833b0af1a..c46feaf89 100644
+index 833b0af1a..2ed874ff6 100644
 --- a/src/IKVM.Runtime/RuntimeJavaMethod.cs
 +++ b/src/IKVM.Runtime/RuntimeJavaMethod.cs
 @@ -309,12 +309,8 @@ internal void Link(LoadMode mode)
@@ -6238,15 +6290,31 @@ index 833b0af1a..c46feaf89 100644
              }
          }
  
-@@ -497,22 +492,39 @@ internal void ResolveMethod()
+@@ -490,29 +485,55 @@ internal void ResolveMethod()
+                 // FIXME .NET 6
+ 
+                 var parameters = GetParameters();
+-                var typeLength = parameters.Length;
++
++                // Java instance methods compiled as static CLR methods (private interface
++                // instance methods) carry an explicit this parameter typed as the declaring type
++                var thisParam = mb.IsStatic && !IsStatic ? 1 : 0;
++
++                var typeLength = parameters.Length + thisParam;
+                 if (HasCallerID)
+                     typeLength++;
+ 
                  var types = new Type[typeLength];
++                if (thisParam != 0)
++                    types[0] = DeclaringType.TypeAsTBD;
                  for (int i = 0; i < parameters.Length; i++)
                  {
 -                    parameters[i].Finish();
+-                    types[i] = parameters[i].TypeAsSignatureType;
 +                    // unloadable signature types are erased to object and cannot be finished
 +                    if (!parameters[i].IsUnloadable)
 +                        parameters[i].Finish();
-                     types[i] = parameters[i].TypeAsSignatureType;
++                    types[i + thisParam] = parameters[i].TypeAsSignatureType;
                  }
  
                  if (HasCallerID)
@@ -6279,11 +6347,13 @@ index 833b0af1a..c46feaf89 100644
 +                    method = candidates[0];
 +                else if (candidates.Count > 1)
 +                    method = candidates.FirstOrDefault(MatchesModOpt) ?? candidates[0];
++                else
++                    throw new InternalException($"Could not resolve method against runtime type: {DeclaringType.Name}.{Name}{Signature}");
 +
                  if (method == null)
                      throw new InternalException("Could not resolve method against runtime type.");
  #endif
-@@ -520,6 +532,35 @@ internal void ResolveMethod()
+@@ -520,6 +541,38 @@ internal void ResolveMethod()
  #endif
          }
  
@@ -6299,10 +6369,13 @@ index 833b0af1a..c46feaf89 100644
 +            var pi = candidate.GetParameters();
 +            var factory = DeclaringType.ClassLoader.GetTypeWrapperFactory();
 +
++            // skip the explicit this parameter of Java instance methods compiled as static CLR methods
++            var thisParam = candidate.IsStatic && !IsStatic ? 1 : 0;
++
 +            for (int i = 0; i < parameters.Length; i++)
 +            {
 +                var expected = RuntimeByteCodeJavaType.GetModOpt(factory, parameters[i], false);
-+                var actual = pi[i].GetOptionalCustomModifiers();
++                var actual = pi[i + thisParam].GetOptionalCustomModifiers();
 +                if (expected.Length != actual.Length)
 +                    return false;
 +
