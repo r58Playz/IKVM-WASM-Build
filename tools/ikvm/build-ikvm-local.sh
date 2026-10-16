@@ -92,6 +92,22 @@ find_tools_dist_dir() {
     printf '%s' "$newest"
 }
 
+# RuntimeIdentifier adds a directory before ikvm; prefer that build over output
+# left by a build without a runtime identifier.
+find_image_dir() {
+    local base="$IKVM_ARTIFACTS_DIR/bin/IKVM.Image/Release/net8.0"
+    local image
+    for image in "$base/$BUILD_RUNTIME/ikvm/$BUILD_RUNTIME" "$base/ikvm/$BUILD_RUNTIME"; do
+        if [ -d "$image" ]; then
+            printf '%s' "$image"
+            return 0
+        fi
+    done
+    echo "ERROR: $BUILD_RUNTIME JRE image not found. Checked:" >&2
+    printf '       %s\n' "$base/$BUILD_RUNTIME/ikvm/$BUILD_RUNTIME" "$base/ikvm/$BUILD_RUNTIME" >&2
+    return 1
+}
+
 add_unique_asset() {
     local asset="$1"
     if [ -z "${NATIVE_SDK_ASSET_SEEN[$asset]+x}" ]; then
@@ -411,6 +427,12 @@ ls -lh "$OUT_BASE/managed/"
 
 fi # end SKIP_MANAGED=false (Steps 3-6)
 
+# Validate the image before spending time compiling natives for the bundle.
+if [ "$SKIP_BUNDLE" = "false" ] && [ -f "$OUT_BASE/managed/IKVM.Runtime.dll" ]; then
+    IMAGE_DIR="$(find_image_dir)"
+    log "Using JRE image from ${IMAGE_DIR#"$IKVM_DIR"/}"
+fi
+
 if [ "$SKIP_NATIVE" = "true" ]; then
     log "Skipping WASM native build."
 else
@@ -465,12 +487,6 @@ elif [ ! -f "$OUT_BASE/managed/IKVM.Runtime.dll" ]; then
     log "Skipping bundle step: managed DLLs not present in ${OUT_BASE#$WORKSPACE/}/managed/ (run without --skip-managed to build them)."
 else
     log "Bundling the release zip ..."
-
-    IMAGE_DIR="$IKVM_ARTIFACTS_DIR/bin/IKVM.Image/Release/net8.0/ikvm/$BUILD_RUNTIME/"
-    if [ ! -d "$IMAGE_DIR" ]; then
-        echo "ERROR: $BUILD_RUNTIME JRE image not found at: $IMAGE_DIR" >&2
-        exit 1
-    fi
 
     mkdir -p "$OUT_BASE/release"
     rm -rf "$OUT_BASE/bundle-staging"
