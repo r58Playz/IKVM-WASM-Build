@@ -14,21 +14,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-managed:
-    name: Build IKVM Managed Runtime
+  # The managed build and the wasm natives are one job: the natives compile against the JNI headers that the class
+  # library's build (the JDK's own make) generates.
+  build-ikvm:
+    name: Build IKVM (managed + WASM native)
     runs-on: ubuntu-24.04
     timeout-minutes: 720
-    # IKVM.Java resolves org.ikvm:java-ref-plugin from GitHub Packages, which
-    # rejects anonymous maven reads (401) even for public packages.
-    permissions:
-      contents: read
-      packages: read
     env:
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
-      # Prefer a PAT with read:packages if one is configured; the automatic token
-      # works for public packages but cannot read private ones cross-repository.
-      IKVM_MAVEN_USER: ${{ github.actor }}
-      IKVM_MAVEN_TOKEN: ${{ secrets.IKVM_MAVEN_TOKEN || github.token }}
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -47,88 +40,43 @@ jobs:
           # IKVM's global.json pins the SDK feature band; the fork's base wants 10.0.x
           dotnet-version: 10.0.x
 
-      - name: Install Managed Build Prereqs
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y mono-runtime mono-devel openjdk-8-jdk-headless clang llvm maven
-
-      - name: Configure Maven for GitHub Packages
-        shell: bash
-        run: |
-          # ubuntu-24.04 ships maven 3.8, which predates MAVEN_ARGS, so the
-          # credentials have to go in the user settings file. The token itself is
-          # read from the environment at run time rather than written out here.
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml <<'XML'
-          <settings>
-              <servers>
-                  <server>
-                      <id>ikvmnet</id>
-                      <username>${env.IKVM_MAVEN_USER}</username>
-                      <password>${env.IKVM_MAVEN_TOKEN}</password>
-                  </server>
-              </servers>
-          </settings>
-          XML
-
-      - name: Build managed artifacts via script
-        shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/ikvm/build-ikvm-local.sh" --managed-only
-
-      - name: Upload MSBuild Log
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      # The class library is JDK 25's, built by the JDK's make, which needs a JDK 25 to boot from.
+      - name: Setup JDK 25
+        uses: actions/setup-java@v4
         with:
-          name: msbuild.binlog
-          path: tools/ikvm/ikvm/msbuild.binlog
-          if-no-files-found: warn
-
-      - name: Upload Managed Outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: managed-dlls
-          path: |
-            tools/ikvm/out/managed/*.dll
-            tools/ikvm/out/managed/ikvm-tools/**
-          if-no-files-found: error
-
-      - name: Package linux-x64 JRE image
-        shell: bash
-        run: |
-          IMAGE_DIR="tools/ikvm/ikvm/src/IKVM.Image/bin/Release/net8.0/ikvm/${BUILD_RUNTIME}/"
-          tar czvf /tmp/ikvm-image-${BUILD_RUNTIME}.tar.gz -C "$IMAGE_DIR" .
-
-      - name: Upload linux-x64 JRE image
-        uses: actions/upload-artifact@v4
-        with:
-          name: ikvm-image-linux-x64
-          path: /tmp/ikvm-image-linux-x64.tar.gz
-          if-no-files-found: error
-
-  build-wasm-native:
-    name: Build IKVM WASM Native (${{ matrix.variant }})
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        variant: [mt, st]
-    steps:
-      - name: Checkout Source
-        uses: actions/checkout@v4
+          distribution: temurin
+          java-version: '25'
 
       - name: Setup emsdk
         uses: mymindstorm/setup-emsdk@v14
         with:
           version: ${{ env.EMSDK_VERSION }}
 
-      - name: Build WASM native artifacts via script
-        shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/ikvm/build-ikvm-local.sh" --native-only --native-variant="${{ matrix.variant }}" --clean-native
+      # mono and clang for IKVM; the rest is what the JDK's configure checks for on Linux.
+      - name: Install Build Prereqs
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y mono-runtime mono-devel clang llvm autoconf make zip unzip file \
+            libx11-dev libxext-dev libxrender-dev libxrandr-dev libxtst-dev libxt-dev libcups2-dev \
+            libfontconfig1-dev libasound2-dev
 
-      - name: Upload WASM native artifacts
+      - name: Build IKVM via script
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/tools/ikvm/build-ikvm-local.sh"
+
+      - name: Upload MSBuild Logs
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: wasm-native-${{ matrix.variant }}
-          path: tools/ikvm/out/native/*.a
+          name: msbuild-binlogs
+          path: tools/ikvm/ikvm/artifacts/jdk25/msbuild-*.binlog
+          if-no-files-found: warn
+
+      - name: Upload IKVM bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikvm-wasm-bundle
+          path: tools/ikvm/out/release/ikvm-wasm-bundle.zip
           if-no-files-found: error
 
   build-glfw:
@@ -147,14 +95,18 @@ jobs:
         with:
           version: ${{ env.EMSDK_VERSION }}
 
-      # MobileGL builds Dawn's tint (SPIR-V -> WGSL); it's slow and only depends on the pinned
-      # Dawn rev + emsdk + variant (mt needs a -pthread tint), so cache it per-variant. MobileGL
-      # is always built now (both backends land in one libglfw3.a), so this always runs.
-      - name: Cache tint
+      # mesa-wink's --install-deps supports Homebrew and pacman; install Ubuntu's tools here.
+      - name: Install mesa-wink build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl python3 python3-venv cmake ninja-build bison flex pkg-config
+
+      # build-glfw.sh pins and builds MercuryWorkshop/mesa-wink. Cache its expensive dependencies per variant.
+      - name: Cache mesa-wink build deps
         uses: actions/cache@v4
         with:
-          path: tools/native-deps/tint-out-${{ matrix.variant }}
-          key: tint-${{ matrix.variant }}-emsdk${{ env.EMSDK_VERSION }}-dawn-b465e23
+          path: ~/.cache/mesa-wink
+          key: mesa-wink-${{ matrix.variant }}-emsdk${{ env.EMSDK_VERSION }}-${{ hashFiles('tools/native-deps/build-glfw.sh') }}
 
       - name: build glfw
         shell: bash
@@ -164,13 +116,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: glfw-${{ matrix.variant }}
-          # One combined libglfw3.a (both backends) plus the emdawnwebgpu + JSPI JS libraries the
-          # final app link always needs (MobileGL is always linked now).
+          # GLFW (built against wink's headers), mesa-wink's three archives, and wink's JS libraries
+          # (numbered: the app link passes them in that order).
           path: |
             tools/native-deps/out/${{ matrix.variant }}/libglfw3.a
+            tools/native-deps/out/${{ matrix.variant }}/libwink*.a
             tools/native-deps/out/${{ matrix.variant }}/lib_emscripten_glfw3.js
-            tools/native-deps/out/${{ matrix.variant }}/library_webgpu*.js
-            tools/native-deps/out/${{ matrix.variant }}/lib_mobilegl_webgpu.js
+            tools/native-deps/out/${{ matrix.variant }}/wink-js/*.js
           if-no-files-found: error
 
   build-java-native-deps:
@@ -209,60 +161,21 @@ jobs:
           path: tools/native-deps/out/${{ matrix.variant }}/*
           if-no-files-found: error
 
-  build-jvmdowngrader:
-    name: build jvmdowngrader (patched)
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout Source
-        uses: actions/checkout@v4
-
-      - name: Setup JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      # Gradle provisions the per-stub JDK toolchains (java 7..26) via the foojay resolver.
-      - name: build jvmdowngrader
-        shell: bash
-        run: bash "$GITHUB_WORKSPACE/tools/native-deps/build-jvmdowngrader.sh"
-
-      - name: Upload jvmdowngrader artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: jvmdowngrader
-          path: |
-            tools/native-deps/out/jvmdowngrader.jar
-            tools/native-deps/out/jvmdg-java-api.jar
-          if-no-files-found: error
-
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-managed, build-wasm-native, build-java-native-deps, build-glfw, build-jvmdowngrader]
+    needs: [build-ikvm, build-java-native-deps, build-glfw]
     permissions:
       contents: write
     steps:
       - name: Generate release id
         run: echo RELEASE_NAME=$(uuidgen) >> "$GITHUB_ENV"
 
-      - name: Download managed DLLs
+      - name: Download IKVM bundle
         uses: actions/download-artifact@v4
         with:
-          name: managed-dlls
-          path: managed/
-
-      - name: Download WASM native artifacts (mt)
-        uses: actions/download-artifact@v4
-        with:
-          name: wasm-native-mt
-          path: native/
-
-      - name: Download WASM native artifacts (st)
-        uses: actions/download-artifact@v4
-        with:
-          name: wasm-native-st
-          path: native/
+          name: ikvm-wasm-bundle
+          path: release/
 
       - name: Download Java/native dependency artifacts (mt)
         uses: actions/download-artifact@v4
@@ -276,28 +189,11 @@ jobs:
           name: java-native-deps-st
           path: java-native-deps/st/
 
-      - name: Download jvmdowngrader artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: jvmdowngrader
-          path: jvmdowngrader/
-
       - name: Download all GLFW artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: glfw-*
           path: glfw/
-
-      - name: Download linux-x64 JRE image
-        uses: actions/download-artifact@v4
-        with:
-          name: ikvm-image-linux-x64
-          path: /tmp/image
-
-      - name: Restore linux-x64 JRE image
-        run: |
-          mkdir -p image
-          tar xzvf /tmp/image/ikvm-image-linux-x64.tar.gz -C image
 
       - name: Bundle artifacts
         shell: bash
@@ -306,51 +202,16 @@ jobs:
 
           mkdir -p release
 
-          if [ ! -d managed/ikvm-tools ]; then
-            echo "ERROR: managed/ikvm-tools not found in managed artifact" >&2
-            exit 1
-          fi
-
-          zip -j "release/ikvm-wasm-bundle.zip" \
-            managed/IKVM.Runtime.dll \
-            managed/IKVM.CoreLib.dll \
-            managed/IKVM.Java.dll \
-            managed/IKVM.ByteCode.dll \
-            native/libjvm.a \
-            native/libikvm.a \
-            native/libiava.a \
-            native/libjpeg.a \
-            native/libsunec.a \
-            native/libunpack.a \
-            native/libzip.a \
-            native/libmanagement.a \
-            native/libnio.a \
-            native/libnet.a \
-            native/libfreetype.a \
-            native/libmlib_image.a \
-            native/liblcms.a \
-            native/libawt.a \
-            native/libfontmanager.a
-          zip -r "release/ikvm-wasm-bundle.zip" image
-
-           # One combined libglfw3.a per variant (both GL backends; runtime-selectable).
+           # GLFW + mesa-wink per variant: libglfw3.a, the three wink archives, GLFW's JS library, and
+           # wink's ordered JS libraries as one zip the client unpacks into statics/wink-js/.
            for variant in mt st; do
-             cp "glfw/glfw-${variant}/libglfw3.a" \
-               "release/libglfw3-${variant}.a"
+             cp "glfw/glfw-${variant}/libglfw3.a" "release/libglfw3-${variant}.a"
+             for a in libwink libwink_webgpu libwink_tint; do
+               cp "glfw/glfw-${variant}/${a}.a" "release/${a}-${variant}.a"
+             done
              cp "glfw/glfw-${variant}/lib_emscripten_glfw3.js" \
                "release/lib_emscripten_glfw3-${variant}.js"
-           done
-
-           # MobileGL is always linked, so the emdawnwebgpu bindings + JSPI shim the final app
-           # link needs are always shipped; bundle them per variant so the client can fetch+unzip
-           # one asset into statics/.
-           for variant in mt st; do
-             zip -q -j "release/mobilegl-webgpu-js-${variant}.zip" \
-               "glfw/glfw-${variant}/library_webgpu_enum_tables.js" \
-               "glfw/glfw-${variant}/library_webgpu_generated_struct_info.js" \
-               "glfw/glfw-${variant}/library_webgpu_generated_sig_info.js" \
-               "glfw/glfw-${variant}/library_webgpu.js" \
-               "glfw/glfw-${variant}/lib_mobilegl_webgpu.js"
+             zip -q -j "release/wink-js-${variant}.zip" glfw/glfw-${variant}/wink-js/*.js
            done
 
           cp java-native-deps/mt/lwjgl3.jar release/lwjgl3-mt.jar
@@ -362,57 +223,6 @@ jobs:
 
           cp java-native-deps/mt/libffi.a release/libffi-mt.a
           cp java-native-deps/st/libffi.a release/libffi-st.a
-
-          cp jvmdowngrader/jvmdowngrader.jar release/jvmdowngrader.jar
-          cp jvmdowngrader/jvmdg-java-api.jar release/jvmdg-java-api.jar
-
-          mkdir -p /tmp/st-native
-          cp native/ST-libjvm.a /tmp/st-native/libjvm.a
-          cp native/ST-libikvm.a /tmp/st-native/libikvm.a
-          cp native/ST-libiava.a /tmp/st-native/libiava.a
-          cp native/ST-libjpeg.a /tmp/st-native/libjpeg.a
-          cp native/ST-libsunec.a /tmp/st-native/libsunec.a
-          cp native/ST-libunpack.a /tmp/st-native/libunpack.a
-          cp native/ST-libzip.a /tmp/st-native/libzip.a
-          cp native/ST-libmanagement.a /tmp/st-native/libmanagement.a
-          cp native/ST-libnio.a /tmp/st-native/libnio.a
-          cp native/ST-libnet.a /tmp/st-native/libnet.a
-          cp native/ST-libfreetype.a /tmp/st-native/libfreetype.a
-          cp native/ST-libmlib_image.a /tmp/st-native/libmlib_image.a
-          cp native/ST-liblcms.a /tmp/st-native/liblcms.a
-          cp native/ST-libawt.a /tmp/st-native/libawt.a
-          cp native/ST-libfontmanager.a /tmp/st-native/libfontmanager.a
-          zip -j "release/ikvm-wasm-ST-bundle.zip" \
-            managed/IKVM.Runtime.dll \
-            managed/IKVM.CoreLib.dll \
-            managed/IKVM.Java.dll \
-            managed/IKVM.ByteCode.dll \
-            /tmp/st-native/libjvm.a \
-            /tmp/st-native/libikvm.a \
-            /tmp/st-native/libiava.a \
-            /tmp/st-native/libjpeg.a \
-            /tmp/st-native/libsunec.a \
-            /tmp/st-native/libunpack.a \
-            /tmp/st-native/libzip.a \
-            /tmp/st-native/libmanagement.a \
-            /tmp/st-native/libnio.a \
-            /tmp/st-native/libnet.a \
-            /tmp/st-native/libfreetype.a \
-            /tmp/st-native/libmlib_image.a \
-            /tmp/st-native/liblcms.a \
-            /tmp/st-native/libawt.a \
-            /tmp/st-native/libfontmanager.a
-          zip -r "release/ikvm-wasm-ST-bundle.zip" image
-
-          cp -r managed/ikvm-tools release/ikvm-tools
-          (
-            cd release
-            zip -r "ikvm-wasm-bundle.zip" ikvm-tools
-            zip -r "ikvm-wasm-ST-bundle.zip" ikvm-tools
-          )
-          rm -rf release/ikvm-tools
-
-          rm -rf /tmp/st-native
 
       - name: Create release
         uses: ncipollo/release-action@v1

@@ -2,6 +2,7 @@
 #ifndef _SYS_EPOLL_H
 #define _SYS_EPOLL_H
 #include <stdint.h>
+#include <errno.h>
 
 #define EPOLLIN     0x001
 #define EPOLLOUT    0x004
@@ -23,11 +24,14 @@ struct epoll_event {
     epoll_data_t data;
 };
 
+#define EPOLL_CLOEXEC 02000000
+
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
 #define EPOLL_CTL_MOD 3
 
 static inline int epoll_create(int size) { (void)size; return -1; }
+static inline int epoll_create1(int flags) { (void)flags; errno = ENOSYS; return -1; }
 static inline int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
     (void)epfd; (void)op; (void)fd; (void)ev; return -1; }
 static inline int epoll_wait(int epfd, struct epoll_event *evs, int maxev, int timeout) {

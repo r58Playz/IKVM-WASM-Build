@@ -1,48 +1,51 @@
 #!/usr/bin/env bash
-# build-ikvm-native.sh — Builds IKVM WASM native static libraries for one variant.
-# Assumes emcc, em++, emar are already in PATH (set up via emsdk or otherwise).
+# build-ikvm-native.sh — Builds the fork's WASM native static libraries, from JDK 25's sources.
+# Assumes emcc, em++, emar are already in PATH, and that the managed build ran: the JDK's make it drives generated the
+# JNI headers under artifacts/jdk25/openjdk-build/support.
 #
-# Usage: build-ikvm-native.sh <ikvm-src-dir> <out-dir> <mt|st>
-#   ikvm-src-dir   path to the ikvmnet/ikvm checkout
+# Usage: build-ikvm-native.sh <ikvm-src-dir> <out-dir>
+#   ikvm-src-dir   path to the fork's checkout
 #   out-dir        output base directory; *.a files are written to <out-dir>/native/
-#   variant        mt  → pthread build  → libjvm.a, libikvm.a, libiava.a
-#                  st  → no-pthread     → ST-libjvm.a, ST-libikvm.a, ST-libiava.a
+#
+# The JDK 9+ source layout lets one function build every library the way the JDK's make does (SetupJdkLibrary in
+# make/common/JdkNativeCompilation.gmk): the sources under src/<module>/{linux,unix,share}/native/lib<name> and
+# EXTRA_SRC, less EXCLUDES and EXCLUDE_FILES, with those directories, the module's generated JNI headers and
+# EXTRA_HEADER_DIRS on the include path. Each definition below mirrors the library's make file
+# (make/modules/<module>/Lib.gmk or lib/*.gmk); what differs for wasm is said where it does.
+#
+# All the libraries are static archives linked into one wasm module, which changes two things:
+# - each library's JNI_OnLoad/JNI_OnUnload is renamed __lib<name>_JNI_OnLoad/_OnUnload, which gen-static-libs.py
+#   exposes as that library's JNI_OnLoad (one global JNI_OnLoad per library would collide);
+# - only the pthread variant is built (JDK 8's build had a single-threaded one as well).
 
 set -euo pipefail
 
-if [ $# -ne 3 ]; then
-    echo "Usage: $(basename "$0") <ikvm-src-dir> <out-dir> <mt|st>" >&2
+if [ $# -ne 2 ]; then
+    echo "Usage: $(basename "$0") <ikvm-src-dir> <out-dir>" >&2
     exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-IKVM_SRC="$1"
+IKVM_SRC="$(cd "$1" && pwd)"
 OUT_DIR="$2"
-VARIANT="$3"
-FDLIBM_SYMBOL_PREFIX="${FDLIBM_SYMBOL_PREFIX:-fdlibm_}"
 
-case "$VARIANT" in
-    mt)
-        PREFIX=""
-        PTHREAD_FLAGS=(-pthread)
-        ;;
-    st)
-        PREFIX="ST-"
-        PTHREAD_FLAGS=()
-        ;;
-    *)
-        echo "ERROR: variant must be 'mt' or 'st', got '$VARIANT'" >&2
-        exit 1
-        ;;
-esac
+log() { echo "[build-ikvm-native] $*"; }
 
-log() { echo "[build-ikvm-native/$VARIANT] $*"; }
+OJ_SRC="$IKVM_SRC/ext/openjdk/src"
+SUPPORT="${IKVM_JDK25_SUPPORT_DIR:-$IKVM_SRC/artifacts/jdk25/openjdk-build/support}"
+FREETYPE_DIR="$IKVM_SRC/ext/freetype"
+NATIVE_OUT="$OUT_DIR/native"
+TMP_DIR="$NATIVE_OUT/tmp"
 
-# ── Parallel compile job pool ──────────────────────────────────────────────────
-# Object-file compiles are independent; only the emar archive step depends on
-# them. run_compile launches each compile in the background, throttled to
-# NATIVE_JOBS concurrent jobs; barrier() drains all outstanding compiles (and is
-# invoked by create_archive before every emar), so archive contents are unchanged.
+if [ ! -d "$SUPPORT/headers/java.base" ]; then
+    echo "ERROR: no JNI headers at $SUPPORT/headers; run the managed build first (build-ikvm-local.sh without --native-only)" >&2
+    exit 1
+fi
+
+mkdir -p "$NATIVE_OUT" "$TMP_DIR"
+
+# ── Parallel compile job pool ─────────────────────────────────────────────────
+# Compiles run in the background, NATIVE_JOBS at a time; create_archive drains them.
 NATIVE_JOBS="${NATIVE_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 if ! [[ "$NATIVE_JOBS" =~ ^[0-9]+$ ]] || [ "$NATIVE_JOBS" -lt 1 ]; then
     NATIVE_JOBS=1
@@ -52,13 +55,11 @@ log "Compile parallelism: NATIVE_JOBS=$NATIVE_JOBS"
 _jobs_running=0
 _job_failed=0
 
-# Reap exactly one finished background compile, recording any non-zero exit.
 _reap_one() {
     if wait -n 2>/dev/null; then :; else _job_failed=1; fi
     _jobs_running=$((_jobs_running - 1))
 }
 
-# Launch a compile in the background, throttled to NATIVE_JOBS concurrent jobs.
 run_compile() {
     while [ "$_jobs_running" -ge "$NATIVE_JOBS" ]; do
         _reap_one
@@ -67,950 +68,426 @@ run_compile() {
     _jobs_running=$((_jobs_running + 1))
 }
 
-# Wait for all outstanding compiles; abort the build if any failed.
 barrier() {
     while [ "$_jobs_running" -gt 0 ]; do
         _reap_one
     done
     if [ "$_job_failed" -ne 0 ]; then
-        echo "ERROR: a native compile job failed (variant $VARIANT)" >&2
+        echo "ERROR: a native compile job failed" >&2
         exit 1
     fi
 }
 
 create_archive() {
-	barrier
-	local archive="$1"
-	shift
-	rm -f "$archive"
-	emar rcs "$archive" "$@"
+    barrier
+    local archive="$1"
+    shift
+    rm -f "$archive"
+    emar rcs "$archive" "$@"
 }
 
-LIBJVM_SRC="$IKVM_SRC/src/libjvm"
-LIBIKVM_SRC="$IKVM_SRC/src/libikvm"
-OPENJDK_DIR="$IKVM_SRC/ext/openjdk"
+# ── The version (VERSION_CFLAGS), from the fork's Directory.Build.props ──────
 
-COMMON_DEFS=( -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux -DLINUX -D__int64='long long' )
-COMMON_INCLUDES=(
-    -I"$LIBJVM_SRC"
-    -I"$OPENJDK_DIR/hotspot/src/share/vm"
-    -I"$OPENJDK_DIR/hotspot/src/share/vm/prims"
-    -I"$OPENJDK_DIR/hotspot/src/cpu/x86/vm"
-    -I"$OPENJDK_DIR/hotspot/src/os/linux/vm"
-    -I"$OPENJDK_DIR/jdk/src/share/javavm/export"
-    -I"$OPENJDK_DIR/jdk/src/solaris/javavm/export"
-    -I"$OPENJDK_DIR/jdk/src/linux/javavm/export"
+openjdk_prop() {
+    sed -n "/<PropertyGroup Label=\"OpenJDK Info\">/,/<\/PropertyGroup>/s|.*<$1>\([^<]*\)</$1>.*|\1|p" "$IKVM_SRC/Directory.Build.props" | head -n 1
+}
+
+V_FEATURE="$(openjdk_prop OpenJdkFeatureVersion)"
+V_INTERIM="$(openjdk_prop OpenJdkInterimVersion)"
+V_UPDATE="$(openjdk_prop OpenJdkUpdateVersion)"
+V_PATCH="$(openjdk_prop OpenJdkPatchVersion)"
+V_BUILD="$(openjdk_prop OpenJdkBuildNumber)"
+V_NUMBER="$V_FEATURE.$V_INTERIM.$V_UPDATE.$V_PATCH"
+if [ -z "$V_FEATURE" ] || [ -z "$V_BUILD" ]; then
+    echo "ERROR: could not read the JDK version from $IKVM_SRC/Directory.Build.props" >&2
+    exit 1
+fi
+log "JDK version $V_NUMBER+$V_BUILD"
+
+VERSION_CFLAGS=(
+    "-DVERSION_FEATURE=$V_FEATURE" "-DVERSION_INTERIM=$V_INTERIM" "-DVERSION_UPDATE=$V_UPDATE"
+    "-DVERSION_PATCH=$V_PATCH" -DVERSION_EXTRA1=0 -DVERSION_EXTRA2=0 -DVERSION_EXTRA3=0
+    '-DVERSION_PRE=""' "-DVERSION_BUILD=$V_BUILD" '-DVERSION_OPT=""'
+    "-DVERSION_NUMBER=\"$V_NUMBER\"" "-DVERSION_STRING=\"$V_NUMBER+$V_BUILD\""
+    "-DVERSION_SHORT=\"$V_NUMBER\"" "-DVERSION_SPECIFICATION=\"$V_FEATURE\"" '-DVENDOR="IKVM"'
 )
 
-# Variant-specific tmp subdirs to allow MT and ST to run in parallel without collisions
-TMP_DIR="$OUT_DIR/native/tmp-$VARIANT"
-mkdir -p "$TMP_DIR/libiava"
-mkdir -p "$TMP_DIR/libjpeg"
-mkdir -p "$TMP_DIR/libsunec"
-mkdir -p "$TMP_DIR/libsunec/impl"
-mkdir -p "$TMP_DIR/libunpack"
-mkdir -p "$TMP_DIR/libunpack/pack"
-mkdir -p "$TMP_DIR/libzip"
-mkdir -p "$TMP_DIR/libzip/zlib"
-mkdir -p "$TMP_DIR/libmanagement"
-mkdir -p "$TMP_DIR/libnio"
-mkdir -p "$TMP_DIR/libnet"
+# ── CFLAGS_JDKLIB ─────────────────────────────────────────────────────────────
+# The flags of every JDK library (targets/openjdk25.lib.props has the same for the native targets). The JNI headers
+# are the JDK's: jni_md.h types jlong by _LP64, which wasm32 does not define. emscripten does not define __linux__,
+# which the JDK's Linux code is conditional on; emscripten-stubs has the Linux headers emscripten lacks (linux/fs.h,
+# sys/epoll.h, ...). The final wasm link uses -fwasm-exceptions, which makes setjmp/longjmp (libjavajpeg's and
+# FreeType's error handling) wasm EH; every object is built that way so none emits the emscripten_longjmp shim.
+
+COMMON_FLAGS=(
+    -O2 -fPIC -pthread -fwasm-exceptions -fno-strict-aliasing
+    -Wno-error -Wno-error=implicit-function-declaration -Wno-error=int-conversion
+    -Wno-error=incompatible-function-pointer-types -Wno-deprecated-non-prototype
+)
+COMMON_DEFS=(
+    -DNDEBUG -D_LITTLE_ENDIAN
+    -DLINUX -D__linux__ -D_GNU_SOURCE -D_REENTRANT -D_FILE_OFFSET_BITS=64
+    # IKVM's libjvm keeps the one-parameter JVM_LoadLibrary of earlier JDKs in the wasm build (src/libjvm/ikvm.h):
+    # jvm.h's declaration and the JDK's callers drop the second argument
+    '-DJVM_LoadLibrary(name,throwException)=JVM_LoadLibrary(name)'
+)
+COMMON_INCLUDES=(
+    -I"$SUPPORT/modules_include/java.base"
+    -I"$SUPPORT/modules_include/java.base/linux"
+    -I"$OJ_SRC/hotspot/share/include"
+    -I"$OJ_SRC/hotspot/os/posix/include"
+    -I"$OJ_SRC/java.base/share/native/libjava"
+    -I"$OJ_SRC/java.base/unix/native/libjava"
+    -I"$SUPPORT/headers/java.base"
+    -I"$SCRIPT_DIR/emscripten-stubs"
+)
+C_STD=(-std=c11)
+CXX_STD=(-std=c++14 -fno-rtti -fno-exceptions -fno-threadsafe-statics)
+
+# ── SetupJdkLibrary ───────────────────────────────────────────────────────────
+
+# FindSrcDirsForComponent: the directories of a component of a module, the OS's first.
+find_src_dirs() {
+    local module="$1" component="$2" os
+    for os in linux unix share; do
+        if [ -d "$OJ_SRC/$module/$os/native/$component" ]; then
+            echo "$OJ_SRC/$module/$os/native/$component"
+        fi
+    done
+}
+
+# ProcessSrcDir: "module:component", an absolute path, libjvm (HotSpot's include directories), or a component of
+# the library's own module.
+resolve_dirs() {
+    local module="$1" spec="$2"
+    case "$spec" in
+        /*) echo "$spec" ;;
+        libjvm|*:libjvm)
+            echo "$OJ_SRC/hotspot/share/include"
+            echo "$OJ_SRC/hotspot/os/posix/include"
+            ;;
+        *:*) find_src_dirs "${spec%%:*}" "${spec#*:}" ;;
+        *) find_src_dirs "$module" "$spec" ;;
+    esac
+}
+
+# The arguments of jdk_lib, as SetupJdkLibrary's; jdk_lib clears them.
+reset_lib_args() {
+    L_SRC=()            # replaces the default source directories
+    L_EXTRA_SRC=()
+    L_EXCLUDES=()       # directories, relative to a source directory
+    L_EXCLUDE_FILES=()  # file names, or paths relative to a source directory
+    L_HEADER_DIRS=()    # EXTRA_HEADER_DIRS
+    L_JDK_LIBS=()       # the libraries whose source directories are on the include path
+    L_CFLAGS=()         # C and C++
+    L_CXXFLAGS=()       # C++ only
+    L_EXTRA_FILES=()    # sources outside the source directories (EXTRA_FILES)
+    declare -gA L_FILE_CFLAGS=()  # by file name, as <file>_CFLAGS
+}
+reset_lib_args
+
+# jdk_lib <name> <module> [<archive name>]
+jdk_lib() {
+    local name="$1" module="$2" archive="${3:-lib$1}"
+    local -a src_dirs=() includes=() srcs=() objs=() lib_defs=()
+    local d spec f rel base skip x obj
+    local -a file_cflags=()
+    local -A seen=()
+
+    if [ "${#L_SRC[@]}" -gt 0 ]; then
+        src_dirs=("${L_SRC[@]}")
+    else
+        mapfile -t src_dirs < <(find_src_dirs "$module" "lib$name")
+    fi
+    for spec in "${L_EXTRA_SRC[@]}"; do
+        mapfile -t -O "${#src_dirs[@]}" src_dirs < <(resolve_dirs "$module" "$spec")
+    done
+    if [ "${#src_dirs[@]}" -eq 0 ]; then
+        echo "ERROR: no source directories for lib$name in $module" >&2
+        exit 1
+    fi
+
+    # sources in the order of their directories; the objects are named by file, so the first of a name wins
+    for d in "${src_dirs[@]}"; do
+        while IFS= read -r f; do
+            rel="${f#"$d"/}"
+            base="${f##*/}"
+            skip=0
+            for x in "${L_EXCLUDES[@]}"; do
+                [[ "$rel" == "$x"/* ]] && skip=1
+            done
+            for x in "${L_EXCLUDE_FILES[@]}"; do
+                [[ "$rel" == "$x" || "$rel" == */"$x" || "$base" == "$x" ]] && skip=1
+            done
+            [ "$skip" -eq 1 ] && continue
+            [ -n "${seen[$base]+x}" ] && continue
+            seen[$base]=1
+            srcs+=("$f")
+        done < <(find "$d" -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.cc' \) | LC_ALL=C sort)
+    done
+
+    srcs+=("${L_EXTRA_FILES[@]}")
+
+    # the source directories, the module's JNI headers, EXTRA_HEADER_DIRS, then those of JDK_LIBS and jni.h's
+    for d in "${src_dirs[@]}"; do
+        includes+=("-I$d")
+    done
+    if [ -d "$SUPPORT/headers/$module" ]; then
+        includes+=("-I$SUPPORT/headers/$module")
+    fi
+    for spec in "${L_HEADER_DIRS[@]}" "${L_JDK_LIBS[@]}" "$SUPPORT/modules_include/java.base" java.base:include; do
+        while IFS= read -r d; do
+            includes+=("-I$d")
+        done < <(resolve_dirs "$module" "$spec")
+    done
+
+    lib_defs=("-DJNI_OnLoad=__lib${name}_JNI_OnLoad" "-DJNI_OnUnload=__lib${name}_JNI_OnUnload")
+
+    log "Building $archive (${#srcs[@]} sources) ..."
+    mkdir -p "$TMP_DIR/$archive"
+    for f in "${srcs[@]}"; do
+        base="${f##*/}"
+        obj="$TMP_DIR/$archive/${base%.*}.o"
+        read -r -a file_cflags <<< "${L_FILE_CFLAGS[$base]:-}"
+        case "$f" in
+            *.c)
+                run_compile emcc "${COMMON_FLAGS[@]}" "${C_STD[@]}" "${COMMON_DEFS[@]}" "${lib_defs[@]}" \
+                    "${L_CFLAGS[@]}" "${file_cflags[@]}" "${COMMON_INCLUDES[@]}" "${includes[@]}" -c "$f" -o "$obj"
+                ;;
+            *)
+                run_compile em++ "${COMMON_FLAGS[@]}" "${CXX_STD[@]}" "${COMMON_DEFS[@]}" "${lib_defs[@]}" \
+                    "${L_CFLAGS[@]}" "${L_CXXFLAGS[@]}" "${file_cflags[@]}" "${COMMON_INCLUDES[@]}" "${includes[@]}" \
+                    -c "$f" -o "$obj"
+                ;;
+        esac
+        objs+=("$obj")
+    done
+    create_archive "$NATIVE_OUT/$archive.a" "${objs[@]}"
+    reset_lib_args
+}
 
 # ── libjvm ────────────────────────────────────────────────────────────────────
+# IKVM's (src/libjvm), against JDK 25's jni.h and jvm.h, as src/jdk25-native/libjvm.
 
-log "Building ${PREFIX}libjvm ..."
-run_compile emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni.c"      -o "$TMP_DIR/jni.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-run_compile emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm_emscripten_dynlib.c"      -o "$TMP_DIR/jvm_emscripten_dynlib.o"      "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-run_compile emcc -O2 -fPIC -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jni_vargs.c" -o "$TMP_DIR/jni_vargs.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-run_compile em++  -O2 -fPIC -std=c++11 -Wno-error -fdeclspec "${PTHREAD_FLAGS[@]}" -c "$LIBJVM_SRC/jvm.cpp" -o "$TMP_DIR/jvm.o" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}"
-create_archive "$OUT_DIR/native/${PREFIX}libjvm.a" "$TMP_DIR/jni.o" "$TMP_DIR/jni_vargs.o" "$TMP_DIR/jvm.o" "$TMP_DIR/jvm_emscripten_dynlib.o"
+LIBJVM_SRC="$IKVM_SRC/src/libjvm"
+LIBJVM_FLAGS=(
+    "${COMMON_FLAGS[@]}" -fdeclspec -Wno-dll-attribute-on-redeclaration "${COMMON_DEFS[@]}"
+    "${COMMON_INCLUDES[@]}" -I"$LIBJVM_SRC"
+)
+
+log "Building libjvm ..."
+mkdir -p "$TMP_DIR/libjvm"
+LIBJVM_OBJS=()
+for f in jni.c jni_vargs.c jvm_emscripten_dynlib.c; do
+    run_compile emcc "${LIBJVM_FLAGS[@]}" -std=c99 -c "$LIBJVM_SRC/$f" -o "$TMP_DIR/libjvm/${f%.c}.o"
+    LIBJVM_OBJS+=("$TMP_DIR/libjvm/${f%.c}.o")
+done
+run_compile em++ "${LIBJVM_FLAGS[@]}" -std=c++11 -c "$LIBJVM_SRC/jvm.cpp" -o "$TMP_DIR/libjvm/jvm.o"
+LIBJVM_OBJS+=("$TMP_DIR/libjvm/jvm.o")
+create_archive "$NATIVE_OUT/libjvm.a" "${LIBJVM_OBJS[@]}"
 
 # ── libikvm ───────────────────────────────────────────────────────────────────
+# Independent of the JDK. Globbed, as src/libikvm/libikvm.clangproj does.
 
-log "Building ${PREFIX}libikvm ..."
-run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/dl.c"  -o "$TMP_DIR/dl.o"
-run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/sig.c" -o "$TMP_DIR/sig.o"
-run_compile emcc -O2 -fPIC -DLINUX "${PTHREAD_FLAGS[@]}" -c "$LIBIKVM_SRC/mem.c" -o "$TMP_DIR/mem.o"
-create_archive "$OUT_DIR/native/${PREFIX}libikvm.a" "$TMP_DIR/dl.o" "$TMP_DIR/sig.o" "$TMP_DIR/mem.o"
+log "Building libikvm ..."
+mkdir -p "$TMP_DIR/libikvm"
+LIBIKVM_OBJS=()
+for f in "$IKVM_SRC/src/libikvm"/*.c; do
+    base="${f##*/}"
+    run_compile emcc -O2 -fPIC -pthread -DLINUX -c "$f" -o "$TMP_DIR/libikvm/${base%.c}.o"
+    LIBIKVM_OBJS+=("$TMP_DIR/libikvm/${base%.c}.o")
+done
+create_archive "$NATIVE_OUT/libikvm.a" "${LIBIKVM_OBJS[@]}"
 
-# ── libiava ───────────────────────────────────────────────────────────────────
-# Source directories (linux uses solaris as the OS API dir per OpenJDK 8 convention)
+# ── java.base ─────────────────────────────────────────────────────────────────
 
-LIBIAVA_SRCDIRS=(
-    "$OPENJDK_DIR/jdk/src/solaris/native/java/lang"
-    "$OPENJDK_DIR/jdk/src/share/native/java/lang"
-    "$OPENJDK_DIR/jdk/src/share/native/java/lang/reflect"
-    "$OPENJDK_DIR/jdk/src/share/native/java/lang/fdlibm/src"
-    "$OPENJDK_DIR/jdk/src/share/native/java/io"
-    "$OPENJDK_DIR/jdk/src/solaris/native/java/io"
-    "$OPENJDK_DIR/jdk/src/share/native/java/nio"
-    "$OPENJDK_DIR/jdk/src/share/native/java/security"
-    "$OPENJDK_DIR/jdk/src/share/native/common"
-    "$OPENJDK_DIR/jdk/src/share/native/sun/misc"
-    "$OPENJDK_DIR/jdk/src/share/native/sun/reflect"
-    "$OPENJDK_DIR/jdk/src/share/native/java/util"
-    "$OPENJDK_DIR/jdk/src/share/native/java/util/concurrent/atomic"
-    "$OPENJDK_DIR/jdk/src/solaris/native/common"
-    "$OPENJDK_DIR/jdk/src/solaris/native/java/util"
-    "$OPENJDK_DIR/jdk/src/solaris/native/sun/security/provider"
-    "$OPENJDK_DIR/jdk/src/solaris/native/sun/io"
-    "$OPENJDK_DIR/jdk/src/linux/native/jdk/internal/platform/cgroupv1"
+# libjava, named iava for IKVM, less the natives of the VM's interfaces, which the runtime implements (the
+# LibJavaExclude list of src/jdk25-native/libiava/libiava.clangproj). os.arch stays amd64: LWJGL picks its natives
+# by it.
+L_SRC=()
+mapfile -t L_SRC < <(find_src_dirs java.base libjava)
+L_EXCLUDE_FILES=(
+    Array.c BootLoader.c CDS.c Class.c ClassLoader.c ConstantPool.c Continuation.c ContinuationSupport.c
+    Double.c Executable.c Field.c Finalizer.c Float.c ForeignLinkerSupport.c LambdaProxyClassArchive.c
+    Module.c NativeAccessors.c NativeLibraries.c NullPointerException.c Object.c PhantomReference.c
+    PreviewFeatures.c Reference.c Reflection.c Runtime.c Shutdown.c Signal.c StackFrameInfo.c
+    StackStreamFactory.c StackTraceElement.c String.c System.c Thread.c ThreadSnapshot.c Throwable.c
+    VirtualThread.c VM.c VMSupport.c
+)
+L_JDK_LIBS=(libjvm)
+L_CFLAGS=("${VERSION_CFLAGS[@]}" '-DARCHPROPNAME="amd64"')
+# emscripten has no sysinfo, which CgroupMetrics.c calls
+L_EXTRA_FILES=("$SCRIPT_DIR/emscripten-stubs/sysinfo_stub.c")
+jdk_lib iava java.base libiava
+
+# libzip, with its bundled zlib
+L_SRC=("$OJ_SRC/java.base/share/native/libzip")
+L_JDK_LIBS=(libjava libjvm)
+L_CFLAGS=(-I"$OJ_SRC/java.base/share/native/libzip/zlib" -DUSE_MMAP -UDEBUG)
+jdk_lib zip java.base
+
+# libnet and libnio
+L_JDK_LIBS=(libjava libjvm)
+jdk_lib net java.base
+
+L_HEADER_DIRS=(libnio/ch libnio/fs libjvm)
+L_JDK_LIBS=(libjava libnet)
+# sun.nio.fs compares errno with the Linux numbers its UnixConstants has (emscripten-stubs/ikvm_linux_errno.h)
+L_FILE_CFLAGS[UnixNativeDispatcher.c]="-include $SCRIPT_DIR/emscripten-stubs/ikvm_linux_errno.h"
+# WASMFS fails every byte-range lock, which FileChannel.tryLock then reports as held elsewhere (emscripten-stubs/ikvm_fcntl_lock.h)
+L_FILE_CFLAGS[UnixFileDispatcherImpl.c]="-include $SCRIPT_DIR/emscripten-stubs/ikvm_fcntl_lock.h"
+# nor the extended attribute functions, which UnixNativeDispatcher.c calls
+L_EXTRA_FILES=("$SCRIPT_DIR/emscripten-stubs/xattr_stub.c")
+jdk_lib nio java.base
+
+# ── java.prefs ────────────────────────────────────────────────────────────────
+
+L_JDK_LIBS=(java.base:libjava java.base:libjvm)
+jdk_lib prefs java.prefs
+
+# ── java.management ───────────────────────────────────────────────────────────
+# The JDK's libmanagement gets HotSpot's management interface (JVM_GetManagement) in its JNI_OnLoad, which IKVM's
+# libjvm does not have; the runtime implements the natives of java.management. The library is IKVM's JNI_OnLoad,
+# so that loading it succeeds.
+
+log "Building libmanagement ..."
+mkdir -p "$TMP_DIR/libmanagement"
+run_compile emcc "${COMMON_FLAGS[@]}" "${C_STD[@]}" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}" \
+    -c "$IKVM_SRC/src/libmanagement/jni_onload.c" -o "$TMP_DIR/libmanagement/jni_onload.o"
+create_archive "$NATIVE_OUT/libmanagement.a" "$TMP_DIR/libmanagement/jni_onload.o"
+
+# jdk.management's libmanagement_ext likewise (src/jdk25-native/libmanagement_ext)
+log "Building libmanagement_ext ..."
+mkdir -p "$TMP_DIR/libmanagement_ext"
+run_compile emcc "${COMMON_FLAGS[@]}" "${C_STD[@]}" "${COMMON_DEFS[@]}" "${COMMON_INCLUDES[@]}" \
+    -DJNI_OnLoad=__libmanagement_ext_JNI_OnLoad \
+    -c "$IKVM_SRC/src/jdk25-native/libmanagement_ext/jni_onload.c" -o "$TMP_DIR/libmanagement_ext/jni_onload.o"
+create_archive "$NATIVE_OUT/libmanagement_ext.a" "$TMP_DIR/libmanagement_ext/jni_onload.o"
+
+# ── java.desktop: what headless image I/O needs ───────────────────────────────
+# libawt's JavaVM pointer, which its sibling libraries use, is the global "jvm", and so is LWJGL's: renamed in all of
+# them.
+
+DESKTOP_CFLAGS=(-Djvm=__libawt_jvm)
+
+LIBAWT_DEFAULT_HEADER_DIRS=(
+    common/awt/utility
+    libawt/awt/image
+    libawt/awt/image/cvutils
+    libawt/java2d
+    libawt/java2d/loops
+    libawt/java2d/pipe
 )
 
-# Files excluded on linux (mirrors libiava.clangproj excludes)
-LIBIAVA_EXCLUDES="check_code\.c|verify_stub\.c|jspawnhelper\.c|Shutdown\.c|AccessController\.c|Throwable\.c|NativeAccessors\.c|Class\.c|Runtime\.c|Package\.c|SecurityManager\.c|Compiler\.c|Object\.c|ClassLoader\.c|Array\.c|Thread\.c|String\.c|ConstantPool\.c|URLClassPath\.c|Signal\.c|GC\.c|Field\.c|Executable\.c|VM\.c|Reflection\.c|AtomicLong\.c|ProcessImpl_md\.c|WinNTFileSystem_md\.c|dirent_md\.c|WindowsPreferences\.c|WinCAPISeedGenerator\.c|Win32ErrorMode\.c|java_props_macosx\.c"
+# libmlib_image. MLIB_OS64BIT is for 64-bit targets only, and wasm32 is not one.
+L_EXTRA_SRC=(common/awt/medialib)
+L_HEADER_DIRS=(java.base:libjava)
+L_EXCLUDE_FILES=(mlib_c_ImageBlendTable.c)
+L_CFLAGS=("${DESKTOP_CFLAGS[@]}" -D__USE_J2D_NAMES -D__MEDIALIB_OLD_NAMES -DMLIB_NO_LIBSUNMATH)
+jdk_lib mlib_image java.desktop
 
-# Per-srcdir -I flags PLUS COMMON_INCLUDES so that jni_md.h can find jni_x86.h
-# (jni_md.h does `#include "jni_x86.h"` which resolves via the hotspot/src/cpu/x86/vm path)
-# Also include the bundled JNI stub headers (generated by javah from the Java class files)
-LIBIAVA_INCLUDES=()
-for d in "${LIBIAVA_SRCDIRS[@]}"; do
-    LIBIAVA_INCLUDES+=("-I$d")
-done
-LIBIAVA_INCLUDES+=("${COMMON_INCLUDES[@]}")
-LIBIAVA_INCLUDES+=("-I$SCRIPT_DIR/jni-headers")
-LIBIAVA_INCLUDES+=("-I$OPENJDK_DIR/jdk/src/share/native/java/lang/fdlibm/include")
-
-LIBIAVA_DEFS=(
-    -DTARGET_ARCH_x86 -DTARGET_OS_FAMILY_linux
-    -DLINUX -D__linux__ -D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE
-    -D_LITTLE_ENDIAN
-    -D_AMD64_ -Damd64
-    -DJDK_MAJOR_VERSION='"1"' -DJDK_MINOR_VERSION='"8"'
-    -DJDK_MICRO_VERSION='"0"' -DJDK_UPDATE_VERSION='"462"'
-    -DJDK_BUILD_NUMBER='"b08"'
-    '-DRELEASE="1.8.0_462-b08"'
-    '-DVENDOR="IKVM"'
-    '-DVENDOR_URL="https://github.com/ikvmnet/ikvm"'
-    '-DVENDOR_URL_BUG="https://github.com/ikvmnet/ikvm/issues/"'
-    '-DARCHPROPNAME="amd64"'
+# libawt. ENABLE_HEADLESS_ONLY, so HEADLESS. awt_LoadLibrary.c finds libawt_headless's symbols in the process when
+# JVM_IsStaticallyLinked, which IKVM's libjvm answers true for emscripten. awt_Mlib.c is built as for the JDK's static
+# build, which calls libmlib_image's functions directly instead of finding them with dlopen and dlsym.
+L_EXTRA_SRC=(common/awt/debug "$OJ_SRC/java.desktop/unix/native/common/awt")
+L_EXCLUDE_FILES=(awt_Font.c CUPSfuncs.c fontpath.c X11Color.c)
+L_HEADER_DIRS=(
+    "${LIBAWT_DEFAULT_HEADER_DIRS[@]}" "$SUPPORT/headers/java.base"
+    libawt/awt/medialib libawt/java2d/d3d libawt/java2d/opengl libawt/java2d/windows libawt/windows
+    common/awt/medialib libmlib_image include
 )
+L_JDK_LIBS=(java.base:libjava java.base:libjvm)
+L_CFLAGS=("${DESKTOP_CFLAGS[@]}" -D__MEDIALIB_OLD_NAMES -D__USE_J2D_NAMES -DMLIB_NO_LIBSUNMATH -DHEADLESS)
+L_FILE_CFLAGS[awt_Mlib.c]="-DSTATIC_BUILD"
+jdk_lib awt java.desktop
 
-FDLIBM_SRC_DIR="$OPENJDK_DIR/jdk/src/share/native/java/lang/fdlibm/src"
-FDLIBM_PREFIX_DEFS=(
-    "-Djacos=${FDLIBM_SYMBOL_PREFIX}jacos"
-    "-Djasin=${FDLIBM_SYMBOL_PREFIX}jasin"
-    "-Djatan=${FDLIBM_SYMBOL_PREFIX}jatan"
-    "-Djatan2=${FDLIBM_SYMBOL_PREFIX}jatan2"
-    "-Djcos=${FDLIBM_SYMBOL_PREFIX}jcos"
-    "-Djexp=${FDLIBM_SYMBOL_PREFIX}jexp"
-    "-Djlog=${FDLIBM_SYMBOL_PREFIX}jlog"
-    "-Djlog10=${FDLIBM_SYMBOL_PREFIX}jlog10"
-    "-Djpow=${FDLIBM_SYMBOL_PREFIX}jpow"
-    "-Djsin=${FDLIBM_SYMBOL_PREFIX}jsin"
-    "-Djsqrt=${FDLIBM_SYMBOL_PREFIX}jsqrt"
-    "-Djcbrt=${FDLIBM_SYMBOL_PREFIX}jcbrt"
-    "-Djtan=${FDLIBM_SYMBOL_PREFIX}jtan"
-    "-Djfloor=${FDLIBM_SYMBOL_PREFIX}jfloor"
-    "-Djceil=${FDLIBM_SYMBOL_PREFIX}jceil"
-    "-Djcosh=${FDLIBM_SYMBOL_PREFIX}jcosh"
-    "-Djmod=${FDLIBM_SYMBOL_PREFIX}jmod"
-    "-Djsinh=${FDLIBM_SYMBOL_PREFIX}jsinh"
-    "-Djfabs=${FDLIBM_SYMBOL_PREFIX}jfabs"
-    "-Djtanh=${FDLIBM_SYMBOL_PREFIX}jtanh"
-    "-Djremainder=${FDLIBM_SYMBOL_PREFIX}jremainder"
-    "-Djhypot=${FDLIBM_SYMBOL_PREFIX}jhypot"
-    "-Djlog1p=${FDLIBM_SYMBOL_PREFIX}jlog1p"
-    "-Djexpm1=${FDLIBM_SYMBOL_PREFIX}jexpm1"
-    "-D__j__ieee754_sqrt=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_sqrt"
-    "-D__j__ieee754_acos=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_acos"
-    "-D__j__ieee754_log=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_log"
-    "-D__j__ieee754_atanh=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_atanh"
-    "-D__j__ieee754_asin=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_asin"
-    "-D__j__ieee754_atan2=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_atan2"
-    "-D__j__ieee754_exp=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_exp"
-    "-D__j__ieee754_cosh=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_cosh"
-    "-D__j__ieee754_fmod=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_fmod"
-    "-D__j__ieee754_pow=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_pow"
-    "-D__j__ieee754_log10=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_log10"
-    "-D__j__ieee754_sinh=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_sinh"
-    "-D__j__ieee754_hypot=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_hypot"
-    "-D__j__ieee754_remainder=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_remainder"
-    "-D__j__ieee754_rem_pio2=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_rem_pio2"
-    "-D__j__ieee754_scalb=${FDLIBM_SYMBOL_PREFIX}__j__ieee754_scalb"
-    "-D__j__kernel_standard=${FDLIBM_SYMBOL_PREFIX}__j__kernel_standard"
-    "-D__j__kernel_sin=${FDLIBM_SYMBOL_PREFIX}__j__kernel_sin"
-    "-D__j__kernel_cos=${FDLIBM_SYMBOL_PREFIX}__j__kernel_cos"
-    "-D__j__kernel_tan=${FDLIBM_SYMBOL_PREFIX}__j__kernel_tan"
-    "-D__j__kernel_rem_pio2=${FDLIBM_SYMBOL_PREFIX}__j__kernel_rem_pio2"
-    "-Datanh=${FDLIBM_SYMBOL_PREFIX}atanh"
-    "-Dcopysign=${FDLIBM_SYMBOL_PREFIX}copysign"
-    "-Dfinite=${FDLIBM_SYMBOL_PREFIX}finite"
-    "-Dfrexp=${FDLIBM_SYMBOL_PREFIX}frexp"
-    "-Dilogb=${FDLIBM_SYMBOL_PREFIX}ilogb"
-    "-Disnan=${FDLIBM_SYMBOL_PREFIX}isnan"
-    "-Dldexp=${FDLIBM_SYMBOL_PREFIX}ldexp"
-    "-D_fdlib_version=${FDLIBM_SYMBOL_PREFIX}_fdlib_version"
-    "-Dlogb=${FDLIBM_SYMBOL_PREFIX}logb"
-    "-Dmatherr=${FDLIBM_SYMBOL_PREFIX}matherr"
-    "-Dmodf=${FDLIBM_SYMBOL_PREFIX}modf"
-    "-Dnextafter=${FDLIBM_SYMBOL_PREFIX}nextafter"
-    "-Drint=${FDLIBM_SYMBOL_PREFIX}rint"
-    "-Dscalb=${FDLIBM_SYMBOL_PREFIX}scalb"
-    "-Dscalbn=${FDLIBM_SYMBOL_PREFIX}scalbn"
-    "-Dsigngam=${FDLIBM_SYMBOL_PREFIX}signgam"
-    "-Dsignificand=${FDLIBM_SYMBOL_PREFIX}significand"
+# libawt_headless. Static: systemScale.o is libawt's (STATIC_LIB_EXCLUDE_OBJS). For wasm, also without
+# CUPSfuncs.c and fontpath.c, which need the CUPS and fontconfig headers.
+L_EXTRA_SRC=(common/font common/java2d "$OJ_SRC/java.desktop/unix/native/common/awt")
+L_EXCLUDES=(medialib opengl)
+L_EXCLUDE_FILES=(
+    GLXGraphicsConfig.c GLXSurfaceData.c X11PMBlitLoops.c X11Renderer.c X11SurfaceData.c
+    systemScale.c CUPSfuncs.c fontpath.c
 )
+L_HEADER_DIRS=("${LIBAWT_DEFAULT_HEADER_DIRS[@]}" common/awt/debug common/font java.base:libjvm)
+L_JDK_LIBS=(libawt java.base:libjava)
+L_CFLAGS=("${DESKTOP_CFLAGS[@]}" -DHEADLESS=true)
+jdk_lib awt_headless java.desktop
 
-log "Building ${PREFIX}libiava ..."
-log "Using fdlibm symbol prefix: ${FDLIBM_SYMBOL_PREFIX}"
-LIBIAVA_OBJS=()
-for dir in "${LIBIAVA_SRCDIRS[@]}"; do
-    [ -d "$dir" ] || continue
-    for src in "$dir"/*.c; do
-        [ -f "$src" ] || continue
-        fname="$(basename "$src")"
-        if ! echo "$fname" | grep -qE "^($LIBIAVA_EXCLUDES)$"; then
-            obj="$TMP_DIR/libiava/${fname%.c}.o"
-            EXTRA_DEFS=()
-            if [ "$dir" = "$FDLIBM_SRC_DIR" ] || [ "$fname" = "StrictMath.c" ]; then
-                EXTRA_DEFS=("${FDLIBM_PREFIX_DEFS[@]}")
-            fi
-            run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-                "${LIBIAVA_DEFS[@]}" "${LIBIAVA_INCLUDES[@]}" "${EXTRA_DEFS[@]}" \
-                -c "$src" -o "$obj"
-            LIBIAVA_OBJS+=("$obj")
-        fi
-    done
-done
-create_archive "$OUT_DIR/native/${PREFIX}libiava.a" "${LIBIAVA_OBJS[@]}"
+# liblcms, bundled
+L_HEADER_DIRS=(common/awt/debug libawt/java2d java.base:libjvm)
+L_JDK_LIBS=(libawt java.base:libjava)
+L_CFLAGS=("${DESKTOP_CFLAGS[@]}" -DCMS_DONT_USE_FAST_FLOOR -DCMS_NO_HALF_SUPPORT)
+jdk_lib lcms java.desktop
 
-# ── Shared defines/includes for remaining OpenJDK-derived native libraries ───
-# These mirror the defines from openjdk.lib.props + lib.props for a linux-x64 target.
+# libjavajpeg, with its bundled libjpeg
+L_JDK_LIBS=(java.base:libjava)
+L_CFLAGS=("${DESKTOP_CFLAGS[@]}")
+jdk_lib javajpeg java.desktop
 
-OPENJDK_LIB_DEFS=(
-    -DLINUX -D__linux__ -D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE
-    -D_AMD64_ -Damd64
-    -DJDK_MAJOR_VERSION='"1"' -DJDK_MINOR_VERSION='"8"'
-    -DJDK_MICRO_VERSION='"0"' -DJDK_UPDATE_VERSION='"462"'
-    -DJDK_BUILD_NUMBER='"b08"'
+# libfontmanager, with its bundled HarfBuzz, against the FreeType below
+L_EXTRA_SRC=(libharfbuzz)
+L_EXCLUDE_FILES=(
+    gsubgpos-context.cc hb-ft.cc hb-style.cc hb-subset-cff-common.cc hb-subset-cff1.cc hb-subset-cff2.cc
+    hb-subset-input.cc hb-subset-instancer-solver.cc hb-subset-plan.cc hb-subset.cc
+    fontpath.c lcdglyph.c AccelGlyphCache.c
 )
-
-# Base includes reused by all four libraries below.
-# Use the JDK JNI export paths (not the Hotspot paths) since these libraries
-# are JNI consumers, not hotspot internals.
-OPENJDK_LIB_INCLUDES=(
-    -I"$OPENJDK_DIR/jdk/src/share/javavm/export"
-    -I"$OPENJDK_DIR/jdk/src/solaris/javavm/export"
-    -I"$OPENJDK_DIR/jdk/src/linux/javavm/export"
-    -I"$OPENJDK_DIR/jdk/src/share/native/common"
-    -I"$OPENJDK_DIR/jdk/src/solaris/native/common"
-    -I"$SCRIPT_DIR/jni-headers"
+L_HEADER_DIRS=(
+    common/awt common/awt/utility common/font libawt/java2d libawt/java2d/pipe libawt/java2d/loops
+    "$FREETYPE_DIR/include"
 )
-
-# ── libjpeg ───────────────────────────────────────────────────────────────────
-
-JPEG_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/awt/image/jpeg"
-
-# libjpeg's error handler escapes via setjmp/longjmp (jerror.c → cinfo->err).
-# Match the final wasm link's -fwasm-exceptions / SUPPORT_LONGJMP=wasm mode so
-# we emit __wasm_longjmp instead of the emscripten_longjmp shim.
-log "Building ${PREFIX}libjpeg ..."
-LIBJPEG_OBJS=()
-for src in "$JPEG_SRC"/*.c; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    obj="$TMP_DIR/libjpeg/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        -fwasm-exceptions \
-        "${OPENJDK_LIB_DEFS[@]}" \
-        -I"$JPEG_SRC" \
-        "${OPENJDK_LIB_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBJPEG_OBJS+=("$obj")
-done
-create_archive "$OUT_DIR/native/${PREFIX}libjpeg.a" "${LIBJPEG_OBJS[@]}"
-
-# ── libsunec ──────────────────────────────────────────────────────────────────
-
-SUNEC_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/security/ec"
-
-log "Building ${PREFIX}libsunec ..."
-LIBSUNEC_OBJS=()
-
-# ECC_JNI.cpp (C++11)
-run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
-    "${OPENJDK_LIB_DEFS[@]}" \
-    -DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B \
-    -I"$SUNEC_SRC/impl" \
-    "${OPENJDK_LIB_INCLUDES[@]}" \
-    -c "$SUNEC_SRC/ECC_JNI.cpp" -o "$TMP_DIR/libsunec/ECC_JNI.o"
-LIBSUNEC_OBJS+=("$TMP_DIR/libsunec/ECC_JNI.o")
-
-# impl/*.c (C99)
-for src in "$SUNEC_SRC/impl"/*.c; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    obj="$TMP_DIR/libsunec/impl/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${OPENJDK_LIB_DEFS[@]}" \
-        -DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B \
-        -I"$SUNEC_SRC/impl" \
-        "${OPENJDK_LIB_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBSUNEC_OBJS+=("$obj")
-done
-
-# Local jni_onload.c (C99)
-run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-    "${OPENJDK_LIB_DEFS[@]}" "${OPENJDK_LIB_INCLUDES[@]}" \
-    -c "$IKVM_SRC/src/libsunec/jni_onload.c" -o "$TMP_DIR/libsunec/jni_onload.o"
-LIBSUNEC_OBJS+=("$TMP_DIR/libsunec/jni_onload.o")
-
-create_archive "$OUT_DIR/native/${PREFIX}libsunec.a" "${LIBSUNEC_OBJS[@]}"
-
-# ── libunpack ─────────────────────────────────────────────────────────────────
-
-PACK_SRC="$OPENJDK_DIR/jdk/src/share/native/com/sun/java/util/jar/pack"
-
-log "Building ${PREFIX}libunpack ..."
-LIBUNPACK_OBJS=()
-
-# OpenJDK pack .cpp files (C++11), excluding main.cpp and jni.cpp
-for src in "$PACK_SRC"/*.cpp; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    [[ "$fname" == "main.cpp" || "$fname" == "jni.cpp" ]] && continue
-    obj="$TMP_DIR/libunpack/pack/${fname%.cpp}.o"
-    run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
-        "${OPENJDK_LIB_DEFS[@]}" \
-        -DNO_ZLIB -DUNPACK_JNI -DFULL \
-        -I"$PACK_SRC" \
-        "${OPENJDK_LIB_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBUNPACK_OBJS+=("$obj")
-done
-
-# Local jni.cpp (C++11, replaces upstream jni.cpp)
-run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
-    "${OPENJDK_LIB_DEFS[@]}" \
-    -DNO_ZLIB -DUNPACK_JNI -DFULL \
-    -I"$PACK_SRC" \
-    "${OPENJDK_LIB_INCLUDES[@]}" \
-    -c "$IKVM_SRC/src/libunpack/jni.cpp" -o "$TMP_DIR/libunpack/jni.o"
-LIBUNPACK_OBJS+=("$TMP_DIR/libunpack/jni.o")
-
-# Local jni_onload.c (C99)
-run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-    "${OPENJDK_LIB_DEFS[@]}" "${OPENJDK_LIB_INCLUDES[@]}" \
-    -c "$IKVM_SRC/src/libunpack/jni_onload.c" -o "$TMP_DIR/libunpack/jni_onload.o"
-LIBUNPACK_OBJS+=("$TMP_DIR/libunpack/jni_onload.o")
-
-create_archive "$OUT_DIR/native/${PREFIX}libunpack.a" "${LIBUNPACK_OBJS[@]}"
-
-# ── libzip ────────────────────────────────────────────────────────────────────
-
-ZIP_SRC="$OPENJDK_DIR/jdk/src/share/native/java/util/zip"
-
-log "Building ${PREFIX}libzip ..."
-LIBZIP_OBJS=()
-
-# Main zip sources (excluding ZipFile.c)
-for src in "$ZIP_SRC"/*.c; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    [ "$fname" = "ZipFile.c" ] && continue
-    obj="$TMP_DIR/libzip/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${OPENJDK_LIB_DEFS[@]}" \
-        -DUSE_MMAP \
-        -I"$ZIP_SRC" \
-        -I"$ZIP_SRC/zlib" \
-        -I"$OPENJDK_DIR/jdk/src/share/native/java/io" \
-        -I"$OPENJDK_DIR/jdk/src/solaris/native/java/io" \
-        "${OPENJDK_LIB_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBZIP_OBJS+=("$obj")
-done
-
-# Bundled zlib sources
-for src in "$ZIP_SRC/zlib"/*.c; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    obj="$TMP_DIR/libzip/zlib/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${OPENJDK_LIB_DEFS[@]}" \
-        -I"$ZIP_SRC/zlib" \
-        "${OPENJDK_LIB_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBZIP_OBJS+=("$obj")
-done
-
-create_archive "$OUT_DIR/native/${PREFIX}libzip.a" "${LIBZIP_OBJS[@]}"
-
-# ── libmanagement ─────────────────────────────────────────────────────────────
-# Sources: local *.c glob (management.c + jni_onload.c) plus linux-specific
-# OpenJDK sources from solaris/native/sun/management/.
-# No library-specific preprocessor defines for linux.
-
-MGMT_SHARE_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/management"
-MGMT_SOL_SRC="$OPENJDK_DIR/jdk/src/solaris/native/sun/management"
-LIBMGMT_SRC="$IKVM_SRC/src/libmanagement"
-
-LIBMGMT_INCLUDES=(
-    "${OPENJDK_LIB_INCLUDES[@]}"
-    -I"$MGMT_SHARE_SRC"
-    -I"$MGMT_SOL_SRC"
-    -I"$SCRIPT_DIR/emscripten-stubs"
+L_JDK_LIBS=(libawt java.base:libjava java.base:libjvm)
+L_CFLAGS=(
+    "${DESKTOP_CFLAGS[@]}"
+    -DGETPAGESIZE -DHAVE_MPROTECT -DHAVE_PTHREAD -DHAVE_SYSCONF -DHAVE_SYS_MMAN_H -DHAVE_UNISTD_H
+    -DHB_NO_PRAGMA_GCC_DIAGNOSTIC -DHAVE_INTEL_ATOMIC_PRIMITIVES -DHB_NO_VISIBILITY
+    -DLE_STANDALONE -DHEADLESS
 )
-
-log "Building ${PREFIX}libmanagement ..."
-LIBMGMT_OBJS=()
-
-# Local sources (management.c, jni_onload.c)
-for src in "$LIBMGMT_SRC"/*.c; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    obj="$TMP_DIR/libmanagement/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBMGMT_OBJS+=("$obj")
-done
-
-# Linux-specific OpenJDK sources
-for src in \
-    "$MGMT_SOL_SRC/FileSystemImpl.c" \
-    "$MGMT_SOL_SRC/OperatingSystemImpl.c" \
-    "$MGMT_SOL_SRC/LinuxOperatingSystem.c"; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    obj="$TMP_DIR/libmanagement/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBMGMT_OBJS+=("$obj")
-done
-
-# Emscripten does not provide sysinfo(); supply a local stub used by
-# OperatingSystemImpl.c.
-run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-    "${OPENJDK_LIB_DEFS[@]}" "${LIBMGMT_INCLUDES[@]}" \
-    -c "$SCRIPT_DIR/emscripten-stubs/sysinfo_stub.c" -o "$TMP_DIR/libmanagement/sysinfo_stub.o"
-LIBMGMT_OBJS+=("$TMP_DIR/libmanagement/sysinfo_stub.o")
-
-create_archive "$OUT_DIR/native/${PREFIX}libmanagement.a" "${LIBMGMT_OBJS[@]}"
-
-# ── libnio ────────────────────────────────────────────────────────────────────
-# JoinPathsAndFiles cross-product: (solaris/java/nio, solaris/sun/nio/ch,
-# solaris/sun/nio/fs) × (common files + linux-only files), only if the file
-# exists on disk.
-
-NIO_SOL_JAVA_NIO="$OPENJDK_DIR/jdk/src/solaris/native/java/nio"
-NIO_SOL_CH="$OPENJDK_DIR/jdk/src/solaris/native/sun/nio/ch"
-NIO_SOL_FS="$OPENJDK_DIR/jdk/src/solaris/native/sun/nio/fs"
-NIO_SHARE_CH="$OPENJDK_DIR/jdk/src/share/native/sun/nio/ch"
-LIBNIO_SRC="$IKVM_SRC/src/libnio"
-
-LIBNIO_INCLUDES=(
-    "${OPENJDK_LIB_INCLUDES[@]}"
-    -I"$NIO_SHARE_CH"
-    -I"$OPENJDK_DIR/jdk/src/share/native/java/io"
-    -I"$OPENJDK_DIR/jdk/src/share/native/java/net"
-    -I"$OPENJDK_DIR/jdk/src/solaris/native/java/net"
-    -I"$SCRIPT_DIR/emscripten-stubs"
-)
-
-LIBNIO_DEFS=(
-    "${OPENJDK_LIB_DEFS[@]}"
-    -D_Included_java_lang_Long
-    "-Djava_lang_Long_serialVersionUID=4290774380558885855LL"
-    "-Djava_lang_Long_MIN_VALUE=-9223372036854775808LL"
-    "-Djava_lang_Long_MAX_VALUE=9223372036854775807LL"
-    -D__SIGRTMAX=64
-)
-
-# Full list of files to attempt (cross-product of dirs × filenames; skip if not present)
-NIO_DIRS=("$NIO_SOL_JAVA_NIO" "$NIO_SOL_CH" "$NIO_SOL_FS")
-NIO_FILES=(
-    # common (all platforms)
-    DatagramChannelImpl.c DatagramDispatcher.c FileChannelImpl.c FileDispatcherImpl.c
-    FileKey.c IOUtil.c MappedByteBuffer.c Net.c ServerSocketChannelImpl.c
-    SocketChannelImpl.c SocketDispatcher.c
-    # linux-only
-    EPoll.c EPollArrayWrapper.c EPollPort.c InheritedChannel.c NativeThread.c
-    PollArrayWrapper.c UnixAsynchronousServerSocketChannelImpl.c
-    UnixAsynchronousSocketChannelImpl.c GnomeFileTypeDetector.c MagicFileTypeDetector.c
-    LinuxNativeDispatcher.c LinuxWatchService.c UnixCopyFile.c UnixNativeDispatcher.c
-)
-
-log "Building ${PREFIX}libnio ..."
-LIBNIO_OBJS=()
-
-for dir in "${NIO_DIRS[@]}"; do
-    for fname in "${NIO_FILES[@]}"; do
-        src="$dir/$fname"
-        [ -f "$src" ] || continue
-        obj="$TMP_DIR/libnio/${fname%.c}.o"
-        # Guard against duplicate object names (first match wins)
-        if [[ ! " ${LIBNIO_OBJS[*]} " =~ " $obj " ]]; then
-            run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-                "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
-                -c "$src" -o "$obj"
-            LIBNIO_OBJS+=("$obj")
-        fi
-    done
-done
-
-# Local jni_onload.c
-run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-    "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
-    -c "$LIBNIO_SRC/jni_onload.c" -o "$TMP_DIR/libnio/jni_onload.o"
-LIBNIO_OBJS+=("$TMP_DIR/libnio/jni_onload.o")
-
-# NativeThread.c calls pthread_kill to interrupt blocked threads.  In the
-# ST build there is no pthread runtime, so provide a stub that satisfies
-# the linker.
-if [ "$VARIANT" = "st" ]; then
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 \
-        "${LIBNIO_DEFS[@]}" "${LIBNIO_INCLUDES[@]}" \
-        -c "$SCRIPT_DIR/st-stubs/pthread_stubs.c" -o "$TMP_DIR/libnio/pthread_stubs.o"
-    LIBNIO_OBJS+=("$TMP_DIR/libnio/pthread_stubs.o")
-fi
-
-create_archive "$OUT_DIR/native/${PREFIX}libnio.a" "${LIBNIO_OBJS[@]}"
-
-# ── libnet ────────────────────────────────────────────────────────────────────
-
-NET_SHARE_SRC="$OPENJDK_DIR/jdk/src/share/native/java/net"
-NET_SOL_SRC="$OPENJDK_DIR/jdk/src/solaris/native/java/net"
-LIBNET_SRC="$IKVM_SRC/src/libnet"
-
-LIBNET_INCLUDES=(
-    "${OPENJDK_LIB_INCLUDES[@]}"
-    -I"$NET_SHARE_SRC"
-    -I"$NET_SOL_SRC"
-    -I"$OPENJDK_DIR/jdk/src/share/native/java/io"
-    -I"$SCRIPT_DIR/emscripten-stubs"
-)
-
-LIBNET_DEFS=(
-    "${OPENJDK_LIB_DEFS[@]}"
-    -D__SIGRTMAX=64
-)
-
-log "Building ${PREFIX}libnet ..."
-LIBNET_OBJS=()
-
-# Share sources
-for fname in net_util.c InetAddress.c Inet4Address.c Inet6Address.c DatagramPacket.c; do
-    src="$NET_SHARE_SRC/$fname"
-    [ -f "$src" ] || continue
-    obj="$TMP_DIR/libnet/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBNET_OBJS+=("$obj")
-done
-
-# Solaris/Linux sources
-for fname in net_util_md.c Inet4AddressImpl.c Inet6AddressImpl.c InetAddressImplFactory.c \
-             NetworkInterface.c PlainDatagramSocketImpl.c PlainSocketImpl.c \
-             SocketInputStream.c SocketOutputStream.c; do
-    src="$NET_SOL_SRC/$fname"
-    [ -f "$src" ] || continue
-    obj="$TMP_DIR/libnet/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBNET_OBJS+=("$obj")
-done
-
-# linux_close.c requires pthreads — only include in MT variant.
-# For ST: compile a simplified drop-in that provides the same NET_* API
-# without any pthread machinery.
-if [ "$VARIANT" = "mt" ]; then
-    src="$NET_SOL_SRC/linux_close.c"
-    if [ -f "$src" ]; then
-        obj="$TMP_DIR/libnet/linux_close.o"
-        run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-            "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
-            -c "$src" -o "$obj"
-        LIBNET_OBJS+=("$obj")
-    fi
-else
-    obj="$TMP_DIR/libnet/linux_close_st.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 \
-        "${LIBNET_DEFS[@]}" "${LIBNET_INCLUDES[@]}" \
-        -c "$SCRIPT_DIR/st-stubs/linux_close_st.c" -o "$obj"
-    LIBNET_OBJS+=("$obj")
-fi
-
-create_archive "$OUT_DIR/native/${PREFIX}libnet.a" "${LIBNET_OBJS[@]}"
+jdk_lib fontmanager java.desktop
 
 # ── libfreetype ───────────────────────────────────────────────────────────────
-# Builds the bundled FreeType 2.13.2 from ext/freetype as a standalone static
-# archive.  We deliberately avoid Emscripten's -sUSE_FREETYPE=1 port: .NET 10
-# is pinned to emsdk 3.1.56, whose bundled FreeType lacks upstream fixes and
-# can't be updated independently.
+# ext/freetype (LWJGL's FreeType binding links the same archive).
+# The file list is src/libfreetype/libfreetype.clangproj's.
 
-FREETYPE_DIR="$IKVM_SRC/ext/freetype"
-
-mkdir -p "$TMP_DIR/libfreetype"
-
-LIBFT_INCLUDES=(
-    -I"$FREETYPE_DIR/include"
-)
-
-LIBFT_DEFS=(
-    -DFT2_BUILD_LIBRARY
-    -DHAVE_UNISTD_H
-    -DHAVE_FCNTL_H
-)
-
-# FreeType's PS/TrueType interpreters use setjmp/longjmp for error recovery.
-# The final wasm link uses -fwasm-exceptions, which switches SUPPORT_LONGJMP
-# to wasm-EH mode and expects archives to emit __wasm_longjmp (not the
-# emscripten_longjmp shim).  Build with -fwasm-exceptions to match.
-LIBFT_EH_FLAGS=(-fwasm-exceptions)
-
-# Mirrors the file list from src/libfreetype/libfreetype.clangproj.
 LIBFT_SRCS=(
-    src/autofit/autofit.c
-    src/base/ftbase.c
-    src/base/ftbbox.c
-    src/base/ftbdf.c
-    src/base/ftbitmap.c
-    src/base/ftcid.c
-    src/base/ftdebug.c
-    src/base/ftfstype.c
-    src/base/ftgasp.c
-    src/base/ftglyph.c
-    src/base/ftgxval.c
-    src/base/ftinit.c
-    src/base/ftmm.c
-    src/base/ftotval.c
-    src/base/ftpatent.c
-    src/base/ftpfr.c
-    src/base/ftstroke.c
-    src/base/ftsynth.c
-    src/base/fttype1.c
-    src/base/ftwinfnt.c
-    src/bdf/bdf.c
-    src/cache/ftcache.c
-    src/cff/cff.c
-    src/cid/type1cid.c
-    src/dlg/dlgwrap.c
-    src/gzip/ftgzip.c
-    src/lzw/ftlzw.c
-    src/pcf/pcf.c
-    src/pfr/pfr.c
-    src/psaux/psaux.c
-    src/pshinter/pshinter.c
-    src/psnames/psmodule.c
-    src/raster/raster.c
-    src/sfnt/sfnt.c
-    src/smooth/smooth.c
-    src/sdf/sdf.c
-    src/svg/svg.c
-    src/truetype/truetype.c
-    src/type1/type1.c
-    src/type42/type42.c
-    src/winfonts/winfnt.c
-    builds/unix/ftsystem.c
+    src/autofit/autofit.c src/base/ftbase.c src/base/ftbbox.c src/base/ftbdf.c src/base/ftbitmap.c
+    src/base/ftcid.c src/base/ftdebug.c src/base/ftfstype.c src/base/ftgasp.c src/base/ftglyph.c
+    src/base/ftgxval.c src/base/ftinit.c src/base/ftmm.c src/base/ftotval.c src/base/ftpatent.c
+    src/base/ftpfr.c src/base/ftstroke.c src/base/ftsynth.c src/base/fttype1.c src/base/ftwinfnt.c
+    src/bdf/bdf.c src/cache/ftcache.c src/cff/cff.c src/cid/type1cid.c src/dlg/dlgwrap.c
+    src/gzip/ftgzip.c src/lzw/ftlzw.c src/pcf/pcf.c src/pfr/pfr.c src/psaux/psaux.c
+    src/pshinter/pshinter.c src/psnames/psmodule.c src/raster/raster.c src/sfnt/sfnt.c
+    src/smooth/smooth.c src/sdf/sdf.c src/svg/svg.c src/truetype/truetype.c src/type1/type1.c
+    src/type42/type42.c src/winfonts/winfnt.c builds/unix/ftsystem.c
 )
 
-log "Building ${PREFIX}libfreetype ..."
+log "Building libfreetype ..."
+mkdir -p "$TMP_DIR/libfreetype"
 LIBFT_OBJS=()
-for relsrc in "${LIBFT_SRCS[@]}"; do
-    src="$FREETYPE_DIR/$relsrc"
-    [ -f "$src" ] || { log "WARN: missing freetype source $relsrc"; continue; }
-    bname="$(basename "$src")"
-    obj="$TMP_DIR/libfreetype/${bname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${LIBFT_EH_FLAGS[@]}" \
-        "${LIBFT_DEFS[@]}" "${LIBFT_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBFT_OBJS+=("$obj")
+for rel in "${LIBFT_SRCS[@]}"; do
+    base="${rel##*/}"
+    run_compile emcc -O2 -fPIC -pthread -fwasm-exceptions -Wno-error -std=c99 \
+        -DFT2_BUILD_LIBRARY -DHAVE_UNISTD_H -DHAVE_FCNTL_H -I"$FREETYPE_DIR/include" \
+        -c "$FREETYPE_DIR/$rel" -o "$TMP_DIR/libfreetype/${base%.c}.o"
+    LIBFT_OBJS+=("$TMP_DIR/libfreetype/${base%.c}.o")
 done
-create_archive "$OUT_DIR/native/${PREFIX}libfreetype.a" "${LIBFT_OBJS[@]}"
+create_archive "$NATIVE_OUT/libfreetype.a" "${LIBFT_OBJS[@]}"
 
-# ── libmlib_image ─────────────────────────────────────────────────────────────
-# Pure-C bitmap loops used by awt_ImagingLib for hardware-accelerated image
-# operations.  No external deps beyond libc/libm.  Mirrors
-# src/libmlib_image/libmlib_image.clangproj.
+# ── Collisions ────────────────────────────────────────────────────────────────
+# gen-static-libs.py references every global the archives define, so all of their objects end up in the one wasm
+# module: a name two archives define is a link error there. Fail here instead.
 
-MLIB_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/awt/medialib"
-
-mkdir -p "$TMP_DIR/libmlib_image"
-
-LIBMLIB_INCLUDES=(
-    -I"$MLIB_SRC"
-    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/awt/medialib"
-    "${OPENJDK_LIB_INCLUDES[@]}"
-)
-
-LIBMLIB_DEFS=(
-    "${OPENJDK_LIB_DEFS[@]}"
-    -D__USE_J2D_NAMES
-    -D__MEDIALIB_OLD_NAMES
-    -DMLIB_NO_LIBSUNMATH
-    -DMLIB_OS64BIT
-)
-
-# Files excluded by libmlib_image.clangproj.  awt_ImagingLib.c belongs to libawt;
-# mlib_c_ImageBlendTable.c is generated lookup data that lives in libawt.
-MLIB_EXCLUDES="awt_ImagingLib\.c|mlib_c_ImageBlendTable\.c"
-
-log "Building ${PREFIX}libmlib_image ..."
-LIBMLIB_OBJS=()
-for src in "$MLIB_SRC"/*.c; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    if echo "$fname" | grep -qE "^($MLIB_EXCLUDES)$"; then
-        continue
+NM="${NM:-$(command -v llvm-nm || true)}"
+if [ -n "$NM" ]; then
+    dups="$(for a in "$NATIVE_OUT"/lib*.a; do
+        "$NM" --defined-only -g "$a" 2>/dev/null | awk -v a="${a##*/}" 'NF == 3 && $2 != "W" && $2 != "V" { print $3 "\t" a }'
+    done | LC_ALL=C sort -u | awk -F'\t' '{ n[$1]++; l[$1] = l[$1] " " $2 } END { for (s in n) if (n[s] > 1) print s ":" l[s] }')"
+    if [ -n "$dups" ]; then
+        echo "ERROR: symbols defined by more than one archive:" >&2
+        echo "$dups" | sort >&2
+        exit 1
     fi
-    obj="$TMP_DIR/libmlib_image/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c89 "${PTHREAD_FLAGS[@]}" \
-        "${LIBMLIB_DEFS[@]}" "${LIBMLIB_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBMLIB_OBJS+=("$obj")
-done
-create_archive "$OUT_DIR/native/${PREFIX}libmlib_image.a" "${LIBMLIB_OBJS[@]}"
-
-# ── liblcms ───────────────────────────────────────────────────────────────────
-# Bundled Little CMS color-management engine used by the java.awt.color stack.
-# Pure C99, deps: libm only.  Mirrors src/liblcms/liblcms.clangproj.
-
-LCMS_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/java2d/cmm/lcms"
-LCMS_J2D_INC="$OPENJDK_DIR/jdk/src/share/native/sun/java2d"
-LCMS_AWT_DBG_INC="$OPENJDK_DIR/jdk/src/share/native/sun/awt/debug"
-
-mkdir -p "$TMP_DIR/liblcms"
-
-LIBLCMS_INCLUDES=(
-    -I"$LCMS_SRC"
-    -I"$LCMS_J2D_INC"
-    -I"$LCMS_AWT_DBG_INC"
-    "${OPENJDK_LIB_INCLUDES[@]}"
-)
-
-log "Building ${PREFIX}liblcms ..."
-LIBLCMS_OBJS=()
-for src in "$LCMS_SRC"/*.c; do
-    [ -f "$src" ] || continue
-    fname="$(basename "$src")"
-    obj="$TMP_DIR/liblcms/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${OPENJDK_LIB_DEFS[@]}" "${LIBLCMS_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBLCMS_OBJS+=("$obj")
-done
-create_archive "$OUT_DIR/native/${PREFIX}liblcms.a" "${LIBLCMS_OBJS[@]}"
-
-# ── libawt (headless, merged with libawt_headless) ───────────────────────────
-# Combines libawt + libawt_headless into one archive.  awt_LoadLibrary.c is
-# replaced with emscripten-stubs/awt_LoadLibrary_wasm.c which drops the
-# System.load("libawt_headless.so") + dlopen chain (we don't need it — the
-# only native code in libawt_headless is AWTIsHeadless + a no-op JNI_OnLoad,
-# both already present in the wasm replacement file).
-#
-# Source dirs that exist for linux but aren't usable in wasm — opengl,
-# solaris/java2d/x11, gtk/awt_GraphicsEnv/awt_UNIXToolkit — are excluded
-# below by listing only the platform-independent file set from libawt.clangproj.
-
-AWT_SHARE_AWT="$OPENJDK_DIR/jdk/src/share/native/sun/awt"
-AWT_SHARE_J2D="$OPENJDK_DIR/jdk/src/share/native/sun/java2d"
-AWT_SOLARIS_AWT="$OPENJDK_DIR/jdk/src/solaris/native/sun/awt"
-
-mkdir -p "$TMP_DIR/libawt"
-
-LIBAWT_INCLUDES=(
-    -I"$AWT_SHARE_AWT"
-    -I"$AWT_SHARE_AWT/image"
-    -I"$AWT_SHARE_AWT/image/cvutils"
-    -I"$AWT_SHARE_AWT/image/gif"
-    -I"$AWT_SHARE_AWT/medialib"
-    -I"$AWT_SHARE_AWT/debug"
-    -I"$AWT_SHARE_AWT/utility"
-    -I"$AWT_SHARE_J2D"
-    -I"$AWT_SHARE_J2D/loops"
-    -I"$AWT_SHARE_J2D/pipe"
-    -I"$OPENJDK_DIR/jdk/src/share/native/sun/font"
-    -I"$AWT_SOLARIS_AWT"
-    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/java2d"
-    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/awt/medialib"
-    "${OPENJDK_LIB_INCLUDES[@]}"
-)
-
-LIBAWT_DEFS=(
-    "${OPENJDK_LIB_DEFS[@]}"
-    -D__USE_J2D_NAMES
-    -D__MEDIALIB_OLD_NAMES
-    -DMLIB_NO_LIBSUNMATH
-    -DMLIB_OS64BIT
-    -DHEADLESS
-)
-
-# (file-stem-or-relative-path, src-dir) — duplicated from libawt.clangproj's
-# LibAwtFile list, joined against LibAwtDirs by JoinPathsAndFiles.  We embed
-# the dir explicitly here so the file picker matches openjdk's first-found-wins
-# semantics.
-
-compile_awt() {
-    local src="$1"
-    [ -f "$src" ] || { log "WARN: missing libawt source $src"; return; }
-    local fname obj
-    fname="$(basename "$src")"
-    obj="$TMP_DIR/libawt/${fname%.c}.o"
-    # Skip duplicates (first match wins).
-    for existing in "${LIBAWT_OBJS[@]}"; do
-        if [ "$existing" = "$obj" ]; then
-            return
-        fi
-    done
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${LIBAWT_DEFS[@]}" "${LIBAWT_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBAWT_OBJS+=("$obj")
-}
-
-log "Building ${PREFIX}libawt ..."
-LIBAWT_OBJS=()
-
-# share/native/sun/awt/image/**/*.c (cvutils + gif + jpeg/libpng EXCLUDED,
-# jpeg lives in libjpeg, libpng isn't referenced)
-compile_awt "$AWT_SHARE_AWT/image/BufImgSurfaceData.c"
-compile_awt "$AWT_SHARE_AWT/image/DataBufferNative.c"
-compile_awt "$AWT_SHARE_AWT/image/awt_ImageRep.c"
-compile_awt "$AWT_SHARE_AWT/image/awt_parseImage.c"
-compile_awt "$AWT_SHARE_AWT/image/dither.c"
-compile_awt "$AWT_SHARE_AWT/image/imageInitIDs.c"
-compile_awt "$AWT_SHARE_AWT/image/cvutils/img_colors.c"
-compile_awt "$AWT_SHARE_AWT/image/cvutils/img_globals.c"
-compile_awt "$AWT_SHARE_AWT/image/gif/gifdecoder.c"
-
-# share/native/sun/awt/medialib/awt_ImagingLib.c — function-pointer table
-# that resolves via awt_Mlib.c → libmlib_image.  Will fail to resolve at
-# runtime (no dlopen) and fall back to Java pure-Java implementations.
-compile_awt "$AWT_SHARE_AWT/medialib/awt_ImagingLib.c"
-# mlib_c_ImageBlendTable.c is data, included once here so libawt has it.
-compile_awt "$AWT_SHARE_AWT/medialib/mlib_c_ImageBlendTable.c"
-
-# share/native/sun/awt/debug/*.c
-compile_awt "$AWT_SHARE_AWT/debug/debug_assert.c"
-compile_awt "$AWT_SHARE_AWT/debug/debug_mem.c"
-compile_awt "$AWT_SHARE_AWT/debug/debug_trace.c"
-compile_awt "$AWT_SHARE_AWT/debug/debug_util.c"
-
-# share/native/sun/java2d/*.c
-compile_awt "$AWT_SHARE_J2D/SurfaceData.c"
-compile_awt "$AWT_SHARE_J2D/Disposer.c"
-compile_awt "$AWT_SHARE_J2D/Trace.c"
-
-# share/native/sun/java2d/pipe/*.c
-compile_awt "$AWT_SHARE_J2D/pipe/Region.c"
-compile_awt "$AWT_SHARE_J2D/pipe/BufferedMaskBlit.c"
-compile_awt "$AWT_SHARE_J2D/pipe/BufferedRenderPipe.c"
-compile_awt "$AWT_SHARE_J2D/pipe/ShapeSpanIterator.c"
-compile_awt "$AWT_SHARE_J2D/pipe/SpanClipRenderer.c"
-
-# share/native/sun/java2d/loops/*.c — graphics primitives.
-for src in "$AWT_SHARE_J2D/loops"/*.c; do
-    [ -f "$src" ] || continue
-    compile_awt "$src"
-done
-
-# solaris/native/sun/awt files (linux-applicable subset only)
-compile_awt "$AWT_SOLARIS_AWT/awt_Mlib.c"
-compile_awt "$AWT_SOLARIS_AWT/initIDs.c"
-
-# share/native/sun/font/AccelGlyphCache.c — provides AccelGlyphCache_* symbols
-# referenced by libfontmanager's sunFont.c.  Per the IKVM clangprojs, this
-# file lives in libawt_headless on Linux (and libfontmanager explicitly
-# excludes it); since we merge libawt_headless into libawt, it goes here.
-compile_awt "$OPENJDK_DIR/jdk/src/share/native/sun/font/AccelGlyphCache.c"
-
-# Custom JNI_OnLoad (replaces solaris/native/sun/awt/awt_LoadLibrary.c).
-run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-    "${LIBAWT_DEFS[@]}" "${LIBAWT_INCLUDES[@]}" \
-    -c "$SCRIPT_DIR/emscripten-stubs/awt_LoadLibrary_wasm.c" \
-    -o "$TMP_DIR/libawt/awt_LoadLibrary_wasm.o"
-LIBAWT_OBJS+=("$TMP_DIR/libawt/awt_LoadLibrary_wasm.o")
-
-create_archive "$OUT_DIR/native/${PREFIX}libawt.a" "${LIBAWT_OBJS[@]}"
-
-# ── libfontmanager ───────────────────────────────────────────────────────────
-# Provides the sun.font.* native methods (FreeType-backed scaler, glyph list
-# drawing, etc.).  Depends on FreeType headers (we link the static archive at
-# the final wasm link step, not here).  Mirrors
-# src/libfontmanager/libfontmanager.clangproj (linux block).
-
-FONT_SHARE_SRC="$OPENJDK_DIR/jdk/src/share/native/sun/font"
-FONT_SOL_SRC="$OPENJDK_DIR/jdk/src/solaris/native/sun/font"
-
-mkdir -p "$TMP_DIR/libfontmanager"
-
-LIBFM_INCLUDES=(
-    -I"$FONT_SHARE_SRC"
-    -I"$FONT_SHARE_SRC/layout"
-    -I"$AWT_SHARE_AWT/image/cvutils"
-    -I"$AWT_SHARE_AWT/debug"
-    -I"$AWT_SHARE_J2D"
-    -I"$AWT_SHARE_J2D/loops"
-    -I"$AWT_SHARE_J2D/pipe"
-    -I"$AWT_SOLARIS_AWT"
-    -I"$OPENJDK_DIR/jdk/src/solaris/native/sun/java2d"
-    -I"$FREETYPE_DIR/include"
-    "${OPENJDK_LIB_INCLUDES[@]}"
-)
-
-LIBFM_DEFS=(
-    "${OPENJDK_LIB_DEFS[@]}"
-    -DLE_STANDALONE
-    -DHEADLESS
-)
-
-# AccelGlyphCache.c is excluded from the linux build per the clangproj.
-# X11TextRenderer.c / X11FontScaler.c are skipped because we don't link libX11;
-# headless ImageIO doesn't call into them.
-FM_EXCLUDES="AccelGlyphCache\.c|X11TextRenderer\.c|X11FontScaler\.c"
-
-log "Building ${PREFIX}libfontmanager ..."
-LIBFM_OBJS=()
-
-# Collect all .c files under share/native/sun/font + solaris/native/sun/font.
-while IFS= read -r src; do
-    fname="$(basename "$src")"
-    if echo "$fname" | grep -qE "^($FM_EXCLUDES)$"; then
-        continue
-    fi
-    obj="$TMP_DIR/libfontmanager/${fname%.c}.o"
-    run_compile emcc -O2 -fPIC -Wno-error -std=c99 "${PTHREAD_FLAGS[@]}" \
-        "${LIBFM_DEFS[@]}" "${LIBFM_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBFM_OBJS+=("$obj")
-done < <(find "$FONT_SHARE_SRC" "$FONT_SOL_SRC" -name '*.c' 2>/dev/null)
-
-# C++ layout engine (ICU-derived). Compile separately with em++.
-while IFS= read -r src; do
-    fname="$(basename "$src")"
-    if echo "$fname" | grep -qE "^($FM_EXCLUDES)$"; then
-        continue
-    fi
-    obj="$TMP_DIR/libfontmanager/${fname%.cpp}.o"
-    run_compile em++ -O2 -fPIC -Wno-error -std=c++11 "${PTHREAD_FLAGS[@]}" \
-        "${LIBFM_DEFS[@]}" "${LIBFM_INCLUDES[@]}" \
-        -c "$src" -o "$obj"
-    LIBFM_OBJS+=("$obj")
-done < <(find "$FONT_SHARE_SRC" -name '*.cpp' 2>/dev/null)
-
-create_archive "$OUT_DIR/native/${PREFIX}libfontmanager.a" "${LIBFM_OBJS[@]}"
-
-log "Done! Artifacts written to $OUT_DIR/native/"
-
-nullglob_was_set=0
-if shopt -q nullglob; then
-    nullglob_was_set=1
-else
-    shopt -s nullglob
 fi
 
-archives=("$OUT_DIR/native/${PREFIX}"*.a)
-if [ "${#archives[@]}" -gt 0 ]; then
-    ls -lh "${archives[@]}"
-fi
-
-if [ "$nullglob_was_set" -eq 0 ]; then
-    shopt -u nullglob
-fi
+log "Done! Artifacts written to $NATIVE_OUT/"
+ls -lh "$NATIVE_OUT"/lib*.a

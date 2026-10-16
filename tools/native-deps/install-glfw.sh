@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
-# install-glfw.sh - Stage locally-built emscripten-glfw artifacts into a consumer project's
-# statics/ directory, so a local `build-glfw.sh` output is drop-in interchangeable with the
-# release assets the consumer Makefile downloads.
+# install-glfw.sh - Stage locally-built emscripten-glfw + mesa-wink artifacts into a consumer project's statics/
+# directory:
 #
-# It copies the same files, under the same (unsuffixed) names, that the release Makefile ends up
-# with after fetching libglfw3-<variant>.a / lib_emscripten_glfw3-<variant>.js and unzipping
-# mobilegl-webgpu-js-<variant>.zip:
+#   out/<variant>/libglfw3.a                -> statics/libglfw3.a
+#   out/<variant>/libwink.a                 -> statics/libwink.a
+#   out/<variant>/libwink_webgpu.a          -> statics/libwink_webgpu.a
+#   out/<variant>/libwink_tint.a            -> statics/libwink_tint.a
+#   out/<variant>/lib_emscripten_glfw3.js   -> statics/lib_emscripten_glfw3.js
+#   out/<variant>/wink-js/NN-*.js           -> statics/wink-js/ (numbered: the link passes them in that order)
 #
-#   out/<variant>/libglfw3.a                        -> statics/libglfw3.a
-#   out/<variant>/lib_emscripten_glfw3.js           -> statics/lib_emscripten_glfw3.js
-#   out/<variant>/library_webgpu_enum_tables.js     -> statics/...
-#   out/<variant>/library_webgpu_generated_struct_info.js
-#   out/<variant>/library_webgpu_generated_sig_info.js
-#   out/<variant>/library_webgpu.js
-#   out/<variant>/lib_mobilegl_webgpu.js
+# The MobileGL-era files (library_webgpu*.js at the top of statics/, lib_mobilegl_webgpu.js) are removed: wink ships
+# its own emdawnwebgpu JS, patched for emsdk 3.1.56, and the two must not both be linked.
 #
 # Usage: install-glfw.sh [--variant=mt|st] [--dest=<consumer-repo-root>]
 #   --variant   which out/ variant to copy (default: mt)
@@ -62,16 +59,12 @@ if [ ! -d "$STATICS" ]; then
     exit 1
 fi
 
-# The combined libglfw3.a (both GL backends) + the JS libraries the final app link needs.
-# Keep in sync with build-glfw.sh's outputs and the consumer's IkvmWasm.csproj --js-library list.
 FILES=(
     libglfw3.a
+    libwink.a
+    libwink_webgpu.a
+    libwink_tint.a
     lib_emscripten_glfw3.js
-    library_webgpu_enum_tables.js
-    library_webgpu_generated_struct_info.js
-    library_webgpu_generated_sig_info.js
-    library_webgpu.js
-    lib_mobilegl_webgpu.js
 )
 
 for f in "${FILES[@]}"; do
@@ -81,11 +74,19 @@ for f in "${FILES[@]}"; do
         exit 1
     fi
 done
+if ! ls "$SRC"/wink-js/*.js >/dev/null 2>&1; then
+    echo "ERROR: no wink JS libraries in $SRC/wink-js" >&2
+    exit 1
+fi
 
-echo "Staging glfw artifacts ($VARIANT): $SRC -> $STATICS"
+echo "Staging glfw + wink artifacts ($VARIANT): $SRC -> $STATICS"
 for f in "${FILES[@]}"; do
     cp -v "$SRC/$f" "$STATICS/$f"
 done
+rm -rf "$STATICS/wink-js"
+cp -rv "$SRC/wink-js" "$STATICS/wink-js"
+rm -fv "$STATICS"/library_webgpu_enum_tables.js "$STATICS"/library_webgpu_generated_struct_info.js \
+       "$STATICS"/library_webgpu_generated_sig_info.js "$STATICS"/library_webgpu.js "$STATICS"/lib_mobilegl_webgpu.js
 
 echo
 echo "Done. Because libglfw3.a's exported symbols changed, regenerate statics.c"

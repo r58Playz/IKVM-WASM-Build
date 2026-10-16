@@ -65,15 +65,18 @@ index c539cdc..7e04f64 100644
    // GL Context
    int fClientAPI{GLFW_OPENGL_API}; // GLFW_CLIENT_API
 diff --git a/src/cpp/emscripten/glfw3/Context.cpp b/src/cpp/emscripten/glfw3/Context.cpp
-index afb6ea7..28089cf 100644
+index afb6ea7..014e6e6 100644
 --- a/src/cpp/emscripten/glfw3/Context.cpp
 +++ b/src/cpp/emscripten/glfw3/Context.cpp
-@@ -19,13 +19,25 @@
+@@ -19,13 +19,28 @@
  #include "Context.h"
  #include <emscripten.h>
  #include <emscripten/html5.h>
++#include <algorithm>
 +#include <atomic>
++#include <cmath>
 +#include <cstdint>
++#include <limits>
  
  #include "ErrorHandler.h"
 +#include "EventQueue.h"
@@ -94,22 +97,24 @@ index afb6ea7..28089cf 100644
  extern "C" {
  using ScaleChangeCallback = void (*)(emscripten::glfw3::Context *);
  using WindowResizeCallback = void (*)(emscripten::glfw3::Context *, GLFWwindow *, int, int);
-@@ -52,8 +64,14 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
+@@ -52,8 +67,16 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
  bool emscripten_glfw3_context_is_runtime_platform_apple();
  void emscripten_glfw3_create_custom_cursor(GLFWcursor *iCursor, int iWidth, int iHeight, unsigned char *iPixels);
  void emscripten_glfw3_destroy_custom_cursor(GLFWcursor *iCursor);
 +void emscripten_glfw3_context_jspi_settimeout();
++void emscripten_glfw3_context_jspi_posttask();
++void emscripten_glfw3_context_jspi_sleep(int iMilliseconds);
 +void emscripten_glfw3_context_jspi_raf();
  }
  
-+// GL context present / proc-address are dispatched at runtime through gl_backend_*
-+// (both krypton_* and mobilegl_* symbol sets are linked). See gl_backend.h.
++// GL context present / proc-address go through gl_backend_* (mesa-wink). See gl_backend.h.
 +#include "gl_backend.h"
++#include <cstring>
 +
  namespace emscripten::glfw3 {
  
  static ErrorHandler &kErrorHandler = ErrorHandler::instance();
-@@ -66,12 +84,88 @@ std::unique_ptr<Context> Context::init()
+@@ -66,12 +89,88 @@ std::unique_ptr<Context> Context::init()
    return std::unique_ptr<Context>(new Context{});
  }
  
@@ -199,7 +204,7 @@ index afb6ea7..28089cf 100644
  }
  
  //------------------------------------------------------------------------
-@@ -79,7 +173,8 @@ void ContextScaleChangeCallback(Context *iContext)
+@@ -79,7 +178,8 @@ void ContextScaleChangeCallback(Context *iContext)
  //------------------------------------------------------------------------
  void ContextWindowResizeCallback(Context *iContext, GLFWwindow *iWindow, int iWidth, int iHeight)
  {
@@ -209,7 +214,7 @@ index afb6ea7..28089cf 100644
  }
  
  //------------------------------------------------------------------------
-@@ -93,11 +188,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -93,11 +193,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
                               int iCodepoint,
                               int iModifierBits)
  {
@@ -242,7 +247,7 @@ index afb6ea7..28089cf 100644
  }
  
  //------------------------------------------------------------------------
-@@ -105,7 +216,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -105,7 +221,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
  //------------------------------------------------------------------------
  void ContextClipboardStringCallback(Context *iContext, char const *iText, char const *iError)
  {
@@ -260,7 +265,7 @@ index afb6ea7..28089cf 100644
  }
  
  //------------------------------------------------------------------------
-@@ -130,6 +250,10 @@ Context::Context()
+@@ -130,6 +255,10 @@ Context::Context()
                                  ContextClipboardStringCallback,
                                  emscripten_glfw_request_fullscreen,
                                  ContextErrorHandler);
@@ -271,7 +276,7 @@ index afb6ea7..28089cf 100644
    addOrRemoveEventListeners(true);
  }
  
-@@ -1043,7 +1167,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
+@@ -1043,7 +1172,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
  }
  
  //------------------------------------------------------------------------
@@ -280,7 +285,7 @@ index afb6ea7..28089cf 100644
  //------------------------------------------------------------------------
  GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
  {
-@@ -1054,6 +1178,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
+@@ -1054,6 +1183,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
      return nullptr;
  }
  
@@ -339,12 +344,40 @@ index afb6ea7..28089cf 100644
  //------------------------------------------------------------------------
  // Context::createStandardCursor
  //------------------------------------------------------------------------
-@@ -1178,6 +1354,13 @@ uint64_t Context::getTimerValue()
+@@ -1178,6 +1359,41 @@ uint64_t Context::getTimerValue()
  //------------------------------------------------------------------------
  void Context::pollEvents()
  {
 +  emscripten_glfw3_context_jspi_settimeout();
++  processEvents();
++}
 +
++//------------------------------------------------------------------------
++// Context::waitEvents
++//------------------------------------------------------------------------
++void Context::waitEvents(double iTimeout)
++{
++  if(iTimeout != iTimeout || iTimeout < 0 || iTimeout > std::numeric_limits<double>::max())
++  {
++    kErrorHandler.logError(GLFW_INVALID_VALUE, "Invalid time [%f]", iTimeout);
++    return;
++  }
++
++  // Sleep instead of spinning (Minecraft's frame limiter loops glfwWaitEventsTimeout until its deadline).
++  // setTimeout only takes whole ms, so sleep the floor and don't sleep at all below 1ms: callers re-check
++  // their clock, so they spin for under 1ms instead of overshooting. There is no early wake on input;
++  // events that arrive meanwhile are drained after the sleep.
++  double ms = std::min(std::floor(iTimeout * 1000.0), static_cast<double>(std::numeric_limits<int32_t>::max()));
++  if(ms >= 1)
++    emscripten_glfw3_context_jspi_sleep(static_cast<int>(ms));
++  processEvents();
++}
++
++//------------------------------------------------------------------------
++// Context::processEvents
++//------------------------------------------------------------------------
++void Context::processEvents()
++{
 +  // Drain DOM events that the main browser thread enqueued onto our SAB ring
 +  // since the last poll. Each record's invoker runs the original C++ lambda
 +  // (registered via EventListener<E>::listener) here on the worker.
@@ -353,7 +386,7 @@ index afb6ea7..28089cf 100644
    computeWindowPos();
  
  #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
-@@ -1199,16 +1382,36 @@ void Context::pollEvents()
+@@ -1199,16 +1415,36 @@ void Context::pollEvents()
  //------------------------------------------------------------------------
  // Context::swapInterval
  //------------------------------------------------------------------------
@@ -373,19 +406,19 @@ index afb6ea7..28089cf 100644
 +void Context::swapBuffers() const
 +{
 +	sFrameCount.fetch_add(1, std::memory_order_relaxed);
-+	if(gl_backend_current() == GL_BACKEND_MOBILEGL)
-+	{
-+		// MobileGL: present the WebGPU surface (eglSwapBuffers -> DirectWebGPU::Present).
-+		mobilegl_present();
++	// mesa-wink: submit the frame's batched WebGPU work and copy the back buffer onto the canvas texture. The frame
++	// reaches the screen when this thread next returns to its event loop -- the JSPI yield below.
++	// WINK_GL_MAIN: the frame is queued to the main thread, which shows and paces it; wink_swap_buffers itself waits
++	// when two frames are in flight, so this thread has nothing to yield for.
++	if (gl_backend_on_main()) {
++		gl_backend_present_interval(fInterval);
++		gl_backend_present();
++		return;
 +	}
-+	else
-+	{
-+		// NG-GL4ES (WebGL): flush and let emscripten's GL start a new frame.
-+		glFlush();
-+		EM_ASM({ try { GL.newRenderingFrameStarted(); } catch {} });
-+	}
++	gl_backend_present();
++	// Interval 0 must not scheduler.yield(): see emscripten_glfw3_context_jspi_posttask.
 +	if (fInterval == 0)
-+		emscripten_glfw3_context_jspi_settimeout();
++		emscripten_glfw3_context_jspi_posttask();
 +	else
 +	{
 +		for (int i = 0; i < fInterval; ++i) {
@@ -395,7 +428,35 @@ index afb6ea7..28089cf 100644
  }
  
  
-@@ -1256,4 +1459,4 @@ bool Context::isRuntimePlatformApple() const
+@@ -1217,10 +1453,24 @@ void Context::swapInterval(int iInterval) const
+ //------------------------------------------------------------------------
+ glfw_bool_t Context::isExtensionSupported(char const *extension)
+ {
+-  if(extension)
+-    return toGlfwBool(emscripten_glfw3_context_is_extension_supported(extension));
+-  else
++  // mesa-wink: the current GL context's own extension list (glGetStringi), not a WebGL context's -- there is none.
++  typedef void (*get_integerv_t)(unsigned, int *);
++  typedef const unsigned char *(*get_stringi_t)(unsigned, unsigned);
++  if(!extension)
++    return GLFW_FALSE;
++  auto getIntegerv = reinterpret_cast<get_integerv_t>(gl_backend_get_proc_address("glGetIntegerv"));
++  auto getStringi = reinterpret_cast<get_stringi_t>(gl_backend_get_proc_address("glGetStringi"));
++  if(!getIntegerv || !getStringi)
+     return GLFW_FALSE;
++  int n = 0;
++  getIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &n);
++  for(int i = 0; i < n; i++)
++  {
++    auto e = reinterpret_cast<const char *>(getStringi(0x1F03 /* GL_EXTENSIONS */, static_cast<unsigned>(i)));
++    if(e && (std::strcmp(e, extension) == 0 || (std::strncmp(e, "GL_", 3) == 0 && std::strcmp(e + 3, extension) == 0)))
++      return GLFW_TRUE;
++  }
++  return GLFW_FALSE;
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -1256,4 +1506,4 @@ bool Context::isRuntimePlatformApple() const
    return emscripten_glfw3_context_is_runtime_platform_apple();
  }
  
@@ -403,7 +464,7 @@ index afb6ea7..28089cf 100644
 \ No newline at end of file
 +}
 diff --git a/src/cpp/emscripten/glfw3/Context.h b/src/cpp/emscripten/glfw3/Context.h
-index f7ecca2..b71a3ce 100644
+index f7ecca2..76402db 100644
 --- a/src/cpp/emscripten/glfw3/Context.h
 +++ b/src/cpp/emscripten/glfw3/Context.h
 @@ -76,6 +76,10 @@ public:
@@ -417,25 +478,27 @@ index f7ecca2..b71a3ce 100644
    // cursor
    GLFWcursor *createStandardCursor(int iShape);
    GLFWcursor* createCursor(GLFWimage const *iImage, int iXHot, int iYHot);
-@@ -92,7 +96,8 @@ public:
+@@ -92,7 +96,9 @@ public:
  
    // events
    void pollEvents();
 -  void swapInterval(int iInterval) const;
++  void waitEvents(double iTimeout);
 +  void swapInterval(int iInterval);
 +  void swapBuffers() const;
  
    // opengl
    glfw_bool_t isExtensionSupported(const char* extension);
-@@ -138,6 +143,7 @@ private:
+@@ -138,6 +144,8 @@ private:
    bool onPointerUnlock();
    std::shared_ptr<Window> findFocusedOrSingleWindow() const;
    void computeWindowPos();
++  void processEvents();
 +  void initializeVideoModes();
  
    // touch
    constexpr bool isTrackingTouch() const { return fTouchPointId.has_value(); }
-@@ -153,6 +159,7 @@ private:
+@@ -153,6 +161,7 @@ private:
  #endif
  
  private:
@@ -443,7 +506,7 @@ index f7ecca2..b71a3ce 100644
  #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
    std::vector<std::shared_ptr<Window>> fWindows{};
  #else
-@@ -206,4 +213,4 @@ private:
+@@ -206,4 +215,4 @@ private:
  
  }
  
@@ -745,10 +808,10 @@ index 20b2e04..20fd438 100644
  
    Vec2<double> fCursorPos{};
 diff --git a/src/cpp/emscripten/glfw3/Window.cpp b/src/cpp/emscripten/glfw3/Window.cpp
-index cfa866b..590dced 100644
+index cfa866b..ce640dd 100644
 --- a/src/cpp/emscripten/glfw3/Window.cpp
 +++ b/src/cpp/emscripten/glfw3/Window.cpp
-@@ -39,8 +39,15 @@ void emscripten_glfw3_window_set_visibility(GLFWwindow *iWindow, bool iVisible);
+@@ -39,8 +39,13 @@ void emscripten_glfw3_window_set_visibility(GLFWwindow *iWindow, bool iVisible);
  int emscripten_glfw3_context_make_canvas_resizable(GLFWwindow *window, char const *canvasResizeSelector, char const *handleSelector);
  int emscripten_glfw3_context_unmake_canvas_resizable(GLFWwindow *window);
  double emscripten_glfw3_context_get_now();
@@ -756,15 +819,13 @@ index cfa866b..590dced 100644
 +void emscripten_glfw3_window_resize_offscreen_local(int width, int height);
  }
  
-+// GL backend WebGL context hooks are dispatched at runtime through gl_backend_*
-+// (both krypton_* and mobilegl_* symbol sets are linked; the backend is chosen
-+// before context creation). See gl_backend.h.
++// GL context hooks go through gl_backend_* (mesa-wink). See gl_backend.h.
 +#include "gl_backend.h"
 +
  namespace emscripten::glfw3 {
  
  static ErrorHandler &kErrorHandler = ErrorHandler::instance();
-@@ -134,7 +141,7 @@ void Window::destroy()
+@@ -134,7 +139,7 @@ void Window::destroy()
    {
      addOrRemoveEventListeners(false);
      if(hasGLContext())
@@ -773,7 +834,7 @@ index cfa866b..590dced 100644
      emscripten_glfw3_window_destroy(asOpaquePtr());
      fDestroyed = true;
    }
-@@ -320,6 +327,18 @@ void Window::setCanvasSize(Vec2<int> const &iSize)
+@@ -320,6 +325,18 @@ void Window::setCanvasSize(Vec2<int> const &iSize)
  
    fFramebufferSize = fbSize;
  
@@ -792,7 +853,7 @@ index cfa866b..590dced 100644
    emscripten_glfw3_window_set_size(asOpaquePtr(), fSize.width, fSize.height, fFramebufferSize.width, fFramebufferSize.height);
  
    if(sizeChanged)
-@@ -361,13 +380,21 @@ void Window::onGlobalMouseMove(EmscriptenMouseEvent const *iEvent)
+@@ -361,13 +378,21 @@ void Window::onGlobalMouseMove(EmscriptenMouseEvent const *iEvent)
  {
    if(isPointerLock())
    {
@@ -819,7 +880,7 @@ index cfa866b..590dced 100644
    }
    else
    {
-@@ -488,7 +515,7 @@ bool Window::createGLContext()
+@@ -488,7 +513,7 @@ bool Window::createGLContext()
      attributes.stencil = fConfig.fStencilBits > 0;
      attributes.alpha = fConfig.fAlphaBits > 0;
  
@@ -828,7 +889,7 @@ index cfa866b..590dced 100644
      if(fWebGLContextHandle == 0)
      {
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot create GL context for [%s]", getCanvasSelector());
-@@ -506,7 +533,7 @@ void Window::makeGLContextCurrent() const
+@@ -506,7 +531,7 @@ void Window::makeGLContextCurrent() const
  {
    if(hasGLContext())
    {
@@ -837,7 +898,7 @@ index cfa866b..590dced 100644
        kErrorHandler.logError(GLFW_PLATFORM_ERROR, "Cannot make GL context current for [%s]", getCanvasSelector());
    }
  }
-@@ -642,6 +669,11 @@ void Window::setInputMode(int iMode, int iValue)
+@@ -642,6 +667,11 @@ void Window::setInputMode(int iMode, int iValue)
  //------------------------------------------------------------------------
  void Window::setCursorMode(glfw_cursor_mode_t iCursorMode)
  {
@@ -849,7 +910,7 @@ index cfa866b..590dced 100644
    if(fMouse.fCursorMode == iCursorMode)
      return;
  
-@@ -683,7 +715,14 @@ void Window::onPointerLock()
+@@ -683,7 +713,14 @@ void Window::onPointerLock()
    fMouse.fCursorLockResidual = {};
    fMouse.fCursorPosBeforePointerLock = fMouse.fCursorPos;
    fMouse.fCursorMode = GLFW_CURSOR_DISABLED;
@@ -864,7 +925,7 @@ index cfa866b..590dced 100644
  }
  
  //------------------------------------------------------------------------
-@@ -695,9 +734,15 @@ bool Window::onPointerUnlock(std::optional<glfw_cursor_mode_t> iCursorMode)
+@@ -695,9 +732,15 @@ bool Window::onPointerUnlock(std::optional<glfw_cursor_mode_t> iCursorMode)
    {
      auto cursorMode = iCursorMode ? *iCursorMode : GLFW_CURSOR_NORMAL;
      fMouse.fCursorMode = cursorMode;
@@ -880,7 +941,7 @@ index cfa866b..590dced 100644
      return true;
    }
    return false;
-@@ -754,6 +799,12 @@ bool Window::onMouseButtonDown(int iGLFWButton)
+@@ -754,6 +797,12 @@ bool Window::onMouseButtonDown(int iGLFWButton)
      if(fFocusOnMouse && !isFocused())
        focus();
  
@@ -893,7 +954,7 @@ index cfa866b..590dced 100644
      if(fMouse.fButtonCallback)
        fMouse.fButtonCallback(asOpaquePtr(), fMouse.fLastButton, fMouse.fLastButtonState, fKeyboard.computeModifierBits());
    }
-@@ -988,4 +1039,4 @@ int Window::unmakeCanvasResizable()
+@@ -988,4 +1037,4 @@ int Window::unmakeCanvasResizable()
  }
  
  
@@ -914,66 +975,51 @@ index 57505dd..685f683 100644
    inline void getCursorPos(double *oXPos, double *oYPos) const {
 diff --git a/src/cpp/emscripten/glfw3/gl_backend.h b/src/cpp/emscripten/glfw3/gl_backend.h
 new file mode 100644
-index 0000000..794c7b7
+index 0000000..2dd43d2
 --- /dev/null
 +++ b/src/cpp/emscripten/glfw3/gl_backend.h
-@@ -0,0 +1,62 @@
-+// gl_backend.h - runtime-selectable GL translation backend for the ikvm build.
+@@ -0,0 +1,47 @@
++// gl_backend.h - the ikvm build's GL seam: mesa-wink, Mesa's own OpenGL on WebGPU.
 +//
-+// Historically emscripten-glfw picked its GL backend at COMPILE time via
-+// -DGL_BACKEND_KRYPTON (krypton_* for NG-GL4ES/WebGL, mobilegl_* for MobileGL/WebGPU).
-+// The ikvm build now links BOTH backends into one libglfw3.a and chooses between them
-+// at RUNTIME, before the first GL context is created. The consumer selects a backend
-+// with gl_backend_select() (see ikvm_gl_init) based on its own heuristic
-+// (e.g. Minecraft version + user toggle).
++// Every GL call runs in wasm (st/mesa -> the gex_wgpu Gallium driver) and reaches the browser only as batched WebGPU
++// work, where the earlier backends paid a WebGL call -- validation, typed-array views, V8<->Blink binding -- per GL call.
++// NG-GL4ES/Krypton (WebGL) and MobileGL (WebGPU) are gone; wink_emscripten_compat.h is the seam mesa-wink ships for
++// exactly this file. Build mesa-wink with `wink/build.sh --variant=mt`; build-glfw.sh passes its include directory.
 +//
-+// There is deliberately NO default backend: any GL context operation attempted while
-+// the backend is still GL_BACKEND_UNSET aborts, so a missing selection fails loudly
-+// instead of silently rendering through the wrong backend.
++// Contexts get the highest COMPATIBILITY-profile version the device allows (wink_set_next_context's default): Minecraft
++// asks GLFW for 2.0 with any profile and uses fixed-function GL.
 +#ifndef EMSCRIPTEN_GLFW3_GL_BACKEND_H
 +#define EMSCRIPTEN_GLFW3_GL_BACKEND_H
 +
++#include <stdint.h>
 +#include <emscripten/html5.h>
 +#include <emscripten/html5_webgl.h>
-+
-+enum {
-+  GL_BACKEND_UNSET    = -1,
-+  GL_BACKEND_NG_GL4ES = 0,  // Krypton Wrapper / NG-GL4ES              -> WebGL
-+  GL_BACKEND_MOBILEGL = 1,  // MobileGL (GL 3.3 core -> WebGPU) + SFPEW
-+};
++#include "wink_emscripten_compat.h"
 +
 +#ifdef __cplusplus
 +extern "C" {
 +#endif
 +
-+// --- Backend entry points (both symbol sets are linked into libglfw3.a) -----
-+// NG-GL4ES / Krypton Wrapper:
-+EMSCRIPTEN_WEBGL_CONTEXT_HANDLE krypton_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
-+EMSCRIPTEN_RESULT               krypton_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+EMSCRIPTEN_RESULT               krypton_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+void*                           krypton_get_proc_address(const char *name);
-+void                            krypton_proc_init(void);
-+// MobileGL (GL 3.3 core -> WebGPU) + SimpleFPEWrapper:
-+EMSCRIPTEN_WEBGL_CONTEXT_HANDLE mobilegl_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
-+EMSCRIPTEN_RESULT               mobilegl_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+EMSCRIPTEN_RESULT               mobilegl_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
-+void*                           mobilegl_get_proc_address(const char *name);
-+void                            mobilegl_present(void);
-+void                            mobilegl_resize(int width, int height);
-+void                            mobilegl_proc_init(void);
-+
-+// --- Runtime selector -------------------------------------------------------
-+// Choose a backend BEFORE the first glfwCreateWindow()/makeGLContextCurrent().
-+void gl_backend_select(int backend);   // GL_BACKEND_NG_GL4ES | GL_BACKEND_MOBILEGL
-+int  gl_backend_current(void);
-+void gl_backend_proc_init(void);       // initialize the currently-selected backend
-+
-+// --- Unified dispatchers (the patched emscripten-glfw seam calls these) -----
++// --- The seam the patched emscripten-glfw calls (glfw3.cpp implements these on wink_*) ---------------------------
 +EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl_backend_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes);
 +EMSCRIPTEN_RESULT               gl_backend_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
 +EMSCRIPTEN_RESULT               gl_backend_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context);
 +void*                           gl_backend_get_proc_address(const char *name);
 +void                            gl_backend_resize(int width, int height);
++// Present the current context's surface; every 5 s at most, persist new shader translations (the WGSL cache below).
++void                            gl_backend_present(void);
++// WINK_GL_MAIN: GL runs on the main thread, which presents and paces the swap, so swapBuffers must not yield for it.
++int                             gl_backend_on_main(void);
++// The swap interval wink's main-thread pacing uses (GLFW's: 0 unpaced, N frames).
++void                            gl_backend_present_interval(int interval);
++
++// --- mesa-wink's SPIR-V -> WGSL translation cache (gex_wgpu_tint.cpp; EMSCRIPTEN_KEEPALIVE, not in wink.h) -----------
++// Tint is most of a shader compile (341 of 351 ms in one measured module), so a warm cache is the difference between a
++// stalled first world frame and none. A blob is tied to the build that wrote it and is rejected whole by any other.
++// The cache has its own mutex, so these may be called from any thread.
++int      gex_wgsl_cache_load(const uint8_t *blob, uint32_t len);
++uint8_t *gex_wgsl_cache_dump(int only_fresh, uint32_t *len_out);
++void     gex_wgsl_cache_stats(uint32_t *out);   // hits, misses, entries loaded from blobs, entries now held
 +
 +#ifdef __cplusplus
 +}
@@ -981,10 +1027,10 @@ index 0000000..794c7b7
 +
 +#endif // EMSCRIPTEN_GLFW3_GL_BACKEND_H
 diff --git a/src/cpp/glfw3.cpp b/src/cpp/glfw3.cpp
-index 8475a25..7605ffd 100644
+index 8475a25..a88f142 100644
 --- a/src/cpp/glfw3.cpp
 +++ b/src/cpp/glfw3.cpp
-@@ -19,7 +19,13 @@
+@@ -19,7 +19,14 @@
  #include "../../include/GLFW/emscripten_glfw3.h"
  #include "../../include/GLFW/emscripten_glfw3_version.h"
  #include "emscripten/glfw3/Context.h"
@@ -993,85 +1039,153 @@ index 8475a25..7605ffd 100644
 +#include <emscripten/console.h>
 +#include <emscripten/html5_webgl.h>
 +#include <cstdlib>
++#include <cstring>
  #include <memory>
 +#include <stdint.h>
  #include "emscripten/glfw3/ErrorHandler.h"
  #include "emscripten/glfw3/Keyboard.h"
  
-@@ -117,6 +123,80 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
+@@ -117,6 +124,147 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
  extern "C" {
  #endif
  
-+// Runtime GL-backend dispatch. Both krypton_* (NG-GL4ES/WebGL) and mobilegl_*
-+// (MobileGL/WebGPU) are linked; gl_backend_select() (via ikvm_gl_init) picks one
-+// before the first GL context is created. No default: an op attempted while unset
-+// aborts so a missing selection fails loudly. Declarations live in gl_backend.h.
-+static int g_gl_backend = GL_BACKEND_UNSET;
++// The GL seam on mesa-wink (gl_backend.h). wink_emscripten_compat implements the WebGL-context-shaped calls on
++// wink_init/wink_surface_create/wink_context_create; this file adds the proc-address entry points LWJGL resolves and
++// mesa-wink's shader-translation cache, persisted across sessions in OPFS.
 +
-+static void gl_backend_require_selected()
++// lib_emscripten_glfw3.js, both JSPI-suspending: every stored cache chunk as [u32 len][bytes]... in one malloc'd block
++// (NULL when there is none), and a write of this session's chunk (replace=1 drops every stored chunk first).
++void *emscripten_glfw3_wink_cache_read(uint32_t *len);
++void emscripten_glfw3_wink_cache_write(const void *blob, uint32_t len, int replace);
++
++static uint32_t g_wgsl_misses_saved = 0;
++static double g_wgsl_last_save = 0;
++
++// Once, after the first context exists: every stored chunk into the cache. A chunk another build wrote is rejected
++// whole (gex_wgsl_cache_load returns -1); then every stored chunk is replaced by this process's full cache, so stale
++// blobs are not re-read on every boot.
++static void gl_backend_wgsl_cache_load()
 +{
-+  if(g_gl_backend != GL_BACKEND_NG_GL4ES && g_gl_backend != GL_BACKEND_MOBILEGL)
++  static bool done = false;
++  uint32_t len = 0, st[4];
++  int loaded = 0, chunks = 0, rejected = 0;
++  if(done)
++    return;
++  done = true;
++  uint8_t *all = (uint8_t *) emscripten_glfw3_wink_cache_read(&len);
++  for(uint32_t off = 0; all && off + 4 <= len;)
 +  {
-+    emscripten_console_error("[gl_backend] no GL backend selected before a GL context "
-+                             "operation (call ikvm_gl_init / gl_backend_select first)");
-+    abort();
++    uint32_t n;
++    memcpy(&n, all + off, 4);
++    off += 4;
++    if(n > len - off)
++      break;
++    int r = gex_wgsl_cache_load(all + off, n);
++    chunks++;
++    if(r < 0)
++      rejected++;
++    else
++      loaded += r;
++    off += n;
 +  }
++  free(all);
++  if(rejected)
++  {
++    uint8_t *full = gex_wgsl_cache_dump(0, &len);
++    emscripten_glfw3_wink_cache_write(full, full ? len : 0, 1);
++    free(full);
++  }
++  gex_wgsl_cache_stats(st);
++  g_wgsl_misses_saved = st[1];
++  g_wgsl_last_save = emscripten_get_now();
++  emscripten_console_logf("[wink] wgsl cache: %d chunks, %d entries loaded, %d chunks rejected (another build)",
++                          chunks, loaded, rejected);
 +}
 +
-+void gl_backend_select(int backend) { g_gl_backend = backend; }
-+int  gl_backend_current(void)       { return g_gl_backend; }
-+
-+void gl_backend_proc_init(void)
++// This session's new translations, rewritten as one chunk; skipped when nothing has missed since the last save.
++static void gl_backend_wgsl_cache_save()
 +{
-+  gl_backend_require_selected();
-+  if(g_gl_backend == GL_BACKEND_NG_GL4ES) krypton_proc_init();
-+  else                                    mobilegl_proc_init();
++  uint32_t st[4], len = 0;
++  gex_wgsl_cache_stats(st);
++  if(st[1] == g_wgsl_misses_saved)
++    return;
++  g_wgsl_misses_saved = st[1];
++  uint8_t *blob = gex_wgsl_cache_dump(1, &len);
++  if(blob && len)
++    emscripten_glfw3_wink_cache_write(blob, len, 0);
++  free(blob);
++}
++
++// WINK_GL_MAIN=1: wink runs GL on the browser's main thread (WINK_INIT_GL_ON_MAIN_THREAD) -- this thread only records
++// GL calls (Mesa's glthread) and the driver, the device and the canvas live on main, so the canvas must NOT have been
++// transferred to this worker. The page decides both from one switch (ikvmcraft's index.ts sets the environment variable
++// and window.WINK_GL_MAIN, which the canvas-transfer patch tests); this side only reads the variable.
++int gl_backend_on_main(void)
++{
++  static int on = -1;
++  if(on < 0)
++  {
++    const char *v = getenv("WINK_GL_MAIN");
++    on = v && *v == '1';
++  }
++  return on;
 +}
 +
 +EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl_backend_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes)
 +{
-+  gl_backend_require_selected();
-+  return g_gl_backend == GL_BACKEND_NG_GL4ES
-+           ? krypton_webgl_create_context(target, attributes)
-+           : mobilegl_webgl_create_context(target, attributes);
++  // wink_init (inside) requests the WebGPU device -- here, suspending through JSPI (the caller's stack must be
++  // promising-entered), or on the main thread, waited for, with WINK_GL_MAIN.
++  // The default framebuffer keeps the alpha channel GLFW's hints ask for, and the canvas composites OPAQUE (wink's seam
++  // default, wink_set_next_surface_transparent): a window ignores its framebuffer's alpha, and Minecraft clears to 0.
++  wink_set_next_init_flags(gl_backend_on_main() ? WINK_INIT_GL_ON_MAIN_THREAD : 0);
++  EMSCRIPTEN_WEBGL_CONTEXT_HANDLE h = wink_webgl_create_context(target, attributes);
++  emscripten_console_logf("[wink] GL on %s", gl_backend_on_main() ? "the main thread (glthread)" : "this worker");
++  if(h)
++    gl_backend_wgsl_cache_load();
++  return h;
 +}
 +
 +EMSCRIPTEN_RESULT gl_backend_webgl_make_context_current(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context)
 +{
-+  gl_backend_require_selected();
-+  return g_gl_backend == GL_BACKEND_NG_GL4ES
-+           ? krypton_webgl_make_context_current(context)
-+           : mobilegl_webgl_make_context_current(context);
++  return wink_webgl_make_context_current(context);
 +}
 +
 +EMSCRIPTEN_RESULT gl_backend_webgl_destroy_context(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context)
 +{
-+  gl_backend_require_selected();
-+  return g_gl_backend == GL_BACKEND_NG_GL4ES
-+           ? krypton_webgl_destroy_context(context)
-+           : mobilegl_webgl_destroy_context(context);
++  return wink_webgl_destroy_context(context);
 +}
 +
 +void* gl_backend_get_proc_address(const char *name)
 +{
-+  gl_backend_require_selected();
-+  return g_gl_backend == GL_BACKEND_NG_GL4ES
-+           ? krypton_get_proc_address(name)
-+           : mobilegl_get_proc_address(name);
++  return wink_get_proc_address(name);
 +}
 +
 +void gl_backend_resize(int width, int height)
 +{
-+  // Only MobileGL's WebGPU surface needs an explicit reconfigure; NG-GL4ES's
-+  // WebGL drawing buffer auto-resizes with the canvas.
-+  if(g_gl_backend == GL_BACKEND_MOBILEGL)
-+    mobilegl_resize(width, height);
++  wink_resize(width, height);
 +}
 +
-+// Canonical GL/EGL proc-address entry points that LWJGL resolves out of libGL.so.1
-+// (org.lwjgl.opengl.GL.create() takes glXGetProcAddress on the Linux path, with an
-+// eglGetProcAddress fallback). Owned by the dispatcher — NOT by a specific backend —
-+// so the pointers handed to LWJGL always match the currently-selected backend.
++void gl_backend_present_interval(int interval)
++{
++  // On main, wink paces the swap itself; 0 (Minecraft's vsync off) is one turn of main's event loop.
++  wink_set_swap_interval(interval == 0 ? WINK_SWAP_UNPACED : interval);
++}
++
++void gl_backend_present(void)
++{
++  wink_present();
++  // Every 5 s at most, so a boot that translates hundreds of shaders rewrites its chunk a few times, not per frame.
++  double now = emscripten_get_now();
++  if(now - g_wgsl_last_save >= 5000.0)
++  {
++    g_wgsl_last_save = now;
++    gl_backend_wgsl_cache_save();
++  }
++}
++
++// Canonical GL/EGL proc-address entry points that LWJGL resolves out of libGL.so.1 (org.lwjgl.opengl.GL.create()
++// takes glXGetProcAddress on the Linux path, with an eglGetProcAddress fallback). mesa-wink exports no gl* symbol,
++// so these are the only way in.
 +void* glXGetProcAddress(const char *name)    { return gl_backend_get_proc_address(name); }
 +void* glXGetProcAddressARB(const char *name) { return gl_backend_get_proc_address(name); }
 +void* eglGetProcAddress(const char *name)    { return gl_backend_get_proc_address(name); }
@@ -1079,7 +1193,25 @@ index 8475a25..7605ffd 100644
  //------------------------------------------------------------------------
  // glfwInit
  //------------------------------------------------------------------------
-@@ -1310,21 +1390,80 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
+@@ -1031,8 +1179,15 @@ GLFWAPI void glfwSwapInterval(int interval)
+ //! glfwWaitEvents no access to even loop in emscripten/javascript
+ GLFWAPI void glfwWaitEvents(void) { logNotImplemented("glfwWaitEvents"); }
+ 
+-//! glfwWaitEventsTimeout no access to even loop in emscripten/javascript
+-GLFWAPI void glfwWaitEventsTimeout(double timeout) { logNotImplemented("glfwWaitEventsTimeout"); }
++//------------------------------------------------------------------------
++// glfwWaitEventsTimeout
++//------------------------------------------------------------------------
++GLFWAPI void glfwWaitEventsTimeout(double timeout)
++{
++  auto context = getContext();
++  if(context)
++    context->waitEvents(timeout);
++}
+ 
+ //! glfwPostEmptyEvent no access to even loop in emscripten/javascript
+ GLFWAPI void glfwPostEmptyEvent(void) { logNotImplemented("glfwPostEmptyEvent"); }
+@@ -1310,21 +1465,80 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
  //------------------------------------------------------------------------
  GLFWAPI const GLFWvidmode* glfwGetVideoModes(GLFWmonitor* monitor, int* count)
  {
@@ -1165,7 +1297,7 @@ index 8475a25..7605ffd 100644
  GLFWAPI void glfwIconifyWindow(GLFWwindow* window) { logNotImplemented("glfwIconifyWindow"); }
  GLFWAPI void glfwRestoreWindow(GLFWwindow* window) { logNotImplemented("glfwRestoreWindow"); }
  GLFWAPI void glfwMaximizeWindow(GLFWwindow* window) { logNotImplemented("glfwMaximizeWindow"); }
-@@ -1336,7 +1475,19 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
+@@ -1336,7 +1550,19 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
  GLFWAPI GLFWwindowiconifyfun glfwSetWindowIconifyCallback(GLFWwindow* window, GLFWwindowiconifyfun callback) { logNotImplemented("glfwSetWindowIconifyCallback"); return callback; }
  GLFWAPI GLFWwindowmaximizefun glfwSetWindowMaximizeCallback(GLFWwindow* window, GLFWwindowmaximizefun callback) { logNotImplemented("glfwSetWindowMaximizeCallback"); return callback; }
  GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* window, GLFWdropfun callback) { logNotImplemented("glfwSetDropCallback"); return callback; }
@@ -1186,7 +1318,7 @@ index 8475a25..7605ffd 100644
  // GLFWAPI GLFWglproc glfwGetProcAddress(const char* procname) { logNotImplemented("glfwGetProcAddress"); } implemented by emscripten GL
  GLFWAPI int glfwVulkanSupported(void) { return GLFW_FALSE; }
  GLFWAPI const char** glfwGetRequiredInstanceExtensions(uint32_t* count) { logNotImplemented("glfwGetRequiredInstanceExtensions"); *count = 0; return nullptr; }
-@@ -1509,4 +1660,34 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
+@@ -1509,4 +1735,34 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
    };
  }
  
@@ -1224,10 +1356,10 @@ index 8475a25..7605ffd 100644
 +
 +}
 diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
-index 0cfd23c..37b41ec 100644
+index 0cfd23c..11cdb06 100644
 --- a/src/js/lib_emscripten_glfw3.js
 +++ b/src/js/lib_emscripten_glfw3.js
-@@ -814,6 +814,83 @@ let emscripten_glfw3_impl = {
+@@ -814,6 +814,163 @@ let emscripten_glfw3_impl = {
      return navigator.platform.indexOf("Mac") === 0 || navigator.platform === "iPhone";
    },
  
@@ -1295,6 +1427,28 @@ index 0cfd23c..37b41ec 100644
 +  },
 +  emscripten_glfw3_context_jspi_settimeout__postset: '_emscripten_glfw3_context_jspi_settimeout = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_settimeout);',
 +
++  emscripten_glfw3_context_jspi_posttask: function() {
++    // vsync-off swap: yield at NORMAL priority. A scheduler.yield() continuation always runs ahead of the
++    // worker's normal tasks (Chromium's selector has no cross-priority anti-starvation), and outside rAF an
++    // OffscreenCanvas frame is only pushed from the OnBeginFrame IPC, a normal task. A loop that only ever
++    // scheduler.yield()s therefore never presents. A user-visible postTask queues behind pending normal
++    // tasks (oldest first at equal priority), so each swap lets BeginFrame/frame-ack run. Timers share that
++    // priority, so a setTimeout safety net couldn't fire where this doesn't; it's only the fallback.
++    return new Promise(function(r) {
++      try {
++        if (typeof scheduler !== 'undefined' && scheduler.postTask) { scheduler.postTask(r, { priority: 'user-visible' }); return; }
++      } catch (e) {}
++      setTimeout(r, 0);
++    });
++  },
++  emscripten_glfw3_context_jspi_posttask__postset: '_emscripten_glfw3_context_jspi_posttask = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_posttask);',
++
++  emscripten_glfw3_context_jspi_sleep: function(ms) {
++    // glfwWaitEventsTimeout: suspend for `ms` instead of spinning; the worker's normal tasks run meanwhile.
++    return new Promise(function(r) { setTimeout(r, ms); });
++  },
++  emscripten_glfw3_context_jspi_sleep__postset: '_emscripten_glfw3_context_jspi_sleep = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_sleep);',
++
 +  emscripten_glfw3_context_jspi_raf: function() {
 +    // vsync swap: resume on the next animation frame. requestAnimationFrame NEVER fires in a hidden/
 +    // occluded/throttled tab (and isn't a worker global everywhere), which would park the JSPI-suspended
@@ -1308,6 +1462,64 @@ index 0cfd23c..37b41ec 100644
 +    });
 +  },
 +  emscripten_glfw3_context_jspi_raf__postset: '_emscripten_glfw3_context_jspi_raf = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_raf);',
++
++  // mesa-wink's SPIR-V -> WGSL translation cache, persisted per origin in OPFS directory `wink-wgsl-cache`, one file
++  // per session (gl_backend_wgsl_cache_load/_save in glfw3.cpp). Both run on the GL thread, which may suspend here.
++  //! emscripten_glfw3_wink_cache_read: every stored chunk as [u32 len][bytes]... in one malloc'd block, *lenPtr = its
++  //! length; 0 when there is none or OPFS is unavailable.
++  emscripten_glfw3_wink_cache_read__deps: ['malloc'],
++  emscripten_glfw3_wink_cache_read: function(lenPtr) {
++    return (async () => {
++      try {
++        if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) return 0;
++        const root = await navigator.storage.getDirectory();
++        const dir = await root.getDirectoryHandle('wink-wgsl-cache', { create: true });
++        const parts = [];
++        for await (const [, h] of dir.entries()) {
++          if (h.kind === 'file') parts.push(new Uint8Array(await (await h.getFile()).arrayBuffer()));
++        }
++        let total = 0;
++        for (const p of parts) total += 4 + p.length;
++        if (!total) { HEAPU32[lenPtr >> 2] = 0; return 0; }
++        const ptr = _malloc(total);
++        if (!ptr) return 0;
++        let off = ptr;
++        for (const p of parts) {
++          HEAPU32[off >> 2] = p.length;
++          HEAPU8.set(p, off + 4);
++          off += 4 + p.length;
++        }
++        HEAPU32[lenPtr >> 2] = total;
++        return ptr;
++      } catch (e) {
++        console.log('[wink] wgsl cache read failed: ' + e);
++        return 0;
++      }
++    })();
++  },
++  emscripten_glfw3_wink_cache_read__postset: '_emscripten_glfw3_wink_cache_read = new WebAssembly.Suspending(_emscripten_glfw3_wink_cache_read);',
++
++  //! emscripten_glfw3_wink_cache_write: (re)write this session's chunk; replace != 0 drops every stored chunk first.
++  emscripten_glfw3_wink_cache_write: function(ptr, len, replace) {
++    // copy out of the heap before the first await: the caller frees the blob once this resolves
++    const bytes = ptr && len ? HEAPU8.slice(ptr, ptr + len) : null;
++    return (async () => {
++      try {
++        if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) return;
++        const root = await navigator.storage.getDirectory();
++        if (replace) { try { await root.removeEntry('wink-wgsl-cache', { recursive: true }); } catch (e) {} }
++        if (!bytes) return;
++        const dir = await root.getDirectoryHandle('wink-wgsl-cache', { create: true });
++        if (!GLFW3.fWinkCacheName) GLFW3.fWinkCacheName = 's-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.bin';
++        const w = await (await dir.getFileHandle(GLFW3.fWinkCacheName, { create: true })).createWritable();
++        await w.write(bytes);
++        await w.close();
++      } catch (e) {
++        console.log('[wink] wgsl cache write failed: ' + e);
++      }
++    })();
++  },
++  emscripten_glfw3_wink_cache_write__postset: '_emscripten_glfw3_wink_cache_write = new WebAssembly.Suspending(_emscripten_glfw3_wink_cache_write);',
  }
  
  autoAddDeps(emscripten_glfw3_impl, '$GLFW3')

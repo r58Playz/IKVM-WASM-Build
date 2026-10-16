@@ -427,6 +427,62 @@ index 5c4e929..f3c81a3 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/modules/lwjgl/stb/src/templates/kotlin/stb/templates/stb_image_resize.kt b/modules/lwjgl/stb/src/templates/kotlin/stb/templates/stb_image_resize.kt
+index 87f85d8..ea5231d 100644
+--- a/modules/lwjgl/stb/src/templates/kotlin/stb/templates/stb_image_resize.kt
++++ b/modules/lwjgl/stb/src/templates/kotlin/stb/templates/stb_image_resize.kt
+@@ -96,6 +96,30 @@ val stb_image_resize = "STBImageResize".nativeClass(Module.STB, prefix = "STBIR"
+         stbir_pixel_layout("pixel_type")
+     )
+ 
++    // LWJGL 3.4.0 replaced stb_image_resize.h with stb_image_resize2.h, which dropped the v1
++    // easy-to-use entry points. Re-add the one pre-3.4.0 Minecraft calls (NativeImage.resizeSubRectTo)
++    // on top of the v2 linear resize. v1's stbir_resize_uint8 used STBIR_FILTER_DEFAULT,
++    // STBIR_EDGE_CLAMP, sRGB-agnostic filtering and STBIR_ALPHA_CHANNEL_NONE, so num_channels maps
++    // to the layouts that carry no alpha semantics: 4 -> STBIR_4CHANNEL (not STBIR_RGBA) and
++    // 2 -> STBIR_2CHANNEL (not STBIR_RA). v1 returned 1 on success, 0 on failure.
++    customMethod("""
++    private static final int[] stbir_v1_num_channels_layout = {
++        STBIR_1CHANNEL, STBIR_2CHANNEL, STBIR_RGB, STBIR_4CHANNEL
++    };
++
++    /** @deprecated Removed in LWJGL 3.4.0; retained for pre-3.4.0 compatibility (e.g. older Minecraft versions). */
++    @Deprecated
++    public static int nstbir_resize_uint8(long input_pixels, int input_w, int input_h, int input_stride_in_bytes, long output_pixels, int output_w, int output_h, int output_stride_in_bytes, int num_channels) {
++        if (num_channels < 1 || 4 < num_channels) {
++            return 0;
++        }
++        return nstbir_resize_uint8_linear(
++            input_pixels, input_w, input_h, input_stride_in_bytes,
++            output_pixels, output_w, output_h, output_stride_in_bytes,
++            stbir_v1_num_channels_layout[num_channels - 1]
++        ) == NULL ? 0 : 1;
++    }""")
++
+     Code(javaInit = statement(
+         code = "$t${t}int length = calculateBufferSize(output_w, output_h, output_stride_in_bytes, pixel_type, 4);",
+         applyTo = ApplyTo.NORMAL
+diff --git a/modules/lwjgl/tinyfd/src/templates/kotlin/tinyfd/templates/tinyfiledialogs.kt b/modules/lwjgl/tinyfd/src/templates/kotlin/tinyfd/templates/tinyfiledialogs.kt
+index 6943b02..ff56273 100644
+--- a/modules/lwjgl/tinyfd/src/templates/kotlin/tinyfd/templates/tinyfiledialogs.kt
++++ b/modules/lwjgl/tinyfd/src/templates/kotlin/tinyfd/templates/tinyfiledialogs.kt
+@@ -63,6 +63,16 @@ val tinyfiledialogs = "TinyFileDialogs".nativeClass(Module.TINYFD, prefix = "tin
+         int("aDefaultButton")
+     )
+ 
++    // aDefaultButton/the return value were booleans until LWJGL 3.4.0 widened them to int (tinyfd
++    // grew multi-button dialog types). Re-add the boolean form for pre-3.4.0 callers, e.g. older
++    // Minecraft versions (Window's GL-init failure dialog).
++    customMethod("""
++    /** @deprecated Removed in LWJGL 3.4.0; retained for pre-3.4.0 compatibility (e.g. older Minecraft versions). */
++    @Deprecated
++    public static boolean tinyfd_messageBox(@Nullable CharSequence aTitle, @Nullable CharSequence aMessage, CharSequence aDialogType, CharSequence aIconType, boolean aDefaultButton) {
++        return tinyfd_messageBox(aTitle, aMessage, aDialogType, aIconType, aDefaultButton ? 1 : 0) != 0;
++    }""")
++
+     charUTF8.const.p(
+         "inputBox",
+ 
 diff --git a/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c b/modules/lwjgl/core/src/main/c/linux/org_lwjgl_system_linux_StaticLinkLoader.c
 new file mode 100644
 index 0000000..293ce84

@@ -10,9 +10,11 @@ LWJGL_REPO="https://github.com/LWJGL/lwjgl3.git"
 # 3.4.2 is the latest LWJGL release. A single 3.4.2 jar + natives is built to
 # serve as a drop-in replacement under every Minecraft version that uses LWJGL3
 # (MC 1.13 through the 2026 line). See docs: the public binding surface is a
-# superset of the 3.1.6/3.2.x/3.3.x versions MC ships, the >=3.3.0 "cookie"
-# MemoryUtil offset resolution is IKVM-safe, and removed struct *Stack helpers
-# are re-added via a generator shim in lwjgl3.patch.
+# near-superset of the 3.1.6/3.2.x/3.3.x versions MC ships and the >=3.3.0 "cookie"
+# MemoryUtil offset resolution is IKVM-safe. Where 3.4.0 did remove or re-type API
+# that older Minecraft links against, lwjgl3.patch re-adds it: struct *Stack helpers
+# (generator shim), STBImageResize.nstbir_resize_uint8 (stb_image_resize v1, dropped
+# for resize2) and the boolean TinyFileDialogs.tinyfd_messageBox overload.
 LWJGL_REF="${LWJGL_REF:-3.4.2}"
 LWJGL_PATCH="${LWJGL_PATCH:-$SCRIPT_DIR/lwjgl3.patch}"
 EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-3.1.56}"
