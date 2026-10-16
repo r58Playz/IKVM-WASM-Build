@@ -335,6 +335,17 @@ fi
 
 cd "$IKVM_DIR"
 
+# IkvmToolReference is not a NuGet ProjectReference, so the class library's
+# /restore does not visit ikvmc or ikvmstub. Restore them explicitly before any
+# build can invoke GetPublishProjectPath from their IKVM.Core.MSBuild package.
+log "Restoring IKVM tool projects ..."
+for IKVM_TOOL_PROJECT in src/ikvmc/ikvmc.csproj src/ikvmstub/ikvmstub.csproj; do
+    dotnet msbuild /t:Restore /nr:false \
+        /p:Configuration="Release" \
+        "${RUNTIME_BUILD_PROPS[@]}" \
+        "$IKVM_TOOL_PROJECT"
+done
+
 # ── Step 5: Build Artifacts ───────────────────────────────────────────────────
 
 # What the bundle takes (copy_managed_outputs, the image), each project restored as it is built: the solution's test
