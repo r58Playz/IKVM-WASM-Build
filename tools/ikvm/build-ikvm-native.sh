@@ -332,12 +332,20 @@ jdk_lib net java.base
 
 L_HEADER_DIRS=(libnio/ch libnio/fs libjvm)
 L_JDK_LIBS=(libjava libnet)
-# sun.nio.fs compares errno with the Linux numbers its UnixConstants has (emscripten-stubs/ikvm_linux_errno.h)
+# sun.nio.fs compares errno with the Linux numbers its UnixConstants has. Convert both thrown exceptions
+# (the forced include) and the status codes returned by stat0/access0 (the generated source patch).
 L_FILE_CFLAGS[UnixNativeDispatcher.c]="-include $SCRIPT_DIR/emscripten-stubs/ikvm_linux_errno.h"
 # WASMFS fails every byte-range lock, which FileChannel.tryLock then reports as held elsewhere (emscripten-stubs/ikvm_fcntl_lock.h)
 L_FILE_CFLAGS[UnixFileDispatcherImpl.c]="-include $SCRIPT_DIR/emscripten-stubs/ikvm_fcntl_lock.h"
+# Keep the OpenJDK checkout unchanged; compile the patched dispatcher in place of the original.
+mkdir -p "$TMP_DIR/libnio"
+NIO_DISPATCHER="$TMP_DIR/libnio/UnixNativeDispatcher.c"
+patch --batch --silent --output="$NIO_DISPATCHER" \
+    "$OJ_SRC/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c" \
+    "$SCRIPT_DIR/emscripten-stubs/UnixNativeDispatcher.patch"
+L_EXCLUDE_FILES=(UnixNativeDispatcher.c)
 # nor the extended attribute functions, which UnixNativeDispatcher.c calls
-L_EXTRA_FILES=("$SCRIPT_DIR/emscripten-stubs/xattr_stub.c")
+L_EXTRA_FILES=("$NIO_DISPATCHER" "$SCRIPT_DIR/emscripten-stubs/xattr_stub.c")
 jdk_lib nio java.base
 
 # ── java.prefs ────────────────────────────────────────────────────────────────

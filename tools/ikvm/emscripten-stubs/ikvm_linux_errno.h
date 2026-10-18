@@ -2,8 +2,9 @@
 
    The JDK's sun.nio.fs tells errors apart by comparing UnixException's errno with UnixConstants, which its build
    generated from Linux's headers; emscripten's errno has its own (wasi) numbering, under which EEXIST is 20, not 17, so
-   createDirectories did not see FileAlreadyExistsException. throwUnixException is where the natives hand an errno to
-   Java: its UnixException gets the Linux number. Generated from <errno.h> under emscripten 3.1.56 and glibc. */
+   createDirectories did not see FileAlreadyExistsException. Convert thrown UnixException errors here, and use the
+   same mapping for stat0/access0 return values in UnixNativeDispatcher.patch. Keep libc errno in WASI numbering.
+   Generated from <errno.h> under emscripten 3.1.56 and glibc. */
 
 #ifndef IKVM_LINUX_ERRNO_H
 #define IKVM_LINUX_ERRNO_H

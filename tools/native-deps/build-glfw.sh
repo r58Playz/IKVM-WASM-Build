@@ -47,7 +47,8 @@ Options:
   -h, --help                   Show this help message.
 
 Fetches mesa-wink into tools/native-deps/.cache/mesa-wink and
-builds it with wink/build.sh. Install its host tools first: git, curl, cmake,
+builds it with wink/build.sh; a checkout there that is on a branch is built as
+it stands instead of fetched over. Install its host tools first: git, curl, cmake,
 ninja, bison >= 3, flex, and Python >= 3.10 with venv support. Wink uses $EMSDK
 when set, and caches its build dependencies in ${XDG_CACHE_HOME:-~/.cache}/mesa-wink.
 USAGE
@@ -129,9 +130,24 @@ if [ ! -d "$WINK_SRC_DIR/.git" ]; then
     git init "$WINK_SRC_DIR"
     git -C "$WINK_SRC_DIR" remote add origin "$MESA_WINK_REPO"
 fi
-log "Fetching mesa-wink @ $MESA_WINK_REF"
-git -C "$WINK_SRC_DIR" fetch --depth 1 origin "$MESA_WINK_REF"
-git -C "$WINK_SRC_DIR" checkout --detach FETCH_HEAD
+# A checkout on a branch is a working copy -- mesa-wink is developed in this same directory -- so it is built as it
+# stands: fetching the pinned ref over it would detach it from its branch and make its history shallow. Only a detached
+# checkout, which is what this script leaves, follows --wink-ref / $MESA_WINK_REF.
+WINK_BRANCH="$(git -C "$WINK_SRC_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [ -n "$WINK_BRANCH" ] && git -C "$WINK_SRC_DIR" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null; then
+    WINK_HEAD="$(git -C "$WINK_SRC_DIR" rev-parse HEAD)"
+    log "Building mesa-wink's working checkout as it stands: branch $WINK_BRANCH @ ${WINK_HEAD:0:12}"
+    if [ "$WINK_HEAD" != "$MESA_WINK_REF" ]; then
+        log "  HEAD is not $MESA_WINK_REF; to build that instead: git -C $WINK_SRC_DIR checkout --detach"
+    fi
+    if [ -n "$(git -C "$WINK_SRC_DIR" status --porcelain --untracked-files=no)" ]; then
+        log "  with uncommitted changes"
+    fi
+else
+    log "Fetching mesa-wink @ $MESA_WINK_REF"
+    git -C "$WINK_SRC_DIR" fetch --depth 1 origin "$MESA_WINK_REF"
+    git -C "$WINK_SRC_DIR" checkout --detach FETCH_HEAD
+fi
 
 log "Building mesa-wink ($VARIANT)"
 bash "$WINK_SRC_DIR/wink/build.sh" --variant="$VARIANT"

@@ -1,0 +1,29 @@
+--- a/UnixNativeDispatcher.c
++++ b/UnixNativeDispatcher.c
+@@ -664,7 +664,7 @@
+             copy_statx_attributes(env, &statx_buf, attrs);
+             return 0;
+         } else {
+-            return errno;
++            return ikvm_linux_errno(errno);
+         }
+     }
+ #endif
+@@ -673,7 +673,7 @@
+         copy_stat_attributes(env, &buf, attrs);
+         return 0;
+     } else {
+-        return errno;
++        return ikvm_linux_errno(errno);
+     }
+ }
+ 
+@@ -1149,7 +1149,7 @@
+ 
+     RESTARTABLE(access(path, (int)amode), err);
+ 
+-    return (err == -1) ? errno : 0;
++    return (err == -1) ? ikvm_linux_errno(errno) : 0;
+ }
+ 
+ JNIEXPORT void JNICALL
