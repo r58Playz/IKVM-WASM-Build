@@ -2,7 +2,7 @@
 # build-glfw.sh - Builds emscripten-glfw for WASM against mesa-wink, Mesa's own OpenGL on WebGPU, and stages wink's
 # archives and JS libraries next to it.
 #
-# mesa-wink (https://github.com/MercuryWorkshop/mesa-wink, branch `wink`) is fetched and built with its own script,
+# mesa-wink (https://github.com/MercuryWorkshop/mesa-wink, branch `wink`) is cloned and built with its own script,
 # `wink/build.sh --variant=<mt|st>`. It is the only GL
 # backend: NG-GL4ES/Krypton (WebGL) and MobileGL (WebGPU) were removed. GL is reached only through wink_get_proc_address
 # (the patched GLFW's glXGetProcAddress), because a static wasm link has one namespace and wink exports no gl* symbol.
@@ -25,8 +25,10 @@ EMSCRIPTEN_GLFW_REPO="https://github.com/pongasoft/emscripten-glfw.git"
 EMSCRIPTEN_GLFW_REF="${EMSCRIPTEN_GLFW_REF:-v3.4.0.20250607}"
 EMSCRIPTEN_GLFW_PATCH="${EMSCRIPTEN_GLFW_PATCH:-$SCRIPT_DIR/emscripten-glfw.patch}"
 
-MESA_WINK_REPO="https://github.com/MercuryWorkshop/mesa-wink.git"
-MESA_WINK_REF="${MESA_WINK_REF:-90acb838492ea9eaed0b02ff29f24f0dcb71be3f}"
+MESA_WINK_REPO="${MESA_WINK_REPO:-https://github.com/MercuryWorkshop/mesa-wink.git}"
+MESA_WINK_REF="${MESA_WINK_REF:-f2928f2fc363692bae3a2d827ee5fabc4c7a3572}"
+# Like IKVM_DIR, this can point at an existing working checkout.
+WINK_SRC_DIR="${MESA_WINK_DIR:-$WORKSPACE/mesa-wink}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 VARIANT="${VARIANT:-mt}"
@@ -39,18 +41,19 @@ Usage: build-glfw.sh [options]
 
 Options:
   --variant=<mt|st>            Build variant for both GLFW and wink (default: mt).
-  --wink-ref=<ref>             mesa-wink git ref (default: pinned commit, or $MESA_WINK_REF).
+  --wink-ref=<ref>             Initial mesa-wink git ref (default: pinned commit, or $MESA_WINK_REF).
   --output-dir=<path>          Output directory (default: tools/native-deps/out/<variant>).
   --glfw-ref=<ref>             emscripten-glfw git ref (default: v3.4.0.20250607).
   --tmp-dir=<path>             Temporary build directory (default: mktemp).
   --keep-tmp                   Keep temporary build directory.
   -h, --help                   Show this help message.
 
-Fetches mesa-wink into tools/native-deps/.cache/mesa-wink and
-builds it with wink/build.sh; a checkout there that is on a branch is built as
-it stands instead of fetched over. Install its host tools first: git, curl, cmake,
-ninja, bison >= 3, flex, and Python >= 3.10 with venv support. Wink uses $EMSDK
-when set, and caches its build dependencies in ${XDG_CACHE_HOME:-~/.cache}/mesa-wink.
+Clones mesa-wink with full history into tools/native-deps/mesa-wink (or
+$MESA_WINK_DIR), starting its local wink branch at the pinned ref. Existing
+checkouts are built as they stand, including local commits and edits; the ref
+only applies when cloning. Install its host tools first: git, curl, cmake, ninja,
+bison >= 3, flex, and Python >= 3.10 with venv support. Wink uses $EMSDK when set,
+and caches its build dependencies in ${XDG_CACHE_HOME:-~/.cache}/mesa-wink.
 USAGE
 }
 
@@ -124,29 +127,17 @@ case "$VARIANT" in
         ;;
 esac
 
-WINK_SRC_DIR="$WORKSPACE/.cache/mesa-wink"
-if [ ! -d "$WINK_SRC_DIR/.git" ]; then
-    log "Initializing mesa-wink source checkout"
-    git init "$WINK_SRC_DIR"
-    git -C "$WINK_SRC_DIR" remote add origin "$MESA_WINK_REPO"
-fi
-# A checkout on a branch is a working copy -- mesa-wink is developed in this same directory -- so it is built as it
-# stands: fetching the pinned ref over it would detach it from its branch and make its history shallow. Only a detached
-# checkout, which is what this script leaves, follows --wink-ref / $MESA_WINK_REF.
-WINK_BRANCH="$(git -C "$WINK_SRC_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-if [ -n "$WINK_BRANCH" ] && git -C "$WINK_SRC_DIR" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null; then
-    WINK_HEAD="$(git -C "$WINK_SRC_DIR" rev-parse HEAD)"
-    log "Building mesa-wink's working checkout as it stands: branch $WINK_BRANCH @ ${WINK_HEAD:0:12}"
-    if [ "$WINK_HEAD" != "$MESA_WINK_REF" ]; then
-        log "  HEAD is not $MESA_WINK_REF; to build that instead: git -C $WINK_SRC_DIR checkout --detach"
-    fi
-    if [ -n "$(git -C "$WINK_SRC_DIR" status --porcelain --untracked-files=no)" ]; then
-        log "  with uncommitted changes"
-    fi
+if [ ! -e "$WINK_SRC_DIR/.git" ]; then
+    log "Cloning mesa-wink @ $MESA_WINK_REF"
+    git clone --no-checkout --branch wink "$MESA_WINK_REPO" "$WINK_SRC_DIR"
+    git -C "$WINK_SRC_DIR" checkout -B wink "$MESA_WINK_REF"
 else
-    log "Fetching mesa-wink @ $MESA_WINK_REF"
-    git -C "$WINK_SRC_DIR" fetch --depth 1 origin "$MESA_WINK_REF"
-    git -C "$WINK_SRC_DIR" checkout --detach FETCH_HEAD
+    log "mesa-wink source already present, using working checkout."
+fi
+WINK_HEAD="$(git -C "$WINK_SRC_DIR" rev-parse HEAD)"
+log "Building mesa-wink's working checkout @ ${WINK_HEAD:0:12} (initial pin: $MESA_WINK_REF)"
+if [ -n "$(git -C "$WINK_SRC_DIR" status --porcelain --untracked-files=no)" ]; then
+    log "  with uncommitted changes"
 fi
 
 log "Building mesa-wink ($VARIANT)"

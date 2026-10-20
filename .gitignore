@@ -4,14 +4,8 @@
 /tools/ikvm/ikvm
 /tools/ikvm/out
 /tools/native-deps/emscripten-glfw
-/tools/native-deps/MobileGL
-/tools/native-deps/NG-GL4ES
-/tools/native-deps/jemalloc
-/tools/native-deps/jvmdowngrader
 /tools/native-deps/libffi
 /tools/native-deps/lwjgl3
+/tools/native-deps/mesa-wink
 /tools/native-deps/out
-/tools/native-deps/tint-out-mt
-/tools/native-deps/tint-out-st
 /tools/native-deps/.cache
-/out
