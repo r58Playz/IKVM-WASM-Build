@@ -26,7 +26,7 @@ EMSCRIPTEN_GLFW_REF="${EMSCRIPTEN_GLFW_REF:-v3.4.0.20250607}"
 EMSCRIPTEN_GLFW_PATCH="${EMSCRIPTEN_GLFW_PATCH:-$SCRIPT_DIR/emscripten-glfw.patch}"
 
 MESA_WINK_REPO="${MESA_WINK_REPO:-https://github.com/MercuryWorkshop/mesa-wink.git}"
-MESA_WINK_REF="${MESA_WINK_REF:-f2928f2fc363692bae3a2d827ee5fabc4c7a3572}"
+MESA_WINK_REF="${MESA_WINK_REF:-51eb6bdb32520dc3c50fee1d94242ae099bd6bac}"
 # Like IKVM_DIR, this can point at an existing working checkout.
 WINK_SRC_DIR="${MESA_WINK_DIR:-$WORKSPACE/mesa-wink}"
 
