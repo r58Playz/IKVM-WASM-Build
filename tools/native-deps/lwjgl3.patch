@@ -1,3 +1,46 @@
+diff --git a/config/build-definitions.xml b/config/build-definitions.xml
+index a3a6610..851626b 100644
+--- a/config/build-definitions.xml
++++ b/config/build-definitions.xml
+@@ -362,6 +362,27 @@ This script is included in /build.xml and /config/update-dependencies.xml.
+         </sequential>
+     </macrodef>
+ 
++    <macrodef name="get-maven">
++        <attribute name="name"/>
++        <attribute name="url"/>
++        <attribute name="dest"/>
++
++        <sequential>
++            <!-- Use the build script's curl dependency so HTTP failures stay visible.
++                 Stage downloads so failures cannot replace a valid cached JAR. -->
++            <echo taskname="@{name}" message="Downloading @{url}"/>
++            <exec executable="curl" failonerror="true" taskname="@{name}">
++                <arg line="--fail --location --silent --show-error"/>
++                <arg line="--retry 4 --retry-max-time 300"/>
++                <arg line="--connect-timeout 20 --max-time 180"/>
++                <arg value="--output"/>
++                <arg value="@{dest}.part"/>
++                <arg value="@{url}"/>
++            </exec>
++            <move file="@{dest}.part" tofile="@{dest}"/>
++        </sequential>
++    </macrodef>
++
+     <macrodef name="update-mvn">
+         <attribute name="name"/>
+         <attribute name="group"/>
+@@ -372,8 +393,8 @@ This script is included in /build.xml and /config/update-dependencies.xml.
+         <attribute name="sources" default="true"/>
+ 
+         <sequential>
+-            <get-quiet name="@{name}" url="https://repo.maven.apache.org/maven2/@{group}/@{artifact}/@{version}/@{artifact}-@{version}@{classifier}.jar" dest="${lib}/java@{subfolder}/@{artifact}.jar" skipexisting="false"/>
+-            <get-quiet name="@{name}" url="https://repo.maven.apache.org/maven2/@{group}/@{artifact}/@{version}/@{artifact}-@{version}-sources.jar" dest="${lib}/java@{subfolder}/@{artifact}-sources.jar" skipexisting="false" if:true="@{sources}"/>
++            <get-maven name="@{name}" url="https://repo.maven.apache.org/maven2/@{group}/@{artifact}/@{version}/@{artifact}-@{version}@{classifier}.jar" dest="${lib}/java@{subfolder}/@{artifact}.jar"/>
++            <get-maven name="@{name}" url="https://repo.maven.apache.org/maven2/@{group}/@{artifact}/@{version}/@{artifact}-@{version}-sources.jar" dest="${lib}/java@{subfolder}/@{artifact}-sources.jar" if:true="@{sources}"/>
+         </sequential>
+     </macrodef>
+ 
 diff --git a/modules/generator/src/main/kotlin/org/lwjgl/generator/Structs.kt b/modules/generator/src/main/kotlin/org/lwjgl/generator/Structs.kt
 index a2e7074..2057ab5 100644
 --- a/modules/generator/src/main/kotlin/org/lwjgl/generator/Structs.kt
