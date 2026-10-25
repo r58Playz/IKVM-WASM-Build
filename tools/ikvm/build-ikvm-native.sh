@@ -328,6 +328,9 @@ jdk_lib zip java.base
 
 # libnet and libnio
 L_JDK_LIBS=(libjava libjvm)
+# emscripten has no sockets or interface ioctls to enumerate network interfaces with; answer them from a fixed set
+# (emscripten-stubs/ikvm_netif.h)
+L_FILE_CFLAGS[NetworkInterface.c]="-include $SCRIPT_DIR/emscripten-stubs/ikvm_netif.h"
 jdk_lib net java.base
 
 L_HEADER_DIRS=(libnio/ch libnio/fs libjvm)
