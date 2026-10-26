@@ -722,10 +722,57 @@ index bc13166..840f681 100644
  
  //------------------------------------------------------------------------
 diff --git a/src/cpp/emscripten/glfw3/Keyboard.cpp b/src/cpp/emscripten/glfw3/Keyboard.cpp
-index b51ab6c..ff3644f 100644
+index b51ab6c..4b441f4 100644
 --- a/src/cpp/emscripten/glfw3/Keyboard.cpp
 +++ b/src/cpp/emscripten/glfw3/Keyboard.cpp
-@@ -109,10 +109,15 @@ bool Keyboard::onKeyDown(GLFWwindow *iWindow, Event const &iEvent, emscripten::g
+@@ -31,6 +31,44 @@
+ //------------------------------------------------------------------------
+ const char *Keyboard::getKeyName(glfw_key_t iKey, glfw_scancode_t iScancode)
+ {
+-  auto scancode = iKey == GLFW_KEY_UNKNOWN ? iScancode : getKeyScancode(iKey);
+-  return keyboard::scancodeToString(scancode);
++  auto key = iKey == GLFW_KEY_UNKNOWN ? keyboard::scancodeToKeyCode(iScancode) : iKey;
++
++  // DOM codes identify physical keys, so use unshifted US legends until layout
++  // information is available. String literals keep the returned pointers stable.
++  static constexpr char const *kDigits[] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"};
++  static constexpr char const *kLetters[] = {
++    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
++    "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"
++  };
++
++  if(key >= GLFW_KEY_0 && key <= GLFW_KEY_9)
++    return kDigits[key - GLFW_KEY_0];
++  if(key >= GLFW_KEY_A && key <= GLFW_KEY_Z)
++    return kLetters[key - GLFW_KEY_A];
++  if(key >= GLFW_KEY_KP_0 && key <= GLFW_KEY_KP_9)
++    return kDigits[key - GLFW_KEY_KP_0];
++
++  switch(key)
++  {
++    case GLFW_KEY_APOSTROPHE:    return "'";
++    case GLFW_KEY_COMMA:         return ",";
++    case GLFW_KEY_MINUS:
++    case GLFW_KEY_KP_SUBTRACT:   return "-";
++    case GLFW_KEY_PERIOD:
++    case GLFW_KEY_KP_DECIMAL:    return ".";
++    case GLFW_KEY_SLASH:
++    case GLFW_KEY_KP_DIVIDE:     return "/";
++    case GLFW_KEY_SEMICOLON:     return ";";
++    case GLFW_KEY_EQUAL:
++    case GLFW_KEY_KP_EQUAL:      return "=";
++    case GLFW_KEY_LEFT_BRACKET:  return "[";
++    case GLFW_KEY_BACKSLASH:     return "\\";
++    case GLFW_KEY_RIGHT_BRACKET: return "]";
++    case GLFW_KEY_GRAVE_ACCENT:  return "`";
++    case GLFW_KEY_KP_MULTIPLY:   return "*";
++    case GLFW_KEY_KP_ADD:        return "+";
++    // GLFW returns null for non-printable/unknown keys so applications can
++    // localize names such as Space, Left Shift, Escape and the function keys.
++    default: return nullptr;
++  }
+ }
+@@ -109,10 +147,15 @@ bool Keyboard::onKeyDown(GLFWwindow *iWindow, Event const &iEvent, emscripten::g
                !iBrowserKeyCallback(iWindow, key, scancode, iEvent.repeat ? GLFW_REPEAT : GLFW_PRESS, iEvent.modifierBits);
    }
  
