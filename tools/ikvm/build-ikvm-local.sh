@@ -329,7 +329,7 @@ fi
 
 # ── Step 4: NuGet Restore ─────────────────────────────────────────────────────
 
-export NUGET_PACKAGES="${NUGET_PACKAGES:-$REPO_ROOT/.nuget/packages}"
+export NUGET_PACKAGES="${NUGET_PACKAGES:-$HOME/.nuget/packages}"
 log "Using NuGet package cache: $NUGET_PACKAGES"
 log "Managed runtime filters: Enabled=$ENABLED_RUNTIMES Image=$ENABLED_IMAGE_RUNTIMES ImageBin=$ENABLED_IMAGE_BIN_RUNTIMES Tool=$ENABLED_TOOL_RUNTIMES"
 
