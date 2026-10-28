@@ -402,12 +402,24 @@ dotnet msbuild /m "/bl:$IKVM_ARTIFACTS_DIR/msbuild-$(basename "$IKVM_BUILD_PROJE
     "$IKVM_BUILD_PROJECT"
 done
 
+# The desktop target's libikvm (IKVM.Runtime's [DllImport("ikvm")]): a host that runs the same managed stack on the
+# desktop, with the image as its java.home, loads it from beside its executable.
+log "Building the $BUILD_RUNTIME libikvm ..."
+dotnet msbuild /nr:false /restore \
+    /p:Configuration="Release" \
+    "/p:TargetIdentifiers=$BUILD_RUNTIME" \
+    ${CLANG_COMPAT_FLAGS:+"/p:AdditionalCompileOptions=$CLANG_COMPAT_FLAGS"} \
+    /p:ClangToolExe="$CLANG_EXE" \
+    /p:LlvmArToolExe="$LLVM_AR_EXE" \
+    src/libikvm/libikvm.clangproj
+
 # ── Step 6: Package Managed Outputs ──────────────────────────────────────────
 
 log "Packaging managed outputs ..."
 mkdir -p "$OUT_BASE/managed"
 
 copy_managed_outputs "$OUT_BASE/managed"
+cp "$IKVM_ARTIFACTS_DIR/bin/libikvm/Release/$BUILD_RUNTIME/libikvm.so" "$OUT_BASE/managed/"
 
 IKVM_TOOLS_DIST_DIR="${IKVM_TOOLS_DIST_DIR:-$(find_tools_dist_dir)}"
 if [ -z "$IKVM_TOOLS_DIST_DIR" ] || [ ! -d "$IKVM_TOOLS_DIST_DIR" ]; then
@@ -517,6 +529,8 @@ else
     cp -r "$IKVM_TOOLS_SRC" "$OUT_BASE/bundle-staging/ikvm-tools"
 
     MANAGED_FILES=("$OUT_BASE/managed/IKVM."{Runtime,CoreLib,Java,ByteCode}.dll)
+    # the desktop libikvm, when this managed build made one
+    [ -f "$OUT_BASE/managed/libikvm.so" ] && MANAGED_FILES+=("$OUT_BASE/managed/libikvm.so")
     NATIVE_FILES=()
     for lib in "${NATIVE_LIBS[@]}"; do
         NATIVE_FILES+=("$OUT_BASE/native/$lib.a")
