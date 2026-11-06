@@ -65,7 +65,7 @@ index c539cdc..7e04f64 100644
    // GL Context
    int fClientAPI{GLFW_OPENGL_API}; // GLFW_CLIENT_API
 diff --git a/src/cpp/emscripten/glfw3/Context.cpp b/src/cpp/emscripten/glfw3/Context.cpp
-index afb6ea7..014e6e6 100644
+index afb6ea7..c8531cb 100644
 --- a/src/cpp/emscripten/glfw3/Context.cpp
 +++ b/src/cpp/emscripten/glfw3/Context.cpp
 @@ -19,13 +19,28 @@
@@ -97,7 +97,15 @@ index afb6ea7..014e6e6 100644
  extern "C" {
  using ScaleChangeCallback = void (*)(emscripten::glfw3::Context *);
  using WindowResizeCallback = void (*)(emscripten::glfw3::Context *, GLFWwindow *, int, int);
-@@ -52,8 +67,16 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
+@@ -43,6 +58,7 @@ bool emscripten_glfw3_context_is_any_element_focused();
+ bool emscripten_glfw3_context_is_extension_supported(char const *iExtension);
+ void emscripten_glfw3_context_set_title(char const *iTitle);
+ double emscripten_glfw3_context_get_now();
++double emscripten_glfw3_context_get_now_cached();
+ GLFWwindow *emscripten_glfw3_context_get_fullscreen_window();
+ GLFWwindow *emscripten_glfw3_context_get_pointer_lock_window();
+ int emscripten_glfw3_window_init(GLFWwindow *iWindow, char const *iCanvasSelector);
+@@ -52,8 +68,18 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
  bool emscripten_glfw3_context_is_runtime_platform_apple();
  void emscripten_glfw3_create_custom_cursor(GLFWcursor *iCursor, int iWidth, int iHeight, unsigned char *iPixels);
  void emscripten_glfw3_destroy_custom_cursor(GLFWcursor *iCursor);
@@ -110,11 +118,13 @@ index afb6ea7..014e6e6 100644
 +// GL context present / proc-address go through gl_backend_* (mesa-wink). See gl_backend.h.
 +#include "gl_backend.h"
 +#include <cstring>
++#include <cstdio>
++#include <cstdlib>
 +
  namespace emscripten::glfw3 {
  
  static ErrorHandler &kErrorHandler = ErrorHandler::instance();
-@@ -66,12 +89,88 @@ std::unique_ptr<Context> Context::init()
+@@ -66,12 +92,88 @@ std::unique_ptr<Context> Context::init()
    return std::unique_ptr<Context>(new Context{});
  }
  
@@ -204,7 +214,7 @@ index afb6ea7..014e6e6 100644
  }
  
  //------------------------------------------------------------------------
-@@ -79,7 +178,8 @@ void ContextScaleChangeCallback(Context *iContext)
+@@ -79,7 +181,8 @@ void ContextScaleChangeCallback(Context *iContext)
  //------------------------------------------------------------------------
  void ContextWindowResizeCallback(Context *iContext, GLFWwindow *iWindow, int iWidth, int iHeight)
  {
@@ -214,7 +224,7 @@ index afb6ea7..014e6e6 100644
  }
  
  //------------------------------------------------------------------------
-@@ -93,11 +193,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -93,11 +196,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
                               int iCodepoint,
                               int iModifierBits)
  {
@@ -247,7 +257,7 @@ index afb6ea7..014e6e6 100644
  }
  
  //------------------------------------------------------------------------
-@@ -105,7 +221,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -105,7 +224,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
  //------------------------------------------------------------------------
  void ContextClipboardStringCallback(Context *iContext, char const *iText, char const *iError)
  {
@@ -265,7 +275,7 @@ index afb6ea7..014e6e6 100644
  }
  
  //------------------------------------------------------------------------
-@@ -130,6 +255,10 @@ Context::Context()
+@@ -130,6 +258,10 @@ Context::Context()
                                  ContextClipboardStringCallback,
                                  emscripten_glfw_request_fullscreen,
                                  ContextErrorHandler);
@@ -276,7 +286,7 @@ index afb6ea7..014e6e6 100644
    addOrRemoveEventListeners(true);
  }
  
-@@ -1043,7 +1172,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
+@@ -1043,7 +1175,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
  }
  
  //------------------------------------------------------------------------
@@ -285,7 +295,7 @@ index afb6ea7..014e6e6 100644
  //------------------------------------------------------------------------
  GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
  {
-@@ -1054,6 +1183,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
+@@ -1054,6 +1186,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
      return nullptr;
  }
  
@@ -344,7 +354,29 @@ index afb6ea7..014e6e6 100644
  //------------------------------------------------------------------------
  // Context::createStandardCursor
  //------------------------------------------------------------------------
-@@ -1178,6 +1359,41 @@ uint64_t Context::getTimerValue()
+@@ -1162,7 +1346,20 @@ void Context::setTimeInSeconds(double iValue)
+ //------------------------------------------------------------------------
+ double Context::getPlatformTimerValue()
+ {
+-  return emscripten_glfw3_context_get_now();
++  // GLFW_NOW_CACHE (ikvmcraft, 2026-11-05; default 0): 1 = performance.now() through the `performance` object cached
++  // once per JS realm (lib_emscripten_glfw3.js $GLFW3_perf) instead of the global accessor looked up on every call.
++  // Read once into a static -- a benign race, every reader computes the same value -- and printed once, so each run's
++  // log shows which clock it ran.
++  static int sNowCache = -1;
++  int c = sNowCache;
++  if(c < 0)
++  {
++    char const *e = getenv("GLFW_NOW_CACHE");
++    c = (e && e[0] == '1') ? 1 : 0;
++    sNowCache = c;
++    printf("[glfw] GLFW_NOW_CACHE=%d\n", c);
++  }
++  return c ? emscripten_glfw3_context_get_now_cached() : emscripten_glfw3_context_get_now();
+ }
+ 
+ //------------------------------------------------------------------------
+@@ -1178,6 +1375,41 @@ uint64_t Context::getTimerValue()
  //------------------------------------------------------------------------
  void Context::pollEvents()
  {
@@ -386,7 +418,7 @@ index afb6ea7..014e6e6 100644
    computeWindowPos();
  
  #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
-@@ -1199,16 +1415,36 @@ void Context::pollEvents()
+@@ -1199,16 +1431,36 @@ void Context::pollEvents()
  //------------------------------------------------------------------------
  // Context::swapInterval
  //------------------------------------------------------------------------
@@ -428,7 +460,7 @@ index afb6ea7..014e6e6 100644
  }
  
  
-@@ -1217,10 +1453,24 @@ void Context::swapInterval(int iInterval) const
+@@ -1217,10 +1469,24 @@ void Context::swapInterval(int iInterval) const
  //------------------------------------------------------------------------
  glfw_bool_t Context::isExtensionSupported(char const *extension)
  {
@@ -456,7 +488,7 @@ index afb6ea7..014e6e6 100644
  }
  
  //------------------------------------------------------------------------
-@@ -1256,4 +1506,4 @@ bool Context::isRuntimePlatformApple() const
+@@ -1256,4 +1522,4 @@ bool Context::isRuntimePlatformApple() const
    return emscripten_glfw3_context_is_runtime_platform_apple();
  }
  
@@ -725,7 +757,7 @@ diff --git a/src/cpp/emscripten/glfw3/Keyboard.cpp b/src/cpp/emscripten/glfw3/Ke
 index b51ab6c..4b441f4 100644
 --- a/src/cpp/emscripten/glfw3/Keyboard.cpp
 +++ b/src/cpp/emscripten/glfw3/Keyboard.cpp
-@@ -31,6 +31,44 @@
+@@ -31,8 +31,46 @@ namespace emscripten::glfw3 {
  //------------------------------------------------------------------------
  const char *Keyboard::getKeyName(glfw_key_t iKey, glfw_scancode_t iScancode)
  {
@@ -772,6 +804,8 @@ index b51ab6c..4b441f4 100644
 +    default: return nullptr;
 +  }
  }
+ 
+ //------------------------------------------------------------------------
 @@ -109,10 +147,15 @@ bool Keyboard::onKeyDown(GLFWwindow *iWindow, Event const &iEvent, emscripten::g
                !iBrowserKeyCallback(iWindow, key, scancode, iEvent.repeat ? GLFW_REPEAT : GLFW_PRESS, iEvent.modifierBits);
    }
@@ -1322,10 +1356,30 @@ index 8475a25..3d89616 100644
 +
 +}
 diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
-index 0cfd23c..dce7b10 100644
+index 0cfd23c..e6addae 100644
 --- a/src/js/lib_emscripten_glfw3.js
 +++ b/src/js/lib_emscripten_glfw3.js
-@@ -814,6 +814,105 @@ let emscripten_glfw3_impl = {
+@@ -517,6 +517,19 @@ let emscripten_glfw3_impl = {
+     return performance.now();
+   },
+ 
++  //! GLFW3_perf: the global `performance` object, read ONCE per JS realm (each worker loads this module itself, so each
++  //! keeps its own object and its own timeOrigin, exactly as `performance.now()` there would). `performance` is an
++  //! accessor on the worker global that V8 reaches through its slow global-load IC and an API getter on every read
++  //! (ikvmcraft's server thread: ~1.2 M of glfwGetTime's 1.46 M instructions a tick, 2026-11-05); `now()` itself is a
++  //! fast API call.
++  $GLFW3_perf: '=performance',
++
++  //! emscripten_glfw3_context_get_now_cached: performance.now() without the per-call `performance` lookup. Chosen by
++  //! Context::getPlatformTimerValue under GLFW_NOW_CACHE=1.
++  emscripten_glfw3_context_get_now_cached__sig: 'd',
++  emscripten_glfw3_context_get_now_cached__deps: ['$GLFW3_perf'],
++  emscripten_glfw3_context_get_now_cached: () => GLFW3_perf.now(),
++
+   //! emscripten_glfw3_context_set_title
+   emscripten_glfw3_context_set_title__proxy: 'sync',
+   emscripten_glfw3_context_set_title__sig: 'vp',
+@@ -814,6 +827,105 @@ let emscripten_glfw3_impl = {
      return navigator.platform.indexOf("Mac") === 0 || navigator.platform === "iPhone";
    },
  
