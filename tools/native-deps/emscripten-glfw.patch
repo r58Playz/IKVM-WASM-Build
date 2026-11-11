@@ -65,10 +65,14 @@ index c539cdc..7e04f64 100644
    // GL Context
    int fClientAPI{GLFW_OPENGL_API}; // GLFW_CLIENT_API
 diff --git a/src/cpp/emscripten/glfw3/Context.cpp b/src/cpp/emscripten/glfw3/Context.cpp
-index afb6ea7..c8531cb 100644
+index afb6ea7..39fbc58 100644
 --- a/src/cpp/emscripten/glfw3/Context.cpp
 +++ b/src/cpp/emscripten/glfw3/Context.cpp
-@@ -19,13 +19,28 @@
+@@ -16,16 +16,32 @@
+  * @author Yan Pujante
+  */
+ 
++#include <emscripten/proxying.h>
  #include "Context.h"
  #include <emscripten.h>
  #include <emscripten/html5.h>
@@ -97,7 +101,7 @@ index afb6ea7..c8531cb 100644
  extern "C" {
  using ScaleChangeCallback = void (*)(emscripten::glfw3::Context *);
  using WindowResizeCallback = void (*)(emscripten::glfw3::Context *, GLFWwindow *, int, int);
-@@ -43,6 +58,7 @@ bool emscripten_glfw3_context_is_any_element_focused();
+@@ -43,6 +59,7 @@ bool emscripten_glfw3_context_is_any_element_focused();
  bool emscripten_glfw3_context_is_extension_supported(char const *iExtension);
  void emscripten_glfw3_context_set_title(char const *iTitle);
  double emscripten_glfw3_context_get_now();
@@ -105,14 +109,8 @@ index afb6ea7..c8531cb 100644
  GLFWwindow *emscripten_glfw3_context_get_fullscreen_window();
  GLFWwindow *emscripten_glfw3_context_get_pointer_lock_window();
  int emscripten_glfw3_window_init(GLFWwindow *iWindow, char const *iCanvasSelector);
-@@ -52,8 +68,18 @@ void emscripten_glfw3_context_open_url(char const *, char const *);
- bool emscripten_glfw3_context_is_runtime_platform_apple();
- void emscripten_glfw3_create_custom_cursor(GLFWcursor *iCursor, int iWidth, int iHeight, unsigned char *iPixels);
+@@ -54,6 +71,12 @@ void emscripten_glfw3_create_custom_cursor(GLFWcursor *iCursor, int iWidth, int
  void emscripten_glfw3_destroy_custom_cursor(GLFWcursor *iCursor);
-+void emscripten_glfw3_context_jspi_settimeout();
-+void emscripten_glfw3_context_jspi_posttask();
-+void emscripten_glfw3_context_jspi_sleep(int iMilliseconds);
-+void emscripten_glfw3_context_jspi_raf();
  }
  
 +// GL context present / proc-address go through gl_backend_* (mesa-wink). See gl_backend.h.
@@ -124,7 +122,7 @@ index afb6ea7..c8531cb 100644
  namespace emscripten::glfw3 {
  
  static ErrorHandler &kErrorHandler = ErrorHandler::instance();
-@@ -66,12 +92,88 @@ std::unique_ptr<Context> Context::init()
+@@ -66,12 +89,88 @@ std::unique_ptr<Context> Context::init()
    return std::unique_ptr<Context>(new Context{});
  }
  
@@ -214,7 +212,7 @@ index afb6ea7..c8531cb 100644
  }
  
  //------------------------------------------------------------------------
-@@ -79,7 +181,8 @@ void ContextScaleChangeCallback(Context *iContext)
+@@ -79,7 +178,8 @@ void ContextScaleChangeCallback(Context *iContext)
  //------------------------------------------------------------------------
  void ContextWindowResizeCallback(Context *iContext, GLFWwindow *iWindow, int iWidth, int iHeight)
  {
@@ -224,7 +222,7 @@ index afb6ea7..c8531cb 100644
  }
  
  //------------------------------------------------------------------------
-@@ -93,11 +196,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -93,11 +193,27 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
                               int iCodepoint,
                               int iModifierBits)
  {
@@ -257,7 +255,7 @@ index afb6ea7..c8531cb 100644
  }
  
  //------------------------------------------------------------------------
-@@ -105,7 +224,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
+@@ -105,7 +221,16 @@ bool ContextKeyboardCallback(emscripten::glfw3::Context *iContext,
  //------------------------------------------------------------------------
  void ContextClipboardStringCallback(Context *iContext, char const *iText, char const *iError)
  {
@@ -275,7 +273,7 @@ index afb6ea7..c8531cb 100644
  }
  
  //------------------------------------------------------------------------
-@@ -130,6 +258,10 @@ Context::Context()
+@@ -130,6 +255,10 @@ Context::Context()
                                  ContextClipboardStringCallback,
                                  emscripten_glfw_request_fullscreen,
                                  ContextErrorHandler);
@@ -286,7 +284,7 @@ index afb6ea7..c8531cb 100644
    addOrRemoveEventListeners(true);
  }
  
-@@ -1043,7 +1175,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
+@@ -1043,7 +1172,7 @@ void Context::getMonitorContentScale(GLFWmonitor *iMonitor, float *oXScale, floa
  }
  
  //------------------------------------------------------------------------
@@ -295,7 +293,7 @@ index afb6ea7..c8531cb 100644
  //------------------------------------------------------------------------
  GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
  {
-@@ -1054,6 +1186,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
+@@ -1054,6 +1183,58 @@ GLFWmonitor *Context::getMonitor(GLFWwindow *iWindow) const
      return nullptr;
  }
  
@@ -354,7 +352,7 @@ index afb6ea7..c8531cb 100644
  //------------------------------------------------------------------------
  // Context::createStandardCursor
  //------------------------------------------------------------------------
-@@ -1162,7 +1346,20 @@ void Context::setTimeInSeconds(double iValue)
+@@ -1162,7 +1343,20 @@ void Context::setTimeInSeconds(double iValue)
  //------------------------------------------------------------------------
  double Context::getPlatformTimerValue()
  {
@@ -376,11 +374,14 @@ index afb6ea7..c8531cb 100644
  }
  
  //------------------------------------------------------------------------
-@@ -1178,6 +1375,41 @@ uint64_t Context::getTimerValue()
+@@ -1178,6 +1372,41 @@ uint64_t Context::getTimerValue()
  //------------------------------------------------------------------------
  void Context::pollEvents()
  {
-+  emscripten_glfw3_context_jspi_settimeout();
++  // Nothing here returns to the JS event loop: under ikvmcraft the render thread is the .NET deputy, which runs the
++  // whole game inside one JSExport call, and the runtime has no JSPI to suspend it. Input arrives through the
++  // EventQueue ring the main thread fills; work other threads proxied to this one is run here instead.
++  emscripten_proxy_execute_queue(emscripten_proxy_get_system_queue());
 +  processEvents();
 +}
 +
@@ -395,13 +396,10 @@ index afb6ea7..c8531cb 100644
 +    return;
 +  }
 +
-+  // Sleep instead of spinning (Minecraft's frame limiter loops glfwWaitEventsTimeout until its deadline).
-+  // setTimeout only takes whole ms, so sleep the floor and don't sleep at all below 1ms: callers re-check
-+  // their clock, so they spin for under 1ms instead of overshooting. There is no early wake on input;
-+  // events that arrive meanwhile are drained after the sleep.
-+  double ms = std::min(std::floor(iTimeout * 1000.0), static_cast<double>(std::numeric_limits<int32_t>::max()));
-+  if(ms >= 1)
-+    emscripten_glfw3_context_jspi_sleep(static_cast<int>(ms));
++  // Sleep instead of spinning (Minecraft's frame limiter loops glfwWaitEventsTimeout until its deadline): a futex wait
++  // on the input ring, which an event ends early. Sub-millisecond deadlines are honoured.
++  EventQueue::instance().waitForEvents(iTimeout * 1000.0);
++  emscripten_proxy_execute_queue(emscripten_proxy_get_system_queue());
 +  processEvents();
 +}
 +
@@ -418,7 +416,7 @@ index afb6ea7..c8531cb 100644
    computeWindowPos();
  
  #ifndef EMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT
-@@ -1199,16 +1431,36 @@ void Context::pollEvents()
+@@ -1199,16 +1428,22 @@ void Context::pollEvents()
  //------------------------------------------------------------------------
  // Context::swapInterval
  //------------------------------------------------------------------------
@@ -438,29 +436,15 @@ index afb6ea7..c8531cb 100644
 +void Context::swapBuffers() const
 +{
 +	sFrameCount.fetch_add(1, std::memory_order_relaxed);
-+	// mesa-wink: submit the frame's batched WebGPU work and copy the back buffer onto the canvas texture. The frame
-+	// reaches the screen when this thread next returns to its event loop -- the JSPI yield below.
-+	// WINK_GL_MAIN: the frame is queued to the main thread, which shows and paces it; wink_swap_buffers itself waits
-+	// when two frames are in flight, so this thread has nothing to yield for.
-+	if (gl_backend_on_main()) {
-+		gl_backend_present_interval(fInterval);
-+		gl_backend_present();
-+		return;
-+	}
++	// mesa-wink with GL on the main thread (WINK_GL_MAIN, now the only mode): the frame is queued to the main thread,
++	// which shows and paces it; wink_swap_buffers itself waits when two frames are in flight, so this thread has nothing
++	// to yield for.
++	gl_backend_present_interval(fInterval);
 +	gl_backend_present();
-+	// Interval 0 must not scheduler.yield(): see emscripten_glfw3_context_jspi_posttask.
-+	if (fInterval == 0)
-+		emscripten_glfw3_context_jspi_posttask();
-+	else
-+	{
-+		for (int i = 0; i < fInterval; ++i) {
-+			emscripten_glfw3_context_jspi_raf();
-+		}
-+	}
  }
  
  
-@@ -1217,10 +1469,24 @@ void Context::swapInterval(int iInterval) const
+@@ -1217,10 +1452,24 @@ void Context::swapInterval(int iInterval) const
  //------------------------------------------------------------------------
  glfw_bool_t Context::isExtensionSupported(char const *extension)
  {
@@ -488,7 +472,7 @@ index afb6ea7..c8531cb 100644
  }
  
  //------------------------------------------------------------------------
-@@ -1256,4 +1522,4 @@ bool Context::isRuntimePlatformApple() const
+@@ -1256,4 +1505,4 @@ bool Context::isRuntimePlatformApple() const
    return emscripten_glfw3_context_is_runtime_platform_apple();
  }
  
@@ -547,11 +531,16 @@ index f7ecca2..76402db 100644
 +#endif //EMSCRIPTEN_GLFW_CONTEXT_H
 diff --git a/src/cpp/emscripten/glfw3/EventQueue.cpp b/src/cpp/emscripten/glfw3/EventQueue.cpp
 new file mode 100644
-index 0000000..d208959
+index 0000000..48aae0d
 --- /dev/null
 +++ b/src/cpp/emscripten/glfw3/EventQueue.cpp
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,80 @@
 +#include "EventQueue.h"
++
++#include <climits>
++#include <emscripten/emscripten.h>
++#include <emscripten/proxying.h>
++#include <emscripten/threading.h>
 +
 +namespace emscripten::glfw3 {
 +
@@ -585,6 +574,8 @@ index 0000000..d208959
 +    std::memcpy(slot.payload, iPayload, static_cast<size_t>(iPayloadSize));
 +
 +  fTail.store(next, std::memory_order_release);
++  fSeq.fetch_add(1, std::memory_order_release);
++  emscripten_futex_wake(&fSeq, INT_MAX);
 +  return true;
 +}
 +
@@ -603,13 +594,33 @@ index 0000000..d208959
 +  }
 +}
 +
++void EventQueue::waitForEvents(double iTimeoutMs)
++{
++  double deadline = emscripten_get_now() + iTimeoutMs;
++  while(true)
++  {
++    // Read the sequence before testing the ring, so a push between the test and the wait changes the word and the wait
++    // returns at once instead of sleeping through it.
++    uint32_t seq = fSeq.load(std::memory_order_acquire);
++    if(fHead.load(std::memory_order_relaxed) != fTail.load(std::memory_order_acquire))
++      return;
++    double left = deadline - emscripten_get_now();
++    if(left <= 0)
++      return;
++    // Returns on a push (the word moved), the deadline, or -EINTR when another thread proxied work to this one -- run
++    // that work, since this thread never returns to its event loop, and re-check.
++    emscripten_futex_wait(&fSeq, seq, left);
++    emscripten_proxy_execute_queue(emscripten_proxy_get_system_queue());
++  }
++}
++
 +}
 diff --git a/src/cpp/emscripten/glfw3/EventQueue.h b/src/cpp/emscripten/glfw3/EventQueue.h
 new file mode 100644
-index 0000000..093b88d
+index 0000000..d7cf295
 --- /dev/null
 +++ b/src/cpp/emscripten/glfw3/EventQueue.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,69 @@
 +/*
 + * SPSC event ring used to move DOM events off the pthread proxy mailbox.
 + * Producer = main browser thread (HTML5 callbacks installed with
@@ -659,11 +670,17 @@ index 0000000..093b88d
 +  // worker thread: drain everything currently pending.
 +  void drain();
 +
++  // worker thread: block until a record is pending or iTimeoutMs has passed. Returns early on input (push wakes it) and
++  // after running work other threads proxied to this one. Never returns to the JS event loop.
++  void waitForEvents(double iTimeoutMs);
++
 +private:
 +  EventQueue() = default;
 +
 +  std::atomic<uint32_t> fHead{0};
 +  std::atomic<uint32_t> fTail{0};
++  // Bumped and futex-woken by every push: the word waitForEvents sleeps on.
++  std::atomic<uint32_t> fSeq{0};
 +  EventSlot fSlots[kEventQueueCapacity]{};
 +};
 +
@@ -1100,7 +1117,7 @@ index 0000000..defd350
 +
 +#endif // EMSCRIPTEN_GLFW3_GL_BACKEND_H
 diff --git a/src/cpp/glfw3.cpp b/src/cpp/glfw3.cpp
-index 8475a25..3d89616 100644
+index 8475a25..7becdb3 100644
 --- a/src/cpp/glfw3.cpp
 +++ b/src/cpp/glfw3.cpp
 @@ -19,7 +19,14 @@
@@ -1118,32 +1135,34 @@ index 8475a25..3d89616 100644
  #include "emscripten/glfw3/ErrorHandler.h"
  #include "emscripten/glfw3/Keyboard.h"
  
-@@ -117,6 +124,74 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
+@@ -117,6 +124,76 @@ static inline Joystick *getJoystick(glfw_joystick_id_t id)
  extern "C" {
  #endif
  
 +// The GL seam on mesa-wink (gl_backend.h). wink_emscripten_compat implements the WebGL-context-shaped calls on
 +// wink_init/wink_surface_create/wink_context_create; this file adds the proc-address entry points LWJGL resolves.
 +
-+// WINK_GL_MAIN=1: wink runs GL on the browser's main thread (WINK_INIT_GL_ON_MAIN_THREAD) -- this thread only records
-+// GL calls (Mesa's glthread) and the driver, the device and the canvas live on main, so the canvas must NOT have been
-+// transferred to this worker. The page decides both from one switch (ikvmcraft's index.ts sets the environment variable
-+// and window.WINK_GL_MAIN, which the canvas-transfer patch tests); this side only reads the variable.
++// wink runs GL on the browser's main thread (WINK_INIT_GL_ON_MAIN_THREAD) -- this thread only records GL calls (Mesa's
++// glthread) and the driver, the device and the canvas live on main, so the canvas must NOT have been transferred to this
++// worker. That is the only mode: GL on a worker suspends that worker through JSPI, and the runtime no longer wraps its
++// entry points in WebAssembly.promising. WINK_GL_MAIN=0 is refused loudly rather than failing later in wink_init.
 +int gl_backend_on_main(void)
 +{
-+  static int on = -1;
-+  if(on < 0)
++  static int checked = 0;
++  if(!checked)
 +  {
++    checked = 1;
 +    const char *v = getenv("WINK_GL_MAIN");
-+    on = v && *v == '1';
++    if(v && *v == '0')
++      emscripten_console_error("[wink] WINK_GL_MAIN=0 (GL on this worker) needs JSPI, which the runtime no longer has; "
++                               "GL runs on the main thread");
 +  }
-+  return on;
++  return 1;
 +}
 +
 +EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl_backend_webgl_create_context(const char *target, const EmscriptenWebGLContextAttributes *attributes)
 +{
-+  // wink_init (inside) requests the WebGPU device -- here, suspending through JSPI (the caller's stack must be
-+  // promising-entered), or on the main thread, waited for, with WINK_GL_MAIN.
++  // wink_init (inside) requests the WebGPU device on the main thread and waits for it there.
 +  // The default framebuffer keeps the alpha channel GLFW's hints ask for, and the canvas composites OPAQUE (wink's seam
 +  // default, wink_set_next_surface_transparent): a window ignores its framebuffer's alpha, and Minecraft clears to 0.
 +  wink_set_next_init_flags(gl_backend_on_main() ? WINK_INIT_GL_ON_MAIN_THREAD : 0);
@@ -1193,7 +1212,7 @@ index 8475a25..3d89616 100644
  //------------------------------------------------------------------------
  // glfwInit
  //------------------------------------------------------------------------
-@@ -1031,8 +1106,15 @@ GLFWAPI void glfwSwapInterval(int interval)
+@@ -1031,8 +1108,15 @@ GLFWAPI void glfwSwapInterval(int interval)
  //! glfwWaitEvents no access to even loop in emscripten/javascript
  GLFWAPI void glfwWaitEvents(void) { logNotImplemented("glfwWaitEvents"); }
  
@@ -1211,7 +1230,7 @@ index 8475a25..3d89616 100644
  
  //! glfwPostEmptyEvent no access to even loop in emscripten/javascript
  GLFWAPI void glfwPostEmptyEvent(void) { logNotImplemented("glfwPostEmptyEvent"); }
-@@ -1310,21 +1392,80 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
+@@ -1310,21 +1394,80 @@ EM_BOOL emscripten_glfw_is_runtime_platform_apple()
  //------------------------------------------------------------------------
  GLFWAPI const GLFWvidmode* glfwGetVideoModes(GLFWmonitor* monitor, int* count)
  {
@@ -1297,7 +1316,7 @@ index 8475a25..3d89616 100644
  GLFWAPI void glfwIconifyWindow(GLFWwindow* window) { logNotImplemented("glfwIconifyWindow"); }
  GLFWAPI void glfwRestoreWindow(GLFWwindow* window) { logNotImplemented("glfwRestoreWindow"); }
  GLFWAPI void glfwMaximizeWindow(GLFWwindow* window) { logNotImplemented("glfwMaximizeWindow"); }
-@@ -1336,7 +1477,19 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
+@@ -1336,7 +1479,19 @@ GLFWAPI GLFWwindowrefreshfun glfwSetWindowRefreshCallback(GLFWwindow* window, GL
  GLFWAPI GLFWwindowiconifyfun glfwSetWindowIconifyCallback(GLFWwindow* window, GLFWwindowiconifyfun callback) { logNotImplemented("glfwSetWindowIconifyCallback"); return callback; }
  GLFWAPI GLFWwindowmaximizefun glfwSetWindowMaximizeCallback(GLFWwindow* window, GLFWwindowmaximizefun callback) { logNotImplemented("glfwSetWindowMaximizeCallback"); return callback; }
  GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* window, GLFWdropfun callback) { logNotImplemented("glfwSetDropCallback"); return callback; }
@@ -1318,7 +1337,7 @@ index 8475a25..3d89616 100644
  // GLFWAPI GLFWglproc glfwGetProcAddress(const char* procname) { logNotImplemented("glfwGetProcAddress"); } implemented by emscripten GL
  GLFWAPI int glfwVulkanSupported(void) { return GLFW_FALSE; }
  GLFWAPI const char** glfwGetRequiredInstanceExtensions(uint32_t* count) { logNotImplemented("glfwGetRequiredInstanceExtensions"); *count = 0; return nullptr; }
-@@ -1509,4 +1662,34 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
+@@ -1509,4 +1664,34 @@ browser_key_fun_t GetPlatformBrowserKeyCallback()
    };
  }
  
@@ -1356,7 +1375,7 @@ index 8475a25..3d89616 100644
 +
 +}
 diff --git a/src/js/lib_emscripten_glfw3.js b/src/js/lib_emscripten_glfw3.js
-index 0cfd23c..e6addae 100644
+index 0cfd23c..89753bb 100644
 --- a/src/js/lib_emscripten_glfw3.js
 +++ b/src/js/lib_emscripten_glfw3.js
 @@ -517,6 +517,19 @@ let emscripten_glfw3_impl = {
@@ -1379,7 +1398,7 @@ index 0cfd23c..e6addae 100644
    //! emscripten_glfw3_context_set_title
    emscripten_glfw3_context_set_title__proxy: 'sync',
    emscripten_glfw3_context_set_title__sig: 'vp',
-@@ -814,6 +827,105 @@ let emscripten_glfw3_impl = {
+@@ -814,6 +827,52 @@ let emscripten_glfw3_impl = {
      return navigator.platform.indexOf("Mac") === 0 || navigator.platform === "iPhone";
    },
  
@@ -1429,59 +1448,6 @@ index 0cfd23c..e6addae 100644
 +    }
 +  },
 +
-+  emscripten_glfw3_context_jspi_settimeout: function() {
-+    // Yield the (deputy/render) wasm stack to the event loop, then resume. Prefer scheduler.yield() for
-+    // priority, but the promise MUST always settle: scheduler.yield() can be missing on a worker or
-+    // starved in a backgrounded/throttled tab, and if its continuation never runs the JSPI-suspended
-+    // wasm stack parks FOREVER (empty event loop -> thread unpausable, no error, no onerror) and the GC
-+    // then stalls 20s trying to suspend it. Arm a setTimeout fallback that can't be deferred forever.
-+    return new Promise(function(r) {
-+      var settled = false;
-+      var done = function() { if (!settled) { settled = true; r(); } };
-+      try {
-+        if (typeof scheduler !== 'undefined' && scheduler.yield) scheduler.yield().then(done, done);
-+        else setTimeout(done, 0);
-+      } catch (e) { setTimeout(done, 0); }
-+      setTimeout(done, 1000); // safety: resume even if the primary yield never fires (hidden/frozen tab)
-+    });
-+  },
-+  emscripten_glfw3_context_jspi_settimeout__postset: '_emscripten_glfw3_context_jspi_settimeout = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_settimeout);',
-+
-+  emscripten_glfw3_context_jspi_posttask: function() {
-+    // vsync-off swap: yield at NORMAL priority. A scheduler.yield() continuation always runs ahead of the
-+    // worker's normal tasks (Chromium's selector has no cross-priority anti-starvation), and outside rAF an
-+    // OffscreenCanvas frame is only pushed from the OnBeginFrame IPC, a normal task. A loop that only ever
-+    // scheduler.yield()s therefore never presents. A user-visible postTask queues behind pending normal
-+    // tasks (oldest first at equal priority), so each swap lets BeginFrame/frame-ack run. Timers share that
-+    // priority, so a setTimeout safety net couldn't fire where this doesn't; it's only the fallback.
-+    return new Promise(function(r) {
-+      try {
-+        if (typeof scheduler !== 'undefined' && scheduler.postTask) { scheduler.postTask(r, { priority: 'user-visible' }); return; }
-+      } catch (e) {}
-+      setTimeout(r, 0);
-+    });
-+  },
-+  emscripten_glfw3_context_jspi_posttask__postset: '_emscripten_glfw3_context_jspi_posttask = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_posttask);',
-+
-+  emscripten_glfw3_context_jspi_sleep: function(ms) {
-+    // glfwWaitEventsTimeout: suspend for `ms` instead of spinning; the worker's normal tasks run meanwhile.
-+    return new Promise(function(r) { setTimeout(r, ms); });
-+  },
-+  emscripten_glfw3_context_jspi_sleep__postset: '_emscripten_glfw3_context_jspi_sleep = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_sleep);',
-+
-+  emscripten_glfw3_context_jspi_raf: function() {
-+    // vsync swap: resume on the next animation frame. requestAnimationFrame NEVER fires in a hidden/
-+    // occluded/throttled tab (and isn't a worker global everywhere), which would park the JSPI-suspended
-+    // wasm stack forever (see settimeout note). rAF stays the fast path when visible (fires in ~16ms and
-+    // wins the race); the setTimeout fallback guarantees the suspend resumes when rAF is dead.
-+    return new Promise(function(r) {
-+      var settled = false;
-+      var done = function() { if (!settled) { settled = true; r(); } };
-+      try { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(done); } catch (e) {}
-+      setTimeout(done, 1000); // safety: resume even if rAF never fires (hidden/frozen tab)
-+    });
-+  },
-+  emscripten_glfw3_context_jspi_raf__postset: '_emscripten_glfw3_context_jspi_raf = new WebAssembly.Suspending(_emscripten_glfw3_context_jspi_raf);',
  }
  
  autoAddDeps(emscripten_glfw3_impl, '$GLFW3')

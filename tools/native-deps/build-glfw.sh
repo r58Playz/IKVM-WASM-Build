@@ -13,7 +13,7 @@
 #   lib_emscripten_glfw3.js            GLFW's JS library
 #   wink-js/NN-<name>.js               wink's --js-library files, numbered in the order the link must pass them
 #
-# Both GLFW and wink are compiled with upstream emsdk 3.1.56; the app links them with .NET's emsdk (wink/README.md).
+# Both GLFW and wink are compiled with the emsdk the app links with: .NET 11's emscripten 6.0.3 (the frozen statics/emsdk).
 
 set -euo pipefail
 
@@ -21,12 +21,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
 
 EMSCRIPTEN_GLFW_REPO="https://github.com/pongasoft/emscripten-glfw.git"
-# Latest emscripten-glfw release verified to build with emsdk 3.1.56.
+# The emscripten-glfw release the patch is written against.
 EMSCRIPTEN_GLFW_REF="${EMSCRIPTEN_GLFW_REF:-v3.4.0.20250607}"
 EMSCRIPTEN_GLFW_PATCH="${EMSCRIPTEN_GLFW_PATCH:-$SCRIPT_DIR/emscripten-glfw.patch}"
 
 MESA_WINK_REPO="${MESA_WINK_REPO:-https://github.com/MercuryWorkshop/mesa-wink.git}"
-MESA_WINK_REF="${MESA_WINK_REF:-51eb6bdb32520dc3c50fee1d94242ae099bd6bac}"
+MESA_WINK_REF="${MESA_WINK_REF:-8c5e9322e5e85a539ecbbab8c0905a8175526372}"
 # Like IKVM_DIR, this can point at an existing working checkout.
 WINK_SRC_DIR="${MESA_WINK_DIR:-$WORKSPACE/mesa-wink}"
 

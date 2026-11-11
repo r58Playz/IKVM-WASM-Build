@@ -17,7 +17,7 @@ LWJGL_REPO="https://github.com/LWJGL/lwjgl3.git"
 # for resize2) and the boolean TinyFileDialogs.tinyfd_messageBox overload.
 LWJGL_REF="${LWJGL_REF:-3.4.2}"
 LWJGL_PATCH="${LWJGL_PATCH:-$SCRIPT_DIR/lwjgl3.patch}"
-EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-3.1.56}"
+EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-6.0.3}"
 ANT_VERSION="${ANT_VERSION:-1.10.15}"
 ANT_BASE_URL="${ANT_BASE_URL:-https://archive.apache.org/dist/ant/binaries}"
 ANT_CACHE_ROOT="${ANT_CACHE_ROOT:-$WORKSPACE/.cache}"
@@ -269,7 +269,7 @@ require_cmd javac
 require_cmd jar
 
 EMCC_VERSION_LINE="$(emcc --version | sed -n '1p')"
-if [ -n "$EXPECTED_EMSDK_VERSION" ] && ! printf '%s' "$EMCC_VERSION_LINE" | grep -q " $EXPECTED_EMSDK_VERSION "; then
+if [ -n "$EXPECTED_EMSDK_VERSION" ] && ! printf '%s' "$EMCC_VERSION_LINE" | grep -qE " $EXPECTED_EMSDK_VERSION[ -]"; then
     echo "ERROR: emcc version mismatch. Expected emsdk $EXPECTED_EMSDK_VERSION, got: $EMCC_VERSION_LINE" >&2
     exit 1
 fi

@@ -7,10 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
 
 LIBFFI_REPO="https://github.com/libffi/libffi"
-# libffi 3.5.2 is the latest release and builds with emsdk 3.1.56.
+# libffi 3.5.2 is the latest release; built with the .NET 11 emsdk (emscripten 6.0.3, the frozen statics/emsdk).
 LIBFFI_REF="${LIBFFI_REF:-v3.5.2}"
 LIBFFI_PATCH="${LIBFFI_PATCH:-$SCRIPT_DIR/libffi.patch}"
-EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-3.1.56}"
+EXPECTED_EMSDK_VERSION="${EXPECTED_EMSDK_VERSION:-6.0.3}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 VARIANT="${VARIANT:-mt}"
@@ -98,7 +98,7 @@ require_cmd emmake
 require_cmd make
 
 EMCC_VERSION_LINE="$(emcc --version | sed -n '1p')"
-if [ -n "$EXPECTED_EMSDK_VERSION" ] && ! printf '%s' "$EMCC_VERSION_LINE" | grep -q " $EXPECTED_EMSDK_VERSION "; then
+if [ -n "$EXPECTED_EMSDK_VERSION" ] && ! printf '%s' "$EMCC_VERSION_LINE" | grep -qE " $EXPECTED_EMSDK_VERSION[ -]"; then
     echo "ERROR: emcc version mismatch. Expected emsdk $EXPECTED_EMSDK_VERSION, got: $EMCC_VERSION_LINE" >&2
     exit 1
 fi

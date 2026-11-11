@@ -1,7 +1,7 @@
 name: IKVM WASM Build
 
 env:
-  EMSDK_VERSION: 3.1.56
+  EMSDK_VERSION: 6.0.3
   IKVM_REPO: https://github.com/r58playz/ikvm.git
   IKVM_REF: wasm
   IKVM_VERSION: 8.14.0

@@ -116,11 +116,13 @@ VERSION_CFLAGS=(
 # The flags of every JDK library (targets/openjdk25.lib.props has the same for the native targets). The JNI headers
 # are the JDK's: jni_md.h types jlong by _LP64, which wasm32 does not define. emscripten does not define __linux__,
 # which the JDK's Linux code is conditional on; emscripten-stubs has the Linux headers emscripten lacks (linux/fs.h,
-# sys/epoll.h, ...). The final wasm link uses -fwasm-exceptions, which makes setjmp/longjmp (libjavajpeg's and
-# FreeType's error handling) wasm EH; every object is built that way so none emits the emscripten_longjmp shim.
+# sys/inotify.h, ...). epoll, eventfd and sockets are real: FNA-WASM-Build's emsdk.12 implements them in WasmFS. The final wasm link uses -fwasm-exceptions, which makes setjmp/longjmp (libjavajpeg's and
+# FreeType's error handling) wasm EH; every object is built that way so none emits the emscripten_longjmp shim. And in
+# the standardized (exnref) form, -sWASM_LEGACY_EXCEPTIONS=0, as .NET 11 links: emscripten picks the EH encoding at
+# COMPILE time (tools/building.py, -wasm-use-legacy-eh), its default is legacy, and V8 rejects a module that mixes them.
 
 COMMON_FLAGS=(
-    -O2 -fPIC -pthread -fwasm-exceptions -fno-strict-aliasing
+    -O2 -fPIC -pthread -fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0 -fno-strict-aliasing
     -Wno-error -Wno-error=implicit-function-declaration -Wno-error=int-conversion
     -Wno-error=incompatible-function-pointer-types -Wno-deprecated-non-prototype
 )
@@ -477,7 +479,7 @@ mkdir -p "$TMP_DIR/libfreetype"
 LIBFT_OBJS=()
 for rel in "${LIBFT_SRCS[@]}"; do
     base="${rel##*/}"
-    run_compile emcc -O2 -fPIC -pthread -fwasm-exceptions -Wno-error -std=c99 \
+    run_compile emcc -O2 -fPIC -pthread -fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0 -Wno-error -std=c99 \
         -DFT2_BUILD_LIBRARY -DHAVE_UNISTD_H -DHAVE_FCNTL_H -I"$FREETYPE_DIR/include" \
         -c "$FREETYPE_DIR/$rel" -o "$TMP_DIR/libfreetype/${base%.c}.o"
     LIBFT_OBJS+=("$TMP_DIR/libfreetype/${base%.c}.o")

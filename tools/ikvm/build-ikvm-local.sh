@@ -14,7 +14,7 @@ IKVM_VERSION="${IKVM_VERSION:-8.14.0}"
 # Must satisfy the checkout's global.json sdk pin (10.0.x on the fork's base).
 DOTNET_CHANNEL="${DOTNET_CHANNEL:-10.0}"
 NATIVE_SDK_VERSION="${NATIVE_SDK_VERSION:-20251124.1}"
-EMSDK_VERSION="${EMSDK_VERSION:-3.1.56}"
+EMSDK_VERSION="${EMSDK_VERSION:-6.0.3}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
 # Where the fork gets cloned. Override to build from an existing checkout.
