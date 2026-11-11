@@ -3,6 +3,8 @@
 /.nuget
 /tools/ikvm/ikvm
 /tools/ikvm/out
+/tools/ikvm/.emsdk
+/tools/ikvm/.emsdk-download.*
 /tools/native-deps/emscripten-glfw
 /tools/native-deps/libffi
 /tools/native-deps/lwjgl3

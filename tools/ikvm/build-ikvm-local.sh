@@ -14,7 +14,13 @@ IKVM_VERSION="${IKVM_VERSION:-8.14.0}"
 # Must satisfy the checkout's global.json sdk pin (10.0.x on the fork's base).
 DOTNET_CHANNEL="${DOTNET_CHANNEL:-10.0}"
 NATIVE_SDK_VERSION="${NATIVE_SDK_VERSION:-20251124.1}"
-EMSDK_VERSION="${EMSDK_VERSION:-6.0.3}"
+# The natives compile with FNA-WASM-Build's frozen emsdk (its release's emsdk.zip): .NET's emsdk with that repo's
+# patches, the one the app links with. Stock emsdk lacks what the patches add, e.g. <sys/eventfd.h> (emsdk.12.patch:
+# WasmFS sockets, epoll and eventfd), which libnio includes. A release tag, or "latest".
+FNA_WASM_RELEASE="${FNA_WASM_RELEASE:-latest}"
+FNA_WASM_REPO_URL="https://github.com/r58Playz/FNA-WASM-Build"
+# An existing frozen emsdk to use instead (e.g. an app's unpacked emsdk.zip); it is not downloaded or replaced.
+USER_EMSDK_DIR="${EMSDK_DIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="$SCRIPT_DIR"
 # Where the fork gets cloned. Override to build from an existing checkout.
@@ -452,27 +458,56 @@ else
 
     # ── emsdk setup ───────────────────────────────────────────────────────────
 
-    EMSDK_DIR="$WORKSPACE/.emsdk"
-
-    if emcc --version 2>/dev/null | grep -q "$EMSDK_VERSION"; then
-        log "emsdk $EMSDK_VERSION already active."
+    if [ -n "$USER_EMSDK_DIR" ]; then
+        EMSDK_DIR="$(cd "$USER_EMSDK_DIR" && pwd)"
+        log "Using the emsdk in $EMSDK_DIR"
     else
-        log "Setting up emsdk $EMSDK_VERSION in $EMSDK_DIR ..."
-        if [ ! -d "$EMSDK_DIR/.git" ]; then
-            git clone https://github.com/emscripten-core/emsdk.git "$EMSDK_DIR"
+        require_cmd unzip
+        EMSDK_DIR="$WORKSPACE/.emsdk"
+        # "latest" resolves to the tag it redirects to, so the marker names the release the directory holds
+        release="$FNA_WASM_RELEASE"
+        if [ "$release" = "latest" ]; then
+            release="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$FNA_WASM_REPO_URL/releases/latest")"
+            release="${release##*/}"
         fi
-        "$EMSDK_DIR/emsdk" install "$EMSDK_VERSION"
-        "$EMSDK_DIR/emsdk" activate "$EMSDK_VERSION"
+        if [ -z "$release" ] || [ "$release" = "latest" ]; then
+            echo "ERROR: could not resolve the latest $FNA_WASM_REPO_URL release" >&2
+            exit 1
+        fi
+        marker="$EMSDK_DIR/.fna-wasm-release"
+        if [ -f "$marker" ] && [ "$(cat "$marker")" = "$release" ]; then
+            log "FNA-WASM-Build $release emsdk already present."
+        else
+            log "Downloading FNA-WASM-Build $release emsdk.zip ..."
+            emsdk_tmp="$(mktemp -d "$WORKSPACE/.emsdk-download.XXXXXX")"
+            curl -fsSL --retry 3 -o "$emsdk_tmp/emsdk.zip" "$FNA_WASM_REPO_URL/releases/download/$release/emsdk.zip"
+            unzip -q "$emsdk_tmp/emsdk.zip" -d "$emsdk_tmp"
+            rm -rf "$EMSDK_DIR"
+            mv "$emsdk_tmp/emsdk" "$EMSDK_DIR"
+            rm -rf "$emsdk_tmp"
+            printf '%s\n' "$release" > "$marker"
+        fi
     fi
 
-    if [ -f "$EMSDK_DIR/emsdk_env.sh" ]; then
-        # shellcheck source=/dev/null
-        source "$EMSDK_DIR/emsdk_env.sh"
-    fi
+    # The frozen emsdk's config and cache are its own; another emsdk's environment would point emcc elsewhere.
+    unset EM_CONFIG EM_CACHE EMSDK EMSDK_NODE EMSDK_PYTHON
+    # shellcheck source=/dev/null
+    source "$EMSDK_DIR/emsdk_env.sh" >/dev/null
 
     require_cmd emcc
     require_cmd em++
     require_cmd emar
+
+    if [ "$(realpath "$(command -v emcc)")" != "$(realpath "$EMSDK_DIR/emscripten/emcc")" ]; then
+        echo "ERROR: emcc resolves to $(command -v emcc), not $EMSDK_DIR/emscripten/emcc" >&2
+        exit 1
+    fi
+    if [ ! -f "$EMSDK_DIR/emscripten/cache/sysroot/include/sys/eventfd.h" ]; then
+        echo "ERROR: the emsdk in $EMSDK_DIR lacks FNA-WASM-Build's patches (no <sys/eventfd.h>, emsdk.12.patch)." >&2
+        echo "       Use a release that has them: FNA_WASM_RELEASE=<tag>, or EMSDK_DIR=<frozen emsdk>." >&2
+        exit 1
+    fi
+    log "Using $(emcc --version | head -n 1)"
 
     if [ "$CLEAN_NATIVE" = "true" ]; then
         log "Cleaning native output directory ..."

@@ -2,6 +2,8 @@ name: IKVM WASM Build
 
 env:
   EMSDK_VERSION: 6.0.3
+  # The IKVM natives build with this FNA-WASM-Build release's frozen (patched) emsdk.zip; a release tag, or "latest".
+  FNA_WASM_RELEASE: latest
   IKVM_REPO: https://github.com/r58playz/ikvm.git
   IKVM_REF: wasm
   IKVM_VERSION: 8.14.0
@@ -47,10 +49,7 @@ jobs:
           distribution: temurin
           java-version: '25'
 
-      - name: Setup emsdk
-        uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: ${{ env.EMSDK_VERSION }}
+      # No setup-emsdk: build-ikvm-local.sh fetches FNA-WASM-Build's patched emsdk (stock emsdk has no <sys/eventfd.h>).
 
       # mono and clang for IKVM; the rest is what the JDK's configure checks for on Linux.
       - name: Install Build Prereqs
